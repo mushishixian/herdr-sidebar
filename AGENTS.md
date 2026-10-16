@@ -1412,6 +1412,16 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   first-run Nerd Font prompt (curl+unzip path), heartbeat tokens,
   herdr-notes toggle.
 
+### Session-modal file search popup (Ctrl+Q Quick Open)
+
+- `herdr-sidebar --file-popup` (behind `[[panes]] id = "file-search"`) provides a session-modal
+  floating popup (placement `popup`, 70%x60%) for fuzzy file search. Invoked globally via action
+  `herdr-sidebar.file-search` (`--file-popup-open`, bound to `ctrl+q` host key in `config.toml`).
+- `--file-popup-open` captures `HERDR_CALLER_PANE_ID` and `SPAWN_CWD_ENV` from the focused pane.
+  File collection runs asynchronously on a background worker with `collect_quick_files` (skips `.git`,
+  respects `.gitignore`). Selecting a file opens it in the caller's workspace/tab via `viewer::open_in_pane`
+  (or configured custom editor) and exits, closing the popup. Both `Esc` and `Ctrl+Q` cancel.
+
 ## Herdr workspace
 
 `herdr-layout.yaml` at the repo root describes the workspace (Coordinator tab running claude,

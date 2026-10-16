@@ -84,6 +84,21 @@ placement = "popup"
 command = ["./target/release/herdr-sidebar", "--git-popup", "history"]
 platforms = ["linux", "macos"]
 
+# File search as a session-modal popup.
+[[panes]]
+id = "file-search"
+title = "Search files"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--file-popup"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "file-search"
+platforms = ["linux", "macos"]
+title = "Quick Open (Popup)"
+description = "Popup: quickly search and open files in current workspace/repo."
+command = ["./target/release/herdr-sidebar", "--file-popup-open"]
+
 [[actions]]
 id = "git-switch-branch"
 platforms = ["linux", "macos"]
