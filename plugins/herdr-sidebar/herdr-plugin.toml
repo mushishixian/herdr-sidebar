@@ -50,6 +50,52 @@ placement = "split"
 command = ["./target/release/herdr-sidebar", "--view", "git"]
 platforms = ["linux", "macos"]
 
+# Branch operations as session-modal popups (fork: fresh-inline-editor).
+# The actions open these panes in the focused pane's repository; bind them to
+# host keys in config.toml, e.g. key = "ctrl+shift+c", type = "plugin_action",
+# command = "herdr-sidebar.git-switch-branch".
+[[panes]]
+id = "git-switch"
+title = "Switch branch"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--git-popup", "switch"]
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "git-rename"
+title = "Rename branch"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--git-popup", "rename"]
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "git-merge"
+title = "Merge branch"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--git-popup", "merge"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "git-switch-branch"
+platforms = ["linux", "macos"]
+title = "Switch branch"
+description = "Popup: pick (or create) a branch and check it out."
+command = ["./target/release/herdr-sidebar", "--git-popup-open", "switch"]
+
+[[actions]]
+id = "git-rename-branch"
+platforms = ["linux", "macos"]
+title = "Rename branch"
+description = "Popup: rename the current branch."
+command = ["./target/release/herdr-sidebar", "--git-popup-open", "rename"]
+
+[[actions]]
+id = "git-merge-branch"
+platforms = ["linux", "macos"]
+title = "Merge branch into current"
+description = "Popup: pick a branch and merge it into the current branch."
+command = ["./target/release/herdr-sidebar", "--git-popup-open", "merge"]
+
 # Toggle the sidebar: open at the configured dock edge / focus / close.
 [[actions]]
 id = "open-sidebar"

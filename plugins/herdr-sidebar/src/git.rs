@@ -59,6 +59,16 @@ pub enum DeleteRefused {
     Failed(String),
 }
 
+/// How a [`Git::merge_branch`] ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// Merged (or fast-forwarded, or already up to date); git's summary.
+    Done(String),
+    /// git stopped with conflicts in these paths. The merge is in progress:
+    /// resolve and commit, or [`Git::merge_abort`].
+    Conflicts(Vec<String>),
+}
+
 /// What one [`Git::stage_under`] call did: how many paths it staged, and how
 /// many it deliberately left alone because they live at or inside a NESTED
 /// repository. The second number is what lets the UI explain a stage that
@@ -530,6 +540,12 @@ impl Git {
     /// silently reset, and a dirty worktree carries over exactly as it does
     /// for [`Self::checkout_branch`].
     pub fn create_branch(&self, name: &str) -> Result<(), String> {
+        let name = self.valid_new_branch_name(name)?;
+        run_in(&self.root, &["switch", "-c", name]).map(drop)
+    }
+
+    /// `name` trimmed, if git accepts it as a new branch name.
+    fn valid_new_branch_name<'a>(&self, name: &'a str) -> Result<&'a str, String> {
         let name = name.trim();
         if name.is_empty() {
             return Err("branch name is empty".to_string());
@@ -546,7 +562,58 @@ impl Git {
         if name.starts_with("refs/") {
             return Err("enter the branch name without a refs/ prefix".into());
         }
-        run_in(&self.root, &["switch", "-c", name]).map(drop)
+        Ok(name)
+    }
+
+    /// The checked-out branch; `None` on a detached HEAD.
+    pub fn current_branch(&self) -> Option<String> {
+        run_in(&self.root, &["symbolic-ref", "--short", "-q", "HEAD"])
+            .ok()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+    }
+
+    /// `branch -m old new`. Refuses to overwrite an existing branch (no -M);
+    /// git moves the upstream and reflog along with it.
+    pub fn rename_branch(&self, old: &str, new: &str) -> Result<(), String> {
+        let new = self.valid_new_branch_name(new)?;
+        if new == old {
+            return Ok(());
+        }
+        run_in(&self.root, &["branch", "-m", old, new]).map(drop)
+    }
+
+    /// Merge `name` into the current branch, committing with git's default
+    /// message when it is not a fast-forward. A dirty worktree that the merge
+    /// would touch is refused by git and reported as Err, with nothing done.
+    pub fn merge_branch(&self, name: &str) -> Result<MergeOutcome, String> {
+        let merge = git_command(
+            &self.root,
+            &["merge", "--no-edit", "--end-of-options", name],
+        )
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+        if merge.status.success() {
+            let summary = String::from_utf8_lossy(&merge.stdout).trim().to_string();
+            return Ok(MergeOutcome::Done(summary));
+        }
+        if self.merge_in_progress() {
+            let conflicted =
+                run_in(&self.root, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+            return Ok(MergeOutcome::Conflicts(
+                conflicted.lines().map(str::to_string).collect(),
+            ));
+        }
+        command_result(merge.status, merge.stdout, merge.stderr)
+            .map(|_| MergeOutcome::Done(String::new()))
+    }
+
+    pub fn merge_in_progress(&self) -> bool {
+        run_in(&self.root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
+    }
+
+    pub fn merge_abort(&self) -> Result<(), String> {
+        run_in(&self.root, &["merge", "--abort"]).map(drop)
     }
 
     /// Checkout one picker entry. Remote refs become ordinary local tracking
@@ -1333,6 +1400,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(&git.root);
     }
 
+    fn commit_file(git: &Git, file: &str, body: &str, message: &str) {
+        std::fs::write(git.root.join(file), body).unwrap();
+        run_in(&git.root, &["add", file]).unwrap();
+        run_in(
+            &git.root,
+            &[
+                "-c",
+                "user.email=t@t.dev",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rename_branch_moves_the_current_branch_and_refuses_clobbering() {
+        let git = repo_with_head("rename-branch");
+        let original = git.current_branch().unwrap();
+        run_in(&git.root, &["branch", "taken"]).unwrap();
+        assert!(
+            git.rename_branch(&original, "taken").is_err(),
+            "no -M overwrite"
+        );
+        assert!(git.rename_branch(&original, "bad..name").is_err());
+        git.rename_branch(&original, " renamed ").unwrap();
+        assert_eq!(git.current_branch().as_deref(), Some("renamed"));
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    #[test]
+    fn merge_branch_reports_done_and_conflicts_and_can_abort() {
+        let git = repo_with_head("merge-branch");
+        let main = git.current_branch().unwrap();
+        commit_file(&git, "f.txt", "base\n", "base");
+        run_in(&git.root, &["switch", "-q", "-c", "clean"]).unwrap();
+        commit_file(&git, "other.txt", "x\n", "clean change");
+        run_in(&git.root, &["switch", "-q", &main]).unwrap();
+        assert!(matches!(
+            git.merge_branch("clean"),
+            Ok(MergeOutcome::Done(_))
+        ));
+        assert!(git.root.join("other.txt").exists());
+
+        run_in(&git.root, &["switch", "-q", "-c", "clash"]).unwrap();
+        commit_file(&git, "f.txt", "theirs\n", "theirs");
+        run_in(&git.root, &["switch", "-q", &main]).unwrap();
+        commit_file(&git, "f.txt", "ours\n", "ours");
+        assert_eq!(
+            git.merge_branch("clash"),
+            Ok(MergeOutcome::Conflicts(vec!["f.txt".to_string()]))
+        );
+        assert!(git.merge_in_progress());
+        git.merge_abort().unwrap();
+        assert!(!git.merge_in_progress());
+        assert!(git.merge_branch("no-such-branch").is_err());
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
     #[test]
     fn create_branch_makes_and_switches_to_the_new_branch() {
         let git = repo_with_head("create-branch");
@@ -1608,7 +1738,17 @@ mod tests {
             "a second process must skip an outstanding scan"
         );
         drop(first);
-        IgnoredScanLock::acquire(&root).unwrap();
+        // A git child spawned by a parallel test can briefly hold an inherited
+        // copy of the lock's file descriptor until it execs, so the release is
+        // only guaranteed shortly after the drop.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while IgnoredScanLock::acquire(&root).is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "the lock must be free after the drop"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
