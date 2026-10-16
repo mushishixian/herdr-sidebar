@@ -103,6 +103,17 @@ pub fn report_identity_checked(
 /// Mark the brief interval before a TUI reaches its event loop. Windows calls
 /// this after a raw split; directly spawned Unix TUIs call it immediately on
 /// process startup. The first full identity report clears the marker.
+/// Ask herdr to deliver plain right-clicks in `pane_id` to this process
+/// instead of opening herdr's pane menu (the pane border still opens it), so
+/// the Explorer and Source Control context menus open on a normal
+/// right-click.
+pub fn route_right_click_to_pane(pane_id: &str) {
+    let _ = call_text(
+        "pane.input.set",
+        serde_json::json!({ "pane_id": pane_id, "right_click": "pane" }),
+    );
+}
+
 pub fn report_starting_identity(
     pane_id: &str,
     my: crate::state::View,

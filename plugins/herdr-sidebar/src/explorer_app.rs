@@ -1369,7 +1369,12 @@ impl App {
         let in_repo = target
             .as_ref()
             .is_some_and(|(path, _)| Git::owner_of(path).is_ok());
-        let entries = actions::menu_entries(target.as_ref().map(|(_, is_dir)| *is_dir), in_repo);
+        let entries = actions::menu_entries_with(
+            target.as_ref().map(|(_, is_dir)| *is_dir),
+            in_repo,
+            actions::configured_editor().is_some(),
+            actions::load_file_clip().is_some(),
+        );
         let selected = entries
             .iter()
             .position(|e| matches!(e, MenuEntry::Action(..)))
@@ -2863,6 +2868,58 @@ impl App {
             }
             MenuAction::ChangeFolder => self.change_folder_dialog(),
             MenuAction::ChangeFolderTyped => self.change_folder_prompt(),
+            MenuAction::OpenInEditor => {
+                let Some((path, _)) = target else { return };
+                self.open_custom_editor(&path);
+            }
+            MenuAction::Cut | MenuAction::Copy => {
+                let Some((path, _)) = target else { return };
+                let cut = action == MenuAction::Cut;
+                let name = path
+                    .file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy()
+                    .into_owned();
+                actions::save_file_clip(Some(&actions::FileClip { path, cut }));
+                self.notice = Some(format!(
+                    "{}: {name} — right-click a folder → Paste",
+                    if cut { "cut" } else { "copied" }
+                ));
+            }
+            MenuAction::Paste => {
+                let Some(clip) = actions::load_file_clip() else {
+                    self.notice = Some("nothing to paste".into());
+                    return;
+                };
+                match actions::paste(&clip, &create_dir) {
+                    Ok(landed) => {
+                        if clip.cut {
+                            actions::save_file_clip(None);
+                        }
+                        self.show_new_path(&create_dir, &landed);
+                    }
+                    Err(err) => self.notice = Some(format!("paste failed: {err}")),
+                }
+            }
+            MenuAction::Duplicate => {
+                let Some((path, _)) = target else { return };
+                match actions::duplicate(&path) {
+                    Ok(copy) => {
+                        let dir = copy.parent().map(Path::to_path_buf).unwrap_or_default();
+                        self.show_new_path(&dir, &copy);
+                    }
+                    Err(err) => self.notice = Some(format!("duplicate failed: {err}")),
+                }
+            }
+        }
+    }
+
+    /// After a paste or duplicate: open its folder, refresh, select the result.
+    fn show_new_path(&mut self, dir: &Path, path: &Path) {
+        self.tree.expand(dir);
+        self.refresh_tree();
+        if let Some(index) = self.rows.iter().position(|r| r.path == path) {
+            self.select(index);
         }
     }
 
@@ -3338,7 +3395,7 @@ impl App {
         frame.render_widget(Paragraph::new(footer_lines), footer_content);
         if menu_hint {
             frame.render_widget(
-                Paragraph::new("m / ctrl+rclick for menus")
+                Paragraph::new("right-click / m for menus")
                     .style(Style::default().fg(Color::DarkGray))
                     .alignment(Alignment::Right),
                 footer_content,
@@ -3370,7 +3427,7 @@ impl App {
                 1,
             );
             frame.render_widget(
-                Paragraph::new(" m / ctrl+rclick: menu".dim().italic()),
+                Paragraph::new(" right-click / m: menu".dim().italic()),
                 hint_area,
             );
         }

@@ -13,6 +13,13 @@ pub enum MenuAction {
     CopyRelativePath,
     Rename,
     Delete,
+    /// Hand the file to the configured custom editor (fork).
+    OpenInEditor,
+    /// The Explorer's own file clipboard (fork): cut / copy, then paste.
+    Cut,
+    Copy,
+    Paste,
+    Duplicate,
     /// `git add` the target — the Explorer's staging entry (issue #20).
     Stage,
     OpenExternal,
@@ -36,15 +43,49 @@ pub enum MenuEntry {
 /// inside a git repository, so the entry never offers an action that can only
 /// fail.
 pub fn menu_entries(target: Option<bool>, in_repo: bool) -> Vec<MenuEntry> {
+    menu_entries_with(target, in_repo, false, false)
+}
+
+/// [`menu_entries`] plus the fork's entries: "Open in Editor" when a custom
+/// editor is configured, Cut / Copy / Duplicate for a row, and Paste while
+/// the Explorer clipboard holds something.
+pub fn menu_entries_with(
+    target: Option<bool>,
+    in_repo: bool,
+    editor: bool,
+    can_paste: bool,
+) -> Vec<MenuEntry> {
     let mut entries = vec![
         MenuEntry::Action(MenuAction::NewFile, "New File…"),
         MenuEntry::Action(MenuAction::NewFolder, "New Folder…"),
     ];
     if target == Some(false) {
+        entries.push(MenuEntry::Separator);
+        if editor {
+            entries.push(MenuEntry::Action(
+                MenuAction::OpenInEditor,
+                "Open in Editor",
+            ));
+        }
+        entries.push(MenuEntry::Action(
+            MenuAction::OpenExternal,
+            "Open with Default App",
+        ));
+    }
+    if target.is_some() || can_paste {
+        entries.push(MenuEntry::Separator);
+    }
+    if target.is_some() {
         entries.extend([
-            MenuEntry::Separator,
-            MenuEntry::Action(MenuAction::OpenExternal, "Open with Default App"),
+            MenuEntry::Action(MenuAction::Cut, "Cut"),
+            MenuEntry::Action(MenuAction::Copy, "Copy"),
         ]);
+    }
+    if can_paste {
+        entries.push(MenuEntry::Action(MenuAction::Paste, "Paste"));
+    }
+    if target.is_some() {
+        entries.push(MenuEntry::Action(MenuAction::Duplicate, "Duplicate"));
     }
     if target.is_some() && in_repo {
         entries.extend([
@@ -109,6 +150,139 @@ pub fn rename(path: &Path, new_name: &str) -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
     let target = fresh_path(parent, new_name)?;
     std::fs::rename(path, &target)?;
+    Ok(target)
+}
+
+/// What the Explorer clipboard holds: a path and whether paste moves it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileClip {
+    pub path: PathBuf,
+    pub cut: bool,
+}
+
+fn file_clip_path() -> Option<PathBuf> {
+    Some(crate::state::state_dir()?.join("file-clipboard.json"))
+}
+
+/// Shared by every sidebar (all tabs), so copy in one and paste in another.
+pub fn save_file_clip(clip: Option<&FileClip>) {
+    let Some(path) = file_clip_path() else { return };
+    match clip {
+        Some(clip) => {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let json = serde_json::json!({ "path": clip.path, "cut": clip.cut });
+            let _ = std::fs::write(path, json.to_string());
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// The clipboard entry, if its source still exists.
+pub fn load_file_clip() -> Option<FileClip> {
+    let text = std::fs::read_to_string(file_clip_path()?).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let path = PathBuf::from(value.get("path")?.as_str()?);
+    let cut = value.get("cut").and_then(|v| v.as_bool()).unwrap_or(false);
+    path.symlink_metadata().ok()?;
+    Some(FileClip { path, cut })
+}
+
+/// A free name in `dir` for a copy of `name`: the name itself if free, else
+/// `stem copy.ext`, `stem copy 2.ext`, … (VS Code's scheme).
+pub fn copy_name(dir: &Path, name: &str, force_copy: bool) -> PathBuf {
+    let plain = dir.join(name);
+    if !force_copy && plain.symlink_metadata().is_err() {
+        return plain;
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
+        _ => (name, ""),
+    };
+    (1..)
+        .map(|n| {
+            let suffix = if n == 1 {
+                " copy".to_string()
+            } else {
+                format!(" copy {n}")
+            };
+            dir.join(format!("{stem}{suffix}{ext}"))
+        })
+        .find(|candidate| candidate.symlink_metadata().is_err())
+        .expect("an unbounded range always yields a free name")
+}
+
+fn copy_recursive(from: &Path, to: &Path) -> io::Result<()> {
+    let meta = from.symlink_metadata()?;
+    if meta.file_type().is_symlink() {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(std::fs::read_link(from)?, to);
+        #[cfg(not(unix))]
+        return std::fs::copy(from, to).map(drop);
+    }
+    if meta.is_dir() {
+        std::fs::create_dir(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(drop)
+    }
+}
+
+/// Paste `clip` into `dir`; returns where it landed. A copy never overwrites
+/// (it picks a `copy` name); a cut refuses when the name is taken, and moving
+/// a folder into itself is refused either way.
+pub fn paste(clip: &FileClip, dir: &Path) -> io::Result<PathBuf> {
+    let name = clip
+        .path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "nothing to paste"))?
+        .to_string_lossy()
+        .into_owned();
+    let source = clip.path.canonicalize()?;
+    let dir_real = dir.canonicalize()?;
+    if dir_real.starts_with(&source) && source.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "can't paste a folder into itself",
+        ));
+    }
+    if clip.cut {
+        if source.parent() == Some(dir_real.as_path()) {
+            return Ok(clip.path.clone()); // cut + paste in place: nothing to do
+        }
+        let target = fresh_path(dir, &name)?;
+        if std::fs::rename(&clip.path, &target).is_err() {
+            // Another filesystem: copy, then remove the original.
+            copy_recursive(&clip.path, &target)?;
+            delete(&clip.path, source.is_dir())?;
+        }
+        Ok(target)
+    } else {
+        let target = copy_name(dir, &name, false);
+        copy_recursive(&clip.path, &target)?;
+        Ok(target)
+    }
+}
+
+/// A copy next to the original, named `… copy`.
+pub fn duplicate(path: &Path) -> io::Result<PathBuf> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?
+        .to_string_lossy()
+        .into_owned();
+    let target = copy_name(dir, &name, true);
+    copy_recursive(path, &target)?;
     Ok(target)
 }
 
@@ -900,6 +1074,100 @@ mod tests {
         entries
             .iter()
             .any(|e| matches!(e, MenuEntry::Action(a, _) if *a == action))
+    }
+
+    #[test]
+    fn clipboard_entries_follow_target_editor_and_clip() {
+        let file = menu_entries_with(Some(false), false, true, false);
+        for action in [
+            MenuAction::OpenInEditor,
+            MenuAction::Cut,
+            MenuAction::Copy,
+            MenuAction::Duplicate,
+        ] {
+            assert!(has(&file, action), "{action:?} on a file row");
+        }
+        assert!(!has(&file, MenuAction::Paste), "nothing copied yet");
+        assert!(!has(
+            &menu_entries_with(Some(true), false, true, true),
+            MenuAction::OpenInEditor
+        ));
+        assert!(has(
+            &menu_entries_with(Some(true), false, false, true),
+            MenuAction::Paste
+        ));
+        let root = menu_entries_with(None, false, true, true);
+        assert!(has(&root, MenuAction::Paste) && !has(&root, MenuAction::Cut));
+        assert!(!has(&menu_entries(Some(false), true), MenuAction::Paste));
+    }
+
+    #[test]
+    fn copy_name_follows_the_vscode_scheme() {
+        let dir = tmp("copy-name");
+        assert_eq!(copy_name(&dir, "a.rs", false), dir.join("a.rs"));
+        std::fs::write(dir.join("a.rs"), "").unwrap();
+        assert_eq!(copy_name(&dir, "a.rs", false), dir.join("a copy.rs"));
+        std::fs::write(dir.join("a copy.rs"), "").unwrap();
+        assert_eq!(copy_name(&dir, "a.rs", true), dir.join("a copy 2.rs"));
+        assert_eq!(copy_name(&dir, ".env", true), dir.join(".env copy"));
+        assert_eq!(copy_name(&dir, "Makefile", true), dir.join("Makefile copy"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn paste_copies_moves_and_refuses_folder_into_itself() {
+        let dir = tmp("paste");
+        std::fs::create_dir_all(dir.join("src/inner")).unwrap();
+        std::fs::write(dir.join("src/inner/x.txt"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("dest")).unwrap();
+
+        let copy = FileClip {
+            path: dir.join("src"),
+            cut: false,
+        };
+        assert_eq!(
+            paste(&copy, &dir.join("dest")).unwrap(),
+            dir.join("dest/src")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("dest/src/inner/x.txt")).unwrap(),
+            "x"
+        );
+        assert_eq!(
+            paste(&copy, &dir.join("dest")).unwrap(),
+            dir.join("dest/src copy")
+        );
+        assert!(
+            paste(&copy, &dir.join("src/inner")).is_err(),
+            "folder into itself"
+        );
+        assert!(dir.join("src").exists(), "copy keeps the source");
+
+        let cut = FileClip {
+            path: dir.join("src/inner/x.txt"),
+            cut: true,
+        };
+        assert_eq!(
+            paste(&cut, &dir.join("dest")).unwrap(),
+            dir.join("dest/x.txt")
+        );
+        assert!(!dir.join("src/inner/x.txt").exists(), "cut moves it");
+        std::fs::write(dir.join("src/x.txt"), "again").unwrap();
+        let clash = FileClip {
+            path: dir.join("src/x.txt"),
+            cut: true,
+        };
+        assert!(
+            paste(&clash, &dir.join("dest")).is_err(),
+            "a cut never overwrites"
+        );
+
+        assert_eq!(
+            duplicate(&dir.join("dest/x.txt")).unwrap(),
+            dir.join("dest/x copy.txt")
+        );
+        assert_eq!(duplicate(&dir.join("src")).unwrap(), dir.join("src copy"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

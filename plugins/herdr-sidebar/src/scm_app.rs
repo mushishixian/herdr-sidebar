@@ -1789,8 +1789,8 @@ impl App {
             MouseEventKind::ScrollDown => self.scroll_view(3),
             MouseEventKind::Down(MouseButton::Left) => return self.left_click(mouse),
             MouseEventKind::Down(MouseButton::Right) => {
-                // Reaches us only as Ctrl+right-click (herdr's passthrough
-                // modifier); plain right-click opens herdr's own pane menu.
+                // The sidebar routes its pane's right-clicks to itself at
+                // startup (pane.input.set); Ctrl+right-click works either way.
                 self.flash = None;
                 self.open_context_menu(mouse.column, mouse.row);
             }
@@ -4084,7 +4084,7 @@ impl App {
         frame.render_widget(Paragraph::new(footer_lines), footer_content);
         if menu_hint {
             frame.render_widget(
-                Paragraph::new(action_hint.unwrap_or("m / ctrl+rclick for menus"))
+                Paragraph::new(action_hint.unwrap_or("right-click / m for menus"))
                     .style(Style::default().fg(Color::DarkGray))
                     .alignment(Alignment::Right),
                 footer_content,
@@ -4114,7 +4114,7 @@ impl App {
             }
         } else if footer_empty {
             frame.render_widget(
-                Paragraph::new(action_hint.unwrap_or("m / ctrl+rclick for menus"))
+                Paragraph::new(action_hint.unwrap_or("right-click / m for menus"))
                     .style(Style::default().fg(Color::DarkGray))
                     .alignment(Alignment::Right),
                 footer_status,

@@ -222,6 +222,7 @@ fn main() -> std::io::Result<()> {
     // ordering between the two ends with App::new clearing this marker before
     // the TUI can accept edits.
     if let Some(pane_id) = std::env::var_os("HERDR_PANE_ID").filter(|id| !id.is_empty()) {
+        herdr_sidebar::ipc::route_right_click_to_pane(&pane_id.to_string_lossy());
         let _ = herdr_sidebar::ipc::report_starting_identity(
             &pane_id.to_string_lossy(),
             view,
