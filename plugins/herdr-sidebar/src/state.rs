@@ -323,6 +323,11 @@ pub struct State {
     /// Replace mouse-click previews with the configured terminal editor.
     /// Keyboard Enter always retains the built-in preview path.
     pub custom_editor_on_click: bool,
+    /// Run the custom editor command directly instead of in a new herdr
+    /// tab. For editors that hand the file to an already-open editor pane
+    /// (e.g. a client that talks to a running editor daemon), so a click
+    /// never switches tabs.
+    pub custom_editor_inline: bool,
     /// View mode in Source Control: true for hierarchical tree view, false for flat list view.
     pub scm_tree_view: bool,
 }
@@ -347,6 +352,7 @@ impl Default for State {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             preview_placement: PreviewPlacement::Tab,
             custom_editor_on_click: false,
+            custom_editor_inline: false,
             scm_tree_view: false,
         }
     }
@@ -513,7 +519,7 @@ fn write_state(path: &Path, state: State) {
         None => String::new(),
     };
     let json = format!(
-        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"scm_tree_view\":{}{icons}}}",
+        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"custom_editor_inline\":{},\"scm_tree_view\":{}{icons}}}",
         state.merged,
         state.active.state_name(),
         state.search_active,
@@ -530,6 +536,7 @@ fn write_state(path: &Path, state: State) {
         state.color_theme.label(),
         state.preview_placement.label(),
         state.custom_editor_on_click,
+        state.custom_editor_inline,
         state.scm_tree_view
     );
     let _ = std::fs::write(path, json);
@@ -975,6 +982,10 @@ pub fn parse_state(json: &str) -> State {
             .get("custom_editor_on_click")
             .and_then(|v| v.as_bool())
             .unwrap_or(default.custom_editor_on_click),
+        custom_editor_inline: value
+            .get("custom_editor_inline")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(default.custom_editor_inline),
         scm_tree_view: value
             .get("scm_tree_view")
             .and_then(|v| v.as_bool())
@@ -1123,9 +1134,10 @@ mod tests {
             sidebar_width: 44,
             preview_placement: PreviewPlacement::Pane,
             custom_editor_on_click: true,
+            custom_editor_inline: true,
             scm_tree_view: true,
         };
-        let json = "{\"merged\":true,\"active\":\"source-control\",\"search_active\":true,\"hotkeys\":true,\"git_footer\":false,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"custom_editor_on_click\":true,\"scm_tree_view\":true,\"icons\":\"emoji\"}";
+        let json = "{\"merged\":true,\"active\":\"source-control\",\"search_active\":true,\"hotkeys\":true,\"git_footer\":false,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"custom_editor_on_click\":true,\"custom_editor_inline\":true,\"scm_tree_view\":true,\"icons\":\"emoji\"}";
         assert_eq!(parse_state(json), state);
         assert!(parse_state("\u{feff}{\"merged\":true}").merged);
         // Files written before the flag existed keep auto-open AND the git

@@ -619,6 +619,45 @@ pub fn run_configured_editor() -> io::Result<()> {
     }
 }
 
+/// Run the configured editor command right here, in the background, instead
+/// of in a new herdr tab. The command inherits this pane's herdr environment
+/// (HERDR_SOCKET_PATH, HERDR_TAB_ID, ...), so a client such as a script that
+/// forwards the file to an editor pane in the same tab can find it. Nothing
+/// on screen changes besides what that command does.
+pub fn open_in_editor_inline(root: &Path, file: &Path) -> io::Result<()> {
+    let command = configured_editor().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "set HERDR_SIDEBAR_EDITOR, VISUAL, or EDITOR",
+        )
+    })?;
+    let editor_file = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        root.join(file)
+    };
+    let argv = editor_argv(&command, &editor_file)?;
+    let mut child = std::process::Command::new(&argv[0]);
+    child
+        .args(&argv[1..])
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Its own process group: a Ctrl+C in the sidebar never reaches it.
+        child.process_group(0);
+    }
+    let mut child = child.spawn()?;
+    // Reap it in the background so finished editors don't linger as zombies.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 pub fn open_in_editor_tab(my_pane_id: &str, root: &Path, file: &Path) -> io::Result<()> {
     let command = configured_editor().ok_or_else(|| {
         io::Error::new(

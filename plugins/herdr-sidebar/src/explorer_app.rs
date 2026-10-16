@@ -292,6 +292,7 @@ enum Setting {
     PreviewPlacement,
     CustomEditorCommand,
     CustomEditorClick,
+    CustomEditorInline,
     AutoOpen,
     StrictToggle,
     FocusOnOpen,
@@ -558,6 +559,7 @@ impl App {
         self.sidebar_state.strict_toggle = shared.strict_toggle;
         self.sidebar_state.focus_on_open = shared.focus_on_open;
         self.sidebar_state.custom_editor_on_click = shared.custom_editor_on_click;
+        self.sidebar_state.custom_editor_inline = shared.custom_editor_inline;
         let old_git_footer = self.sidebar_state.show_git_footer;
         self.sidebar_state.show_git_footer = shared.show_git_footer;
         if shared.color_theme != self.sidebar_state.color_theme {
@@ -2399,12 +2401,15 @@ impl App {
             .file_name()
             .unwrap_or(path.as_os_str())
             .to_string_lossy();
-        self.notice = Some(
-            match actions::open_in_editor_tab(&pane_id, &self.tree.root_path(), path) {
-                Ok(()) => format!("opened in custom editor: {name}"),
-                Err(error) => format!("custom editor failed: {error}"),
-            },
-        );
+        let opened = if self.sidebar_state.custom_editor_inline {
+            actions::open_in_editor_inline(&self.tree.root_path(), path)
+        } else {
+            actions::open_in_editor_tab(&pane_id, &self.tree.root_path(), path)
+        };
+        self.notice = Some(match opened {
+            Ok(()) => format!("opened in custom editor: {name}"),
+            Err(error) => format!("custom editor failed: {error}"),
+        });
     }
 
     /// The modal's rows for the current state.
@@ -2478,6 +2483,17 @@ impl App {
                     "on"
                 } else {
                     "off"
+                }
+                .to_string(),
+                actions::configured_editor().is_some(),
+            ),
+            (
+                Setting::CustomEditorInline,
+                "Editor opens",
+                if self.sidebar_state.custom_editor_inline {
+                    "inline"
+                } else {
+                    "tab"
                 }
                 .to_string(),
                 actions::configured_editor().is_some(),
@@ -2623,6 +2639,11 @@ impl App {
             Setting::CustomEditorClick => {
                 self.sidebar_state = sidebar::update_state(|state| {
                     state.custom_editor_on_click = !state.custom_editor_on_click;
+                });
+            }
+            Setting::CustomEditorInline => {
+                self.sidebar_state = sidebar::update_state(|state| {
+                    state.custom_editor_inline = !state.custom_editor_inline;
                 });
             }
             Setting::HiddenFiles => {
