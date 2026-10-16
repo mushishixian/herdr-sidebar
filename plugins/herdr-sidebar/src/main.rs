@@ -15,13 +15,17 @@ use std::io::Read;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{
+    self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
+};
 use herdr_sidebar::{ensure, launch, state, viewer};
 use state::{Exit, View};
 
 /// How often the source-control view re-reads `git status` while idle.
 const REFRESH_EVERY: Duration = Duration::from_millis(1500);
 const ANIMATION_FRAME: Duration = Duration::from_millis(120);
+/// While a popup is open, how often to check the pane still has focus.
+const POPUP_FOCUS_POLL: Duration = Duration::from_millis(200);
 
 fn main() -> std::io::Result<()> {
     let mode = std::env::args().nth(1);
@@ -245,7 +249,9 @@ fn main() -> std::io::Result<()> {
     // turns every pane we draw monochrome.
     crossterm::style::force_color_output(true);
     let mut terminal = ratatui::init();
-    let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    // Focus reports (herdr forwards them to panes that ask): a pane losing
+    // focus dismisses its open menus.
+    let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableFocusChange);
     // First run on a machine without a Nerd Font: offer to install one
     // before any icons render. The prompt stamps the pane's identity token
     // itself (the app loops haven't started yet, and a token-less pane gets
@@ -311,7 +317,7 @@ fn main() -> std::io::Result<()> {
             }
         }
     };
-    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = crossterm::execute!(std::io::stdout(), DisableFocusChange, DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -530,6 +536,8 @@ fn run_explorer(
         // still cheap for the heartbeat.
         let timeout = if app.is_syncing() {
             ANIMATION_FRAME
+        } else if app.has_transient_popup() {
+            POPUP_FOCUS_POLL
         } else {
             Duration::from_millis(500)
         };
@@ -541,7 +549,11 @@ fn run_explorer(
                     app.on_resize(width);
                     None
                 }
-                _ => None, // resize, focus, … simply fall through to a redraw
+                Event::FocusLost => {
+                    app.on_focus_lost();
+                    None
+                }
+                _ => None, // focus gained, paste, … simply fall through to a redraw
             };
             if let Some(exit) = exit {
                 if exit == Exit::Quit {
@@ -553,6 +565,7 @@ fn run_explorer(
         app.heartbeat();
         app.poll_picker();
         app.tick();
+        app.dismiss_popups_if_unfocused();
         roots.record(&app.root_path());
     }
 }
@@ -572,12 +585,19 @@ fn run_scm(
         if app.is_syncing() {
             timeout = timeout.min(ANIMATION_FRAME);
         }
+        if app.has_transient_popup() {
+            timeout = timeout.min(POPUP_FOCUS_POLL);
+        }
         if event::poll(timeout)? {
             let exit = match event::read()? {
                 Event::Key(key) => app.on_key(key),
                 Event::Mouse(mouse) => app.on_mouse(mouse),
                 Event::Resize(width, _) => {
                     app.on_resize(width);
+                    None
+                }
+                Event::FocusLost => {
+                    app.on_focus_lost();
                     None
                 }
                 _ => None,
@@ -597,6 +617,7 @@ fn run_scm(
         }
         app.heartbeat();
         app.poll_picker();
+        app.dismiss_popups_if_unfocused();
         if last_tick.elapsed() >= REFRESH_EVERY {
             app.tick();
             last_tick = std::time::Instant::now();

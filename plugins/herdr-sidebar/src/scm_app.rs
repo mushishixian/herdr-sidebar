@@ -1607,6 +1607,34 @@ impl App {
     }
 
     /// Handle one key press; `Some(exit)` ends the event loop.
+    /// The pane lost focus: dismiss every popup. All of this view's overlays
+    /// are transient (menus, the branch picker, settings, and confirmations,
+    /// where closing cancels); the commit message lives outside them.
+    pub fn on_focus_lost(&mut self) {
+        self.overlay = None;
+    }
+
+    pub fn has_transient_popup(&self) -> bool {
+        self.overlay.is_some()
+    }
+
+    /// Fallback for hosts that don't forward focus reports: while a popup is
+    /// open, ask herdr whether this pane still has focus.
+    pub fn dismiss_popups_if_unfocused(&mut self) {
+        if !self.has_transient_popup() {
+            return;
+        }
+        let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone()) else {
+            return;
+        };
+        if let Ok(json) = herdr_sidebar::ipc::call_text("pane.list", serde_json::json!({}))
+            && json.contains(&format!("\"{pane_id}\""))
+            && !pane_focused_in(&json, &pane_id)
+        {
+            self.on_focus_lost();
+        }
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) -> Option<Exit> {
         if key.kind != KeyEventKind::Press {
             return None;

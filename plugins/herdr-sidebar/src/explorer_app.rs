@@ -1031,6 +1031,43 @@ impl App {
     }
 
     /// Handle one key press; `Some(exit)` ends the event loop.
+    /// The pane lost focus: dismiss transient popups (menus, the branch
+    /// picker, settings, the delete confirmation — closing it cancels).
+    /// Prompts, Quick Open and Search keep what was typed.
+    pub fn on_focus_lost(&mut self) {
+        if self.has_transient_popup() {
+            self.overlay = None;
+        }
+    }
+
+    pub fn has_transient_popup(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(
+                Overlay::Menu { .. }
+                    | Overlay::BranchPicker(_)
+                    | Overlay::Settings { .. }
+                    | Overlay::ConfirmDelete { .. }
+            )
+        )
+    }
+
+    /// Fallback for hosts that don't forward focus reports: while a popup is
+    /// open, ask herdr whether this pane still has focus.
+    pub fn dismiss_popups_if_unfocused(&mut self) {
+        if !self.has_transient_popup() {
+            return;
+        }
+        let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone()) else {
+            return;
+        };
+        if let Ok(json) = ipc::call_text("pane.list", serde_json::json!({}))
+            && pane_listed_unfocused(&json, &pane_id)
+        {
+            self.on_focus_lost();
+        }
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) -> Option<Exit> {
         if key.kind != KeyEventKind::Press {
             return None;
@@ -4633,6 +4670,12 @@ fn truncate_path_tail(label: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
+/// The pane is in the list and NOT focused. A failed or partial reply is not
+/// evidence of lost focus, so it never closes a popup.
+fn pane_listed_unfocused(pane_list_json: &str, pane_id: &str) -> bool {
+    pane_list_json.contains(&format!("\"{pane_id}\"")) && !pane_focused_in(pane_list_json, pane_id)
+}
+
 fn pane_focused_in(pane_list_json: &str, pane_id: &str) -> bool {
     let Ok(value) =
         serde_json::from_str::<serde_json::Value>(pane_list_json.trim_start_matches('\u{feff}'))
@@ -5032,6 +5075,13 @@ mod tests {
         assert!(!pane_focused_in(panes, "w1:p1"));
         assert!(pane_focused_in(panes, "w1:p2"));
         assert!(!pane_focused_in("garbage", "w1:p2"));
+        assert!(pane_listed_unfocused(panes, "w1:p1"));
+        assert!(!pane_listed_unfocused(panes, "w1:p2"), "focused");
+        assert!(
+            !pane_listed_unfocused(panes, "w1:p9"),
+            "not listed: no evidence"
+        );
+        assert!(!pane_listed_unfocused("garbage", "w1:p1"));
     }
 
     /// The rendered text of a row, decorations included.
