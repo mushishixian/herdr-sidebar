@@ -27,6 +27,7 @@ use herdr_sidebar::branch_ui::{
 };
 use herdr_sidebar::git::{DeleteRefused, FileEntry, Git, Status};
 use herdr_sidebar::icons::{IconTheme, icon};
+use herdr_sidebar::pane_menu::{self, PaneAction};
 use herdr_sidebar::state::Exit;
 use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::suggest;
@@ -665,6 +666,8 @@ enum MenuAction {
     CopyRef,
     DeleteTag,
     RemoveWorktree,
+    /// herdr's own pane-menu item, offered at the end of every menu.
+    Herdr(PaneAction),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -747,6 +750,10 @@ enum Overlay {
         selected: usize,
         rect: Rect,
         scroll: usize,
+    },
+    /// The name typed for our own pane ("Rename pane…"), edited in the footer.
+    PaneRename {
+        input: String,
     },
 }
 
@@ -969,6 +976,9 @@ pub struct App {
     sidebar_state: sidebar::State,
     other_exe: Option<PathBuf>,
     pane_ctl: Option<PaneCtl>,
+    /// Our pane carries a label. `apply_identity` sets one; "Clear pane name"
+    /// unsets it (the pane menu offers that item only while this holds).
+    pane_named: bool,
     /// Last heartbeat stamp, throttling the token refresh.
     last_beat: std::time::Instant,
     /// A native folder picker running on a background thread; its result
@@ -1095,6 +1105,7 @@ impl App {
             sidebar_state,
             other_exe,
             pane_ctl,
+            pane_named: true,
             last_beat: std::time::Instant::now(),
             picking: None,
             cwd_follower,
@@ -1144,7 +1155,8 @@ impl App {
     }
 
     /// Push our label + metadata tokens to herdr for the current mode.
-    fn apply_identity(&self) {
+    fn apply_identity(&mut self) {
+        self.pane_named = true;
         let Some(ctl) = &self.pane_ctl else { return };
         let label = if self.merged() {
             sidebar::SIDEBAR_LABEL
@@ -1607,15 +1619,17 @@ impl App {
     }
 
     /// Handle one key press; `Some(exit)` ends the event loop.
-    /// The pane lost focus: dismiss every popup. All of this view's overlays
-    /// are transient (menus, the branch picker, settings, and confirmations,
-    /// where closing cancels); the commit message lives outside them.
+    /// The pane lost focus: dismiss transient popups (menus, the branch
+    /// picker, settings, and confirmations, where closing cancels). The pane
+    /// rename field keeps what was typed; the commit message lives outside.
     pub fn on_focus_lost(&mut self) {
-        self.overlay = None;
+        if self.has_transient_popup() {
+            self.overlay = None;
+        }
     }
 
     pub fn has_transient_popup(&self) -> bool {
-        self.overlay.is_some()
+        self.overlay.is_some() && !matches!(self.overlay, Some(Overlay::PaneRename { .. }))
     }
 
     /// Fallback for hosts that don't forward focus reports: while a popup is
@@ -2083,6 +2097,66 @@ impl App {
         self.open_context_menu(2, y);
     }
 
+    /// herdr's pane-menu items, appended to a menu once the sidebar knows its
+    /// own pane. Empty otherwise.
+    fn pane_menu_section(&self) -> Vec<MenuEntry> {
+        if self.pane_ctl.is_none() {
+            return Vec::new();
+        }
+        let mut entries = vec![MenuEntry::Separator];
+        entries.extend(
+            pane_menu::items(self.pane_named)
+                .into_iter()
+                .map(|item| MenuEntry::Action(MenuAction::Herdr(item), item.label())),
+        );
+        entries
+    }
+
+    /// herdr's pane-menu items (see `pane_menu`). Failures go to the flash
+    /// line, like the other menu actions.
+    fn run_pane_item(&mut self, item: PaneAction) {
+        let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone()) else {
+            return;
+        };
+        match item {
+            PaneAction::Rename => {
+                self.overlay = Some(Overlay::PaneRename {
+                    input: String::new(),
+                });
+            }
+            // Close through the sidebar's own hide path (the `b` key): it
+            // snoozes this tab first, so the ensure hook does not re-dock us.
+            PaneAction::Close => self.hide(),
+            item => {
+                let Some((method, params)) = pane_menu::request(item, &pane_id) else {
+                    return;
+                };
+                match pane_menu::run(method, params) {
+                    Ok(()) if item == PaneAction::ClearName => self.pane_named = false,
+                    Ok(()) => {}
+                    Err(error) => self.flash = Some((format!("{}: {error}", item.label()), true)),
+                }
+            }
+        }
+    }
+
+    /// Name our pane with the text typed into the rename overlay.
+    fn confirm_pane_rename(&mut self, input: &str) {
+        let name = input.trim();
+        let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone()) else {
+            return;
+        };
+        if name.is_empty() {
+            self.flash = Some(("pane name is empty (use Clear pane name)".into(), true));
+            return;
+        }
+        let (method, params) = pane_menu::rename(&pane_id, Some(name));
+        match pane_menu::run(method, params) {
+            Ok(()) => self.pane_named = true,
+            Err(error) => self.flash = Some((format!("rename pane failed: {error}"), true)),
+        }
+    }
+
     /// Ctrl+right-click: the VS Code-style context menu.
     fn open_context_menu(&mut self, x: u16, y: u16) {
         let Some(index) = self.row_at(y) else { return };
@@ -2106,7 +2180,7 @@ impl App {
                 }) else {
                     return;
                 };
-                let entries = vec![
+                let mut entries = vec![
                     MenuEntry::Action(
                         MenuAction::StageOrUnstage,
                         if staged {
@@ -2121,6 +2195,7 @@ impl App {
                     MenuEntry::Separator,
                     MenuEntry::Action(MenuAction::Reveal, "Reveal in File Explorer"),
                 ];
+                entries.extend(self.pane_menu_section());
                 self.overlay = Some(Overlay::Menu {
                     x,
                     y,
@@ -2164,6 +2239,7 @@ impl App {
             MenuEntry::Separator,
             MenuEntry::Action(MenuAction::Reveal, "Reveal in File Explorer"),
         ]);
+        entries.extend(self.pane_menu_section());
         self.overlay = Some(Overlay::Menu {
             x,
             y,
@@ -2183,7 +2259,7 @@ impl App {
         let Some(dref) = self.drawers[kind.index()].refs.get(index) else {
             return;
         };
-        let entries: Vec<MenuEntry> = match dref {
+        let mut entries: Vec<MenuEntry> = match dref {
             DrawerRef::Commit(_) => vec![
                 MenuEntry::Action(MenuAction::ShowRef, "Show Changes"),
                 MenuEntry::Separator,
@@ -2234,6 +2310,7 @@ impl App {
             ],
             DrawerRef::None => return,
         };
+        entries.extend(self.pane_menu_section());
         self.overlay = Some(Overlay::Menu {
             x,
             y,
@@ -2255,6 +2332,7 @@ impl App {
             DiscardAllConfirmed(usize),
             GitConfirmed(usize, Vec<String>),
             Picker(PickerAction),
+            PaneRenameConfirmed,
         }
         let settings = self.settings_rows();
         let row_count = settings.len();
@@ -2298,6 +2376,19 @@ impl App {
                 _ => Cmd::Nothing,
             },
             Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.key(key)),
+            Some(Overlay::PaneRename { input }) => match key.code {
+                KeyCode::Esc => Cmd::Close,
+                KeyCode::Backspace => {
+                    input.pop();
+                    Cmd::Nothing
+                }
+                KeyCode::Char(c) => {
+                    input.push(c);
+                    Cmd::Nothing
+                }
+                KeyCode::Enter => Cmd::PaneRenameConfirmed,
+                _ => Cmd::Nothing,
+            },
             Some(Overlay::ConfirmDiscard { repo, entry }) => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     Cmd::DiscardConfirmed(*repo, entry.clone())
@@ -2347,6 +2438,11 @@ impl App {
                 self.discard_all(repo);
             }
             Cmd::Picker(action) => self.handle_picker_action(action),
+            Cmd::PaneRenameConfirmed => {
+                if let Some(Overlay::PaneRename { input }) = self.overlay.take() {
+                    self.confirm_pane_rename(&input);
+                }
+            }
         }
     }
 
@@ -2876,6 +2972,10 @@ impl App {
         let MenuEntry::Action(action, _) = entries[selected] else {
             return;
         };
+        if let MenuAction::Herdr(item) = action {
+            self.run_pane_item(item);
+            return;
+        }
         match target {
             MenuTarget::File {
                 repo,
@@ -4765,6 +4865,10 @@ impl App {
             (Some(Overlay::ConfirmGit { prompt, .. }), _) => {
                 Some((prompt.clone(), palette().deleted))
             }
+            (Some(Overlay::PaneRename { input }), _) => Some((
+                format!("Rename pane: {input}_  (⏎ ok · esc cancel)"),
+                palette().deleted,
+            )),
             (_, Some((text, is_error))) => {
                 let color = if *is_error {
                     palette().deleted

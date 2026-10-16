@@ -5,6 +5,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::pane_menu::{self, PaneAction};
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
     NewFile,
@@ -26,6 +28,8 @@ pub enum MenuAction {
     Reveal,
     ChangeFolder,
     ChangeFolderTyped,
+    /// herdr's own pane-menu item, offered at the end of the menu.
+    Herdr(PaneAction),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -110,6 +114,21 @@ pub fn menu_entries_with(
         MenuEntry::Action(MenuAction::ChangeFolder, "Change Folder…"),
         MenuEntry::Action(MenuAction::ChangeFolderTyped, "Change Folder (Type Path)…"),
     ]);
+    entries
+}
+
+/// herdr's pane-menu section, appended after the file entries when the
+/// sidebar knows its own pane (`known`). Empty otherwise.
+pub fn pane_menu_entries(known: bool, labelled: bool) -> Vec<MenuEntry> {
+    if !known {
+        return Vec::new();
+    }
+    let mut entries = vec![MenuEntry::Separator];
+    entries.extend(
+        pane_menu::items(labelled)
+            .into_iter()
+            .map(|item| MenuEntry::Action(MenuAction::Herdr(item), item.label())),
+    );
     entries
 }
 
@@ -1443,5 +1462,40 @@ mod tests {
         );
         assert_eq!(bytes, b"\x1b]52;c;aGVsbG8=\x07");
         assert!(write_osc52(Vec::new(), "").is_err());
+    }
+
+    #[test]
+    fn pane_section_needs_a_known_pane_and_ends_the_menu() {
+        assert!(pane_menu_entries(false, true).is_empty());
+        let section = pane_menu_entries(true, true);
+        assert!(matches!(section[0], MenuEntry::Separator));
+        let labels: Vec<&str> = section
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Action(MenuAction::Herdr(_), label) => Some(*label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Rename pane…",
+                "Clear pane name",
+                "Split right",
+                "Split down",
+                "Zoom",
+                "Use Herdr right-click menu",
+                "Close pane",
+            ]
+        );
+        let unlabelled = pane_menu_entries(true, false);
+        assert!(!has(&unlabelled, MenuAction::Herdr(PaneAction::ClearName)));
+        // Appended after the file menu's last entry: the file menu is intact.
+        let mut menu = menu_entries_with(None, false, false, false);
+        menu.extend(section);
+        assert!(matches!(
+            menu.last(),
+            Some(MenuEntry::Action(MenuAction::Herdr(PaneAction::Close), _))
+        ));
     }
 }

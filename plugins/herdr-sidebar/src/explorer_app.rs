@@ -23,6 +23,7 @@ use herdr_sidebar::git::{Git, Status};
 use herdr_sidebar::gitdeco::{Decorations, RepoStatus};
 use herdr_sidebar::icons::{IconTheme, icon};
 use herdr_sidebar::ipc;
+use herdr_sidebar::pane_menu::{self, PaneAction};
 use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::tree::{Row, Tree};
 use herdr_sidebar::ui::{
@@ -169,6 +170,8 @@ enum PromptKind {
     /// current root, or ~-prefixed).
     ChangeFolder,
     CustomEditor,
+    /// The name for our own herdr pane (the pane menu's "Rename pane…").
+    PaneRename,
 }
 
 /// A modal layered over the tree: the context menu, a name prompt, or a
@@ -321,6 +324,9 @@ pub struct App {
     snap: bool,
     theme: IconTheme,
     pane_ctl: Option<PaneCtl>,
+    /// Our pane carries a label. `apply_identity` sets one; "Clear pane name"
+    /// unsets it (the pane menu offers that item only while this holds).
+    pane_named: bool,
     /// Pane size from the last draw; sizing decisions and PageUp/PageDown
     /// strides are based on what was actually rendered.
     last_width: u16,
@@ -479,6 +485,7 @@ impl App {
             snap: restored_selection.is_some(),
             theme,
             pane_ctl,
+            pane_named: true,
             last_width: sidebar_state.sidebar_width,
             last_layout_width,
             last_height: 24,
@@ -821,7 +828,8 @@ impl App {
     }
 
     /// Push our label + metadata tokens to herdr for the current mode.
-    fn apply_identity(&self) {
+    fn apply_identity(&mut self) {
+        self.pane_named = true;
         let Some(ctl) = &self.pane_ctl else { return };
         ctl.set_label(Some(self.pane_label()));
         ctl.report_tokens(MY_VIEW, self.merged());
@@ -1406,12 +1414,17 @@ impl App {
         let in_repo = target
             .as_ref()
             .is_some_and(|(path, _)| Git::owner_of(path).is_ok());
-        let entries = actions::menu_entries_with(
+        let mut entries = actions::menu_entries_with(
             target.as_ref().map(|(_, is_dir)| *is_dir),
             in_repo,
             actions::configured_editor().is_some(),
             actions::load_file_clip().is_some(),
         );
+        // herdr's own pane items, last, once the sidebar knows its pane.
+        entries.extend(actions::pane_menu_entries(
+            self.pane_ctl.is_some(),
+            self.pane_named,
+        ));
         let selected = entries
             .iter()
             .position(|e| matches!(e, MenuEntry::Action(..)))
@@ -2905,6 +2918,7 @@ impl App {
             }
             MenuAction::ChangeFolder => self.change_folder_dialog(),
             MenuAction::ChangeFolderTyped => self.change_folder_prompt(),
+            MenuAction::Herdr(item) => self.run_pane_item(item),
             MenuAction::OpenInEditor => {
                 let Some((path, _)) = target else { return };
                 self.open_custom_editor(&path);
@@ -3063,6 +3077,10 @@ impl App {
             self.change_folder(&input);
             return;
         }
+        if matches!(kind, PromptKind::PaneRename) {
+            self.rename_pane(&input);
+            return;
+        }
         if matches!(kind, PromptKind::CustomEditor) {
             if sidebar::save_editor_command(&input) {
                 self.notice = Some("custom editor saved; Enter still previews files".into());
@@ -3081,6 +3099,7 @@ impl App {
             PromptKind::Rename(path) => actions::rename(path, name),
             PromptKind::ChangeFolder => unreachable!("handled above"),
             PromptKind::CustomEditor => unreachable!("handled above"),
+            PromptKind::PaneRename => unreachable!("handled above"),
         };
         match result {
             Ok(created) => {
@@ -3093,6 +3112,53 @@ impl App {
                 }
             }
             Err(err) => self.notice = Some(format!("failed: {err}")),
+        }
+    }
+
+    /// herdr's pane-menu items (see `pane_menu`). Failures go to the notice
+    /// line, like the other menu actions.
+    fn run_pane_item(&mut self, item: PaneAction) {
+        let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone()) else {
+            return;
+        };
+        match item {
+            PaneAction::Rename => {
+                self.overlay = Some(Overlay::Prompt {
+                    title: "Rename pane".into(),
+                    input: String::new(),
+                    kind: PromptKind::PaneRename,
+                });
+            }
+            // Close through the sidebar's own hide path (the `b` key): it
+            // snoozes this tab first, so the ensure hook does not re-dock us.
+            PaneAction::Close => self.hide(),
+            item => {
+                let Some((method, params)) = pane_menu::request(item, &pane_id) else {
+                    return;
+                };
+                match pane_menu::run(method, params) {
+                    Ok(()) if item == PaneAction::ClearName => self.pane_named = false,
+                    Ok(()) => {}
+                    Err(error) => self.notice = Some(format!("{}: {error}", item.label())),
+                }
+            }
+        }
+    }
+
+    /// Name our pane with the Rename prompt's text.
+    fn rename_pane(&mut self, name: &str) {
+        let name = name.trim();
+        let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone()) else {
+            return;
+        };
+        if name.is_empty() {
+            self.notice = Some("pane name is empty (use Clear pane name)".into());
+            return;
+        }
+        let (method, params) = pane_menu::rename(&pane_id, Some(name));
+        match pane_menu::run(method, params) {
+            Ok(()) => self.pane_named = true,
+            Err(error) => self.notice = Some(format!("rename pane failed: {error}")),
         }
     }
 
