@@ -48,6 +48,19 @@ pub struct Branch {
     pub remote: bool,
 }
 
+/// One commit in a line-range history (`git log -L`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineCommit {
+    pub hash: String,
+    pub short: String,
+    pub author: String,
+    /// `YYYY-MM-DD` (`--date=short`).
+    pub date: String,
+    pub subject: String,
+    /// The unified patch restricted to the requested lines (may be empty).
+    pub patch: String,
+}
+
 /// Why a non-forcing branch delete did not happen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeleteRefused {
@@ -439,6 +452,30 @@ impl Git {
         )?)
     }
 
+    /// Commits that touched lines `start..=end` (1-based, inclusive) of
+    /// `rel_path`, newest first, each with its patch restricted to those
+    /// lines (`git log -L`, which also follows the lines through renames).
+    pub fn line_history(
+        &self,
+        rel_path: &str,
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<LineCommit>, String> {
+        let range = format!("-L{start},{end}:{rel_path}");
+        let out = run_in(
+            &self.root,
+            &[
+                "log",
+                &range,
+                "-n",
+                "200",
+                "--date=short",
+                "--format=%x1e%H%x1f%h%x1f%an%x1f%ad%x1f%s",
+            ],
+        )?;
+        Ok(parse_line_history(&out))
+    }
+
     /// Local + remote branches, the current one first and starred.
     pub fn branches(&self) -> Result<Vec<String>, String> {
         lines(run_in(
@@ -667,6 +704,31 @@ impl Git {
     pub fn raw(&self, args: &[&str]) -> Result<String, String> {
         run_in(&self.root, args)
     }
+}
+
+/// Parse `git log -L … --format=%x1e%H%x1f%h%x1f%an%x1f%ad%x1f%s` output:
+/// each record starts with `\x1e`, its header is one line of `\x1f`-separated
+/// fields, and the patch follows after a blank line.
+pub fn parse_line_history(out: &str) -> Vec<LineCommit> {
+    out.split('\x1e')
+        .skip(1)
+        .filter_map(|record| {
+            let (header, patch) = record.split_once('\n').unwrap_or((record, ""));
+            let mut fields = header.split('\x1f');
+            let hash = fields.next()?.trim().to_string();
+            if hash.is_empty() {
+                return None;
+            }
+            Some(LineCommit {
+                hash,
+                short: fields.next()?.to_string(),
+                author: fields.next()?.to_string(),
+                date: fields.next()?.to_string(),
+                subject: fields.next()?.to_string(),
+                patch: patch.trim_start_matches('\n').trim_end().to_string(),
+            })
+        })
+        .collect()
 }
 
 fn lines(out: String) -> Result<Vec<String>, String> {
@@ -2191,5 +2253,73 @@ mod tests {
     fn paths_with_spaces_survive() {
         let s = parse_status("M  my docs/read me.md\0");
         assert_eq!(s.staged, vec![entry("my docs/read me.md", 'M', None)]);
+    }
+
+    /// Captured from `git log -L2,3:f.txt` on a file whose second and third
+    /// lines were changed by two later commits (git 2.53).
+    const LINE_LOG: &str = concat!(
+        "\u{1e}5e4e31bc2d7df6a3840a3acd5e719e7382eb7c09\u{1f}5e4e31b\u{1f}Bob\u{1f}2026-10-16\u{1f}change c\n",
+        "\n",
+        "diff --git a/f.txt b/f.txt\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@ -2,2 +2,2 @@\n",
+        " B\n",
+        "-c\n",
+        "+C\n",
+        "\u{1e}368d2af2c147da1fa6dd8b0d0e5f87605a85c6f4\u{1f}368d2af\u{1f}Ann\u{1f}2026-10-16\u{1f}change b\n",
+        "\n",
+        "diff --git a/f.txt b/f.txt\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@ -2,2 +2,2 @@\n",
+        "-b\n",
+        "+B\n",
+        " c\n",
+        "\u{1e}c49a6eb8332c76350347578f98510d578a29c6e2\u{1f}c49a6eb\u{1f}Ann\u{1f}2026-10-16\u{1f}first\n",
+        "\n",
+        "diff --git a/f.txt b/f.txt\n",
+        "--- /dev/null\n",
+        "+++ b/f.txt\n",
+        "@@ -0,0 +2,2 @@\n",
+        "+b\n",
+        "+c\n",
+    );
+
+    #[test]
+    fn line_history_parser_splits_records_and_keeps_each_patch() {
+        let commits = parse_line_history(LINE_LOG);
+        assert_eq!(commits.len(), 3);
+        assert_eq!(commits[0].short, "5e4e31b");
+        assert_eq!(commits[0].author, "Bob");
+        assert_eq!(commits[0].date, "2026-10-16");
+        assert_eq!(commits[0].subject, "change c");
+        assert!(commits[0].patch.starts_with("diff --git a/f.txt"));
+        assert!(commits[0].patch.contains("+C"));
+        assert!(
+            !commits[0].patch.contains("368d2af"),
+            "a patch must not run into the next record"
+        );
+        assert_eq!(commits[1].hash, "368d2af2c147da1fa6dd8b0d0e5f87605a85c6f4");
+        assert!(commits[1].patch.ends_with("+B\n c"));
+        assert!(commits[2].patch.contains("--- /dev/null"));
+        assert!(parse_line_history("").is_empty());
+    }
+
+    #[test]
+    fn line_history_lists_commits_touching_the_lines_newest_first() {
+        let git = repo_with_head("line-history");
+        commit_file(&git, "f.txt", "a\nb\nc\nd\n", "first");
+        commit_file(&git, "f.txt", "a\nB\nc\nd\n", "change b");
+        commit_file(&git, "f.txt", "a\nB\nC\nd\n", "change c");
+        commit_file(&git, "other.txt", "x\n", "unrelated");
+        let commits = git.line_history("f.txt", 2, 3).unwrap();
+        let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, ["change c", "change b", "first"]);
+        assert!(commits[0].patch.contains("+C"));
+        assert!(commits[1].patch.contains("+B"));
+        // Lines past the end of the committed file are a git error, not a list.
+        assert!(git.line_history("f.txt", 9, 9).is_err());
+        let _ = std::fs::remove_dir_all(&git.root);
     }
 }

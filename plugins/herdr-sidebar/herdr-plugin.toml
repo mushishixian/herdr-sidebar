@@ -75,6 +75,15 @@ placement = "popup"
 command = ["./target/release/herdr-sidebar", "--git-popup", "merge"]
 platforms = ["linux", "macos"]
 
+# Git history of a line range. No action: the Fresh editor plugin opens it
+# directly, passing HERDR_SIDEBAR_HISTORY_FILE / HERDR_SIDEBAR_HISTORY_LINES.
+[[panes]]
+id = "git-line-history"
+title = "Line history"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--git-popup", "history"]
+platforms = ["linux", "macos"]
+
 [[actions]]
 id = "git-switch-branch"
 platforms = ["linux", "macos"]
