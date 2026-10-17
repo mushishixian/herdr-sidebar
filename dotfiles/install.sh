@@ -4,10 +4,11 @@
 # Lives in the herdr-sidebar repo under dotfiles/. Normally run by
 # docs/install-herdr-ide.sh (which adds OpenCommit and a verify report).
 #
-#   ./install.sh               packages, herdr, Fresh, configs, plugins
-#   ./install.sh --lsp         also install language servers (npm/apt/rustup)
-#   ./install.sh --no-packages skip apt (configs and plugins only)
+#   ./install.sh               packages, herdr, Fresh, configs, plugins, language servers
+#   ./install.sh --no-lsp      skip the language servers (dotfiles/install-lsp.sh)
+#   ./install.sh --no-packages skip apt (configs, plugins and language servers' apt step)
 #   ./install.sh --no-claude   don't install herdr's Claude Code hook
+#   ./install.sh --lsp         accepted for older scripts; a no-op (LSP is the default)
 #
 # Idempotent: rerun after pulling. Any file it would replace is moved to
 # ~/.dotfiles-backup/<timestamp>/ first; symlinks it made earlier are reused.
@@ -18,13 +19,14 @@ BACKUP="$HOME/.dotfiles-backup/$(date +%Y%m%d-%H%M%S)"
 BIN="$HOME/.local/bin"
 export PATH="$BIN:$PATH"
 
-with_packages=1 with_lsp=0 with_claude=1
+with_packages=1 with_lsp=1 with_claude=1
 for arg in "$@"; do
   case $arg in
     --no-packages) with_packages=0 ;;
-    --lsp) with_lsp=1 ;;
+    --no-lsp) with_lsp=0 ;;
+    --lsp) ;;
     --no-claude) with_claude=0 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -143,22 +145,13 @@ fi
 
 herdr server reload-config >/dev/null 2>&1 && info "reloaded the running herdr server" || true
 
-# ── 5. Language servers (opt-in) ───────────────────────────────────────
+# ── 5. Language servers (default; --no-lsp skips) ─────────────────────
 if [ "$with_lsp" = 1 ]; then
   step "language servers"
-  sudo apt-get install -y -qq python3-pylsp
-  if command -v npm >/dev/null; then
-    npm install -g --prefix "$HOME/.local" --silent \
-      typescript typescript-language-server bash-language-server \
-      vscode-langservers-extracted yaml-language-server
-  else
-    info "npm missing: skipped TypeScript/Bash/JSON/CSS/HTML/YAML servers"
-  fi
-  if command -v rustup >/dev/null; then
-    rustup component add rust-analyzer
-  else
-    info "rustup missing: skipped rust-analyzer (https://rustup.rs)"
-  fi
+  lsp_args=()
+  [ "$with_packages" = 1 ] || lsp_args+=(--no-apt)
+  "$DOTFILES/install-lsp.sh" ${lsp_args[@]+"${lsp_args[@]}"} ||
+    info "some language servers failed (see the summary above; rerun dotfiles/install-lsp.sh)"
 fi
 
 # ── 6. Login shell ─────────────────────────────────────────────────────

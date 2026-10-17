@@ -62,17 +62,16 @@
     { "key": "d", "modifiers": ["alt", "shift"], "action": "conflict_prev", "when": "normal" },
   ],
 
-  // Markdown LSP off (set in Fresh's settings UI).
+  // Language servers (installed by dotfiles/install-lsp.sh). An entry is merged
+  // over Fresh's built-in table, so only the switches are set here. A server
+  // that auto-starts but is missing opens its log as a tab.
   "lsp": {
-    "markdown": {
-      "enabled": false,
-      "auto_start": true,
-      "process_limits": { "max_memory_percent": 50, "max_cpu_percent": 90, "enabled": true },
-    },
+    "markdown": { "enabled": true, "auto_start": true },
+    "go": { "auto_start": true },
+    "rust": { "auto_start": true },
+    "dart": { "auto_start": true },
+    "php": { "auto_start": true },
+    "javascript": { "auto_start": true },
+    "typescript": { "auto_start": true },
   },
-
-  // Language servers stay on Fresh's default (start from the LSP menu). To
-  // start one automatically once installed (install.sh --lsp), add e.g.
-  // `"typescript": { "auto_start": true }` to the "lsp" block above.
-  // A server that is set to auto-start but missing opens its log as a tab.
 }

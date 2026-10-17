@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # install-herdr-ide.sh — one-shot install of the herdr + Fresh IDE on WSL Ubuntu.
 #
-#   docs/install-herdr-ide.sh                 full install (sudo for apt when needed)
-#   docs/install-herdr-ide.sh --lsp           also language servers (passed to dotfiles)
+#   docs/install-herdr-ide.sh                 full install, language servers included (sudo for apt when needed)
+#   docs/install-herdr-ide.sh --no-lsp        skip the language servers (passed to dotfiles)
 #   docs/install-herdr-ide.sh --no-packages   skip apt (passed to dotfiles)
 #   docs/install-herdr-ide.sh --no-claude     skip the Claude Code hook (passed to dotfiles)
 #   docs/install-herdr-ide.sh --no-oco        skip OpenCommit (oco) for the AI commit key
 #   docs/install-herdr-ide.sh -h|--help       this text
+#
+# --lsp is still accepted as a no-op (language servers are the default).
 #
 # Idempotent: rerun after pulling. Replaced configs go to ~/.dotfiles-backup/<ts>/.
 set -euo pipefail
@@ -14,13 +16,15 @@ set -euo pipefail
 BIN="$HOME/.local/bin"
 export PATH="$BIN:$PATH"
 
-with_oco=1
+with_oco=1 with_lsp=1
 passthrough=()
 while [ $# -gt 0 ]; do
   case $1 in
-    --lsp|--no-packages|--no-claude) passthrough+=("$1") ;;
+    --no-packages|--no-claude) passthrough+=("$1") ;;
+    --no-lsp) passthrough+=("$1"); with_lsp=0 ;;
+    --lsp) ;;
     --no-oco) with_oco=0 ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -119,6 +123,16 @@ if [ -L "$fresh_link" ] && [ "$(readlink "$fresh_link")" = "$DOTFILES/config/fre
   ok "fresh config.json is the dotfiles symlink"
 else
   bad "fresh config.json is not a symlink to $DOTFILES/config/fresh/config.json (Fresh's settings screen replaced it; merge and rerun)"
+fi
+
+if [ "$with_lsp" = 1 ]; then
+  for c in marksman gopls rust-analyzer dart phpactor typescript-language-server; do
+    if command -v "$c" >/dev/null 2>&1; then
+      ok "language server $c"
+    else
+      bad "language server $c missing (run dotfiles/install-lsp.sh)"
+    fi
+  done
 fi
 
 if command -v lazygit >/dev/null 2>&1; then

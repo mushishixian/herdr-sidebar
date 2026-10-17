@@ -88,6 +88,24 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   needs developer mode. Verified headless: `ai_commit::generate` on a staged scratch repo returned
   a message and left HEAD unchanged (`cargo test -- --ignored e2e_generate` with
   `HS_AI_COMMIT_E2E_REPO`).
+  **Curation (big or generated files).** oco diffs everything staged (minus its own excludes), and
+  when the diff exceeds its token limit it splits the diff per chunk, asks the model once per chunk and
+  joins the answers. A 1.8 MB generated `data.json` staged next to a 3-line change took 111 s (the
+  timeout is 120 s) and returned seven `feat(data.json)` messages glued together. Now `generate`
+  builds a TEMP index (`<work>/index`, a copy of the real one) and runs oco with `GIT_INDEX_FILE` set
+  to it, so only the message request sees the shortened view. Budgets: `PER_FILE_BYTES` 12 KiB,
+  `TOTAL_BYTES` 48 KiB (largest kept file shortened first), `KEEP_LINES` 40. Generated paths
+  (`.min.js`, `.map`, `.snap`, `dist/`, `vendor/`, `_generated.`, …) shrink regardless of size; binary
+  and oco-excluded files never count. Per file: an added file keeps its first 40 lines (a blob written
+  with `hash-object -w`, a loose object `git gc` collects); a modified file keeps whole leading hunks
+  (`truncate_hunks`, reset to HEAD then `git apply --cached`); any other shrunk file (deleted, single-hunk
+  modified, rename, copy) is hidden. If nothing is left to diff, the largest hidden modified file is
+  staged shortened; if that still gives nothing, oco reads the real index. The real index is never
+  written. The sidebar always passes `OCO_TOKENS_MAX_INPUT=24000` (`MAX_INPUT_TOKENS`, env beats
+  `~/.opencommit`), well above `TOTAL_BYTES`'s token count, so oco never chunks. `Generated.summarised`
+  lists the affected files; the flash reads "N large file(s) summarised for the AI". The commit message
+  itself is never changed. Measured: the 1.8 MB case 111 s → 2.7 s (one message); a 146 KB real diff
+  (7 files shortened) 4.4 s.
 
 ### Reference implementations (installed locally, read these before designing)
 

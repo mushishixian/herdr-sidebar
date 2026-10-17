@@ -58,8 +58,11 @@ directory, so there is no second repo to fetch.
 ```bash
 git clone -b fresh-inline-editor <your fork URL> ~/code/herdr-sidebar
 cd ~/code/herdr-sidebar
-docs/install-herdr-ide.sh            # --help for options (--lsp, --no-packages, --no-claude, --no-oco)
+docs/install-herdr-ide.sh            # --help for options (--no-lsp, --no-packages, --no-claude, --no-oco)
 ```
+
+Language servers are installed by default (`dotfiles/install-lsp.sh`, see
+*Language servers (LSP)*). `--no-lsp` skips them; `--no-packages` also skips their apt step.
 
 What it does, in order:
 
@@ -297,7 +300,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on
 | 2c02d3e | **Search popup + line-aware open** | `src/search_popup.rs`; the engine moved to lib `src/content_search.rs` (shared with the sidebar Search view); preview highlighted with `syntax::highlight_lines`; `actions::open_in_editor_inline_at` (`{line}` placeholder, or `file:line` for `fresh` / `fresh-open`). |
 | c5661c3 | **Replace popup + conflict routing** | Replace mode of the search popup (`HERDR_SIDEBAR_SEARCH_MODE=replace`, action `replace-popup`; `content_search::replace_in_text` / `apply_replacements`: engine-identical matching, `$1` expansion in regex mode, line endings / BOM / permissions kept, atomic write, root-confined). Conflicted (`!`) files open in the editor without Live Diff (`editor_live_diff`). |
 | 261bccb | **Dotfiles folded into this repo** | The standalone `~/code/dotfiles` now lives in `dotfiles/`; the upstream patch set was dropped. `dotfiles/herdr-sidebar/build.sh` builds this checkout and points herdr's `herdr-sidebar` registration at it. |
-| *uncommitted* | **Media opens in the preview; previews cover Fresh; Agent pane title** | `viewer::is_media_file` keeps pictures and videos out of the custom editor (Explorer click, Ctrl+Q popup; Source Control's `diff_opens_in_editor` media flag). Preview host: `fresh-ide` runs a host loop in the Fresh pane (token `hs-preview-host`); the sidebar writes `<sidebar state dir>/preview-host/<pane>.req`, the host claims it by rename, and the viewer runs there with `HERDR_SIDEBAR_PREVIEW_HOSTED=1`; `viewer::uncover_host` runs before the editor launches. Agent pane title: `ide-agent-title` + `shell/agent-title.zsh` (zsh preexec/precmd) → `pane report-metadata --title "◆ CLAUDE"`. |
+| *uncommitted* | **Media opens in the preview; previews cover Fresh; Agent pane title** | `viewer::is_media_file` keeps pictures and videos out of the custom editor (Explorer click, Ctrl+Q popup; Source Control's `diff_opens_in_editor` media flag). Preview host: `fresh-ide` runs a host loop in the Fresh pane (token `hs-preview-host`); the sidebar writes `<sidebar state dir>/preview-host/<pane>.req`, the host claims it by rename, and the viewer runs there with `HERDR_SIDEBAR_PREVIEW_HOSTED=1`; `viewer::uncover_host` runs before the editor launches. Agent pane title: `ide-agent-title` + `shell/agent-title.zsh` (zsh preexec/precmd) → `pane report-metadata --title "◆ CLAUDE"`; language servers: `dotfiles/install-lsp.sh` (default in the installer) + Fresh `lsp` auto_start. |
 
 **AI commit** (`ctrl+shift+a`): the action does not commit. It writes a per-tab
 request (`src/ai_commit.rs`, under the sidebar's private runtime dir) for the focused
@@ -313,6 +316,13 @@ git there. oco treats itself as the hook, writes the message into the file it is
 and never commits. It runs with `OCO_GITPUSH=false`, `NO_COLOR=1`, null stdin, and a 120 s
 timeout. An unconfigured oco reports `ERR_TTY_INIT_FAILED` (shown as "run `oco setup`").
 On failure the changes stay staged and the message box is left alone.
+
+Big or generated files are shortened for the AI only: the first 40 lines of a new file, or the
+first hunks of a changed one, and generated/vendored paths (`*.min.js`, `*.map`, `dist/`, …) or
+anything over about 12 KB. The commit still contains every change. The sidebar also sends oco
+`OCO_TOKENS_MAX_INPUT=24000` whatever `~/.opencommit` says, so oco never splits the diff into
+several messages. When a file was shortened the flash says how many ("N large file(s)
+summarised for the AI").
 
 While it runs, the ✓ Commit button shows a braille spinner with "AI generating…" (then "Committing…")
 and a sweeping highlight band. Clicking ✓ Commit during that just says "AI commit in progress…".
@@ -347,6 +357,36 @@ menu item still sends a picture to Fresh.
 - The sidebar's own Search view still has an inert Replace field; replacement lives only in the popup.
 - Popup panes belong to no tab, so both popups (and Ctrl+Q, since `aedfbd6`) hand the editor
   the caller pane's `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`.
+
+### Language servers (LSP)
+
+Fresh starts a language server for a file only when its `lsp` entry in
+`dotfiles/config/fresh/config.json` sets `auto_start` (the entry is merged over Fresh's
+built-in command, so the command itself is not repeated there).
+`dotfiles/install-lsp.sh` installs the servers; the installer runs it by default.
+
+| Language | Server (command) | Installed by / location |
+|---|---|---|
+| Markdown | `marksman` | GitHub release binary → `~/.local/bin/marksman` |
+| Go | `gopls` | `go install` (apt `golang-go`) → `~/.local/bin/gopls` |
+| Rust | `rust-analyzer` | `rustup component add rust-analyzer rust-src` when rustup exists, else the release binary → `~/.local/bin/rust-analyzer`; apt `rust-src` gives std completions. Releases since 2026-07-27 refuse toolchains older than 1.94, so with an older distro `rustc` (apt's is 1.93) the script pins release `2026-07-20` |
+| Dart | `dart language-server --protocol=lsp` | checksum-verified SDK zip → `~/.local/share/dart-sdk`, linked as `~/.local/bin/dart`. A `dart` already on PATH (e.g. Flutter's) is left alone |
+| PHP | `phpactor language-server` | phar → `~/.local/bin/phpactor`; needs apt `php-cli php-xml php-mbstring` |
+| JavaScript / TypeScript | `typescript-language-server --stdio` | npm into `~/.local` (with `typescript`; also the Bash, YAML and JSON servers) |
+| Python | `pylsp` | apt `python3-pylsp`; installed, but no `lsp.python` entry, so it does not auto-start |
+
+- **Update**: `dotfiles/install-lsp.sh --update` reinstalls and upgrades everything it manages.
+  Without flags it installs only what is missing. `--only markdown,go` limits the languages.
+- **Add a language**: (1) add an install step and a row in the `servers` table of
+  `dotfiles/install-lsp.sh`, plus its apt packages in the decision block; (2) add
+  `"<language>": { "auto_start": true }` under `lsp` in `dotfiles/config/fresh/config.json`;
+  (3) add its command to the verify list in `docs/install-herdr-ide.sh`; (4) add a row to this table.
+- **Workspace trust**: Fresh starts language servers only in a *Trusted* workspace (status bar
+  `Trusted`, stored in `~/.local/share/fresh/workspaces/<path>/trust.json`). A *Restricted* one shows
+  `LSP (off)`; trust it with the command palette (`Ctrl+P`, "Trust This Folder" / "Workspace Trust") or the trust dialog's "Trust folder & Allow Tooling (T)".
+- **Logs**: `~/.local/state/fresh/logs/lsp/` (one log per language and Fresh process).
+- **Apply config changes**: restart the Fresh daemons with `fresh-restart --all`. Fresh reads
+  `lsp` only at start.
 
 ### Fresh plugins (`dotfiles/config/fresh/plugins`)
 
@@ -455,7 +495,12 @@ popups, and conflict routing.
 | `ctrl+alt+f` / `ctrl+alt+e` does nothing | `herdr plugin action list \| grep -E 'search-popup\|replace-popup'`; `herdr server reload-config` |
 | A picture opens as garbage in Fresh | pictures open in the sidebar preview since the media-routing change; rebuild and redeploy the sidebar (`dotfiles/herdr-sidebar/build.sh`) if an old build is still running. The explicit "Open in Editor" menu item still sends it to Fresh |
 | A file opens in another workspace's Fresh | fixed: `fresh-open` only uses this workspace's editor; check the Fresh pane's `fresh_daemon` token with `herdr pane list` |
+| AI commit is slow or writes several messages | Update the sidebar (`dotfiles/herdr-sidebar/build.sh`) so the curated diff is used; lower `OCO_TOKENS_MAX_INPUT` in `~/.opencommit` too for manual `oco` runs (the sidebar already passes 24000) |
 | `ctrl+shift+a` message never appears in the box | the tab needs a sidebar (its Source Control view takes the request); the request expires after 30 s; `oco setup` |
+| A `*.log` tab opens when I open a file | That language's server is missing and `lsp` auto-starts it: `dotfiles/install-lsp.sh --only <language>` (markdown, go, rust, dart, php, js, python), then `fresh-restart --all` |
+| Status bar says `Restricted` / `LSP (off)` | the workspace is not trusted: Fresh never starts servers there. `Ctrl+P` → "Trust This Folder" |
+| `LSP (rust)`: "outdated toolchain version" | the downloaded rust-analyzer is newer than your `rustc` supports: `dotfiles/install-lsp.sh --update --only rust` picks the release that matches |
+| No completions in Rust std | `rust-src` is missing: `apt-cache policy rust-src`, then `dotfiles/install-lsp.sh --update` (or `rustup component add rust-src`) |
 | `ctrl+b alt+g` (lazygit) does nothing | `command -v lazygit` (it is in `dotfiles/packages.txt`: rerun the installer without `--no-packages`, or `sudo apt install lazygit`) |
 | Ctrl+click / Send to Agent / sidebar click still run scripts from `~/code/dotfiles` | rerun `docs/install-herdr-ide.sh` (it re-points the links, the `dotfiles-ide` registration and `editor-command.txt`), then `dotfiles/herdr-plugins/ide/bin/fresh-restart --all` so the daemons pick up `DOTFILES_IDE_BIN` |
 

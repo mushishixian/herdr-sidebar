@@ -23,11 +23,12 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 | A Fresh plugin (`dotfiles/config/fresh/plugins/*.ts`) | The *Fresh plugins* section of `docs/herdr-ide.md`; `docs/install-herdr-ide.sh` verify list if it should be checked; the plugin link loop in `dotfiles/install.sh` picks new `*.ts` files up automatically, but a rerun is still needed |
 | A script the user runs by name from PATH (`dotfiles/herdr-plugins/ide/bin/*`) | The `for script in …` link list in `dotfiles/install.sh`. Scripts that only herdr runs (manifest `command = ["./bin/…"]`) need no link |
 | An apt, npm or cargo dependency | `dotfiles/packages.txt` (apt) or the installer step (npm/cargo) in `dotfiles/install.sh` or `docs/install-herdr-ide.sh`; the *Install* section of `docs/herdr-ide.md`; a check in the verify step |
+| A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; the verify list in `docs/install-herdr-ide.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
 | A sidebar setting default | `dotfiles/herdr-sidebar/state.json`, and the *Sidebar defaults* paragraph in `docs/herdr-ide.md` (*herdr-sidebar fork*) |
 | Anything the sidebar (Rust) and the dotfiles scripts share (env vars such as `HERDR_SIDEBAR_OPEN_DIFF`, `HERDR_SIDEBAR_PREVIEW_HOSTED`, `FRESH_IDE_DAEMON`, `DOTFILES_IDE_BIN`; pane tokens such as `fresh_daemon`, `hs-preview-host`; request files such as the AI-commit request, the live-diff request and `preview-host/<pane>.req`; `editor-command.txt`) | Both sides in the same change. Document the contract in the root `AGENTS.md` (Rust side) and in `docs/herdr-ide.md` |
 | Pane labels `Fresh`, `Terminal`, `Agent`, or the plugin id `dotfiles-ide` | Do not rename them: scripts, state dirs and key bindings look them up. Show new display text through a metadata title (`pane report-metadata --title`) |
 | Any user-visible behaviour | `docs/herdr-ide.md`: the feature section, *Keys* and *Troubleshooting*; the fork commit table (*herdr-sidebar fork*): its `*uncommitted*` row until the user commits, then the hash |
-| Install, upgrade or migration behaviour | `docs/install-herdr-ide.sh` (and its `--help` text, the `sed -n '2,10p'` header) and `dotfiles/install.sh` (its `--help` header, `sed -n '2,13p'`); the *Install*, *Migrating* and *Updating* sections of `docs/herdr-ide.md` |
+| Install, upgrade or migration behaviour | `docs/install-herdr-ide.sh` (and its `--help` text, the `sed -n '2,11p'` header) and `dotfiles/install.sh` (its `--help` header, `sed -n '2,14p'`); the *Install*, *Migrating* and *Updating* sections of `docs/herdr-ide.md` |
 
 ## Verify before you finish
 
@@ -61,6 +62,13 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   Pebrel settings must unbind them, or the AI-commit and recent-tab keys never arrive.
 - `npm install -g` needs `--prefix ~/.local`: the global prefix is root-owned.
 - `herdr` started from an agent shell passes `NO_COLOR=1` to every pane. Start herdr from a normal shell.
+- Fresh starts language servers only in a Trusted workspace (`~/.local/share/fresh/workspaces/<path>/trust.json`).
+  A throwaway test folder is Restricted (`LSP (off)`): write a `{"level": "trusted"}` trust file for the
+  test folder only, and delete it afterwards.
+- rust-analyzer releases since 2026-07-27 refuse toolchains older than 1.94; apt's `rustc` is 1.93, so
+  `install-lsp.sh` pins release `2026-07-20` for an older `rustc`. Recheck when apt's Rust moves.
+- Under `set -o pipefail`, `cmd | grep -q` can fail although it matched (grep exits early, `cmd` gets
+  SIGPIPE). Use `grep … >/dev/null` in conditions.
 - `pane.send_text` sends raw bytes (a newline submits an agent prompt); `pane.send_input` bracket-pastes.
 
 ## Commits

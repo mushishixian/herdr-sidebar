@@ -201,8 +201,9 @@ enum Focus {
 
 /// What the `git-commit-ai` worker produced for one repository.
 enum AiOutcome {
-    /// OpenCommit's message for the staged changes.
-    Message(String),
+    /// OpenCommit's message for the staged changes, and the large files it
+    /// saw only in shortened form.
+    Message(herdr_sidebar::ai_commit::Generated),
     /// Nothing was staged after `git add -A` semantics: no changes at all.
     NothingToCommit,
     Failed(String),
@@ -4308,16 +4309,24 @@ impl App {
             .map(|repo| repo.name.clone())
             .unwrap_or_default();
         match outcome {
-            AiOutcome::Message(message) => {
+            AiOutcome::Message(generated) => {
                 // The commit below needs the staged list to be current.
                 self.refresh();
                 if let Some(repo) = self.repos.get_mut(index) {
-                    repo.message = message.chars().collect();
+                    repo.message = generated.message.chars().collect();
                     repo.cursor = repo.message.len();
                 }
                 self.active = index;
                 self.focus = Focus::Message;
-                self.flash = Some(("✧ AI message ready — committing…".into(), false));
+                let summarised = generated.summarised.len();
+                let flash = if summarised == 0 {
+                    "✧ AI message ready — committing…".to_string()
+                } else {
+                    format!(
+                        "✧ AI message ready ({summarised} large file(s) summarised for the AI) — committing…"
+                    )
+                };
+                self.flash = Some((flash, false));
                 self.ai_commit_due = Some((index, std::time::Instant::now() + AI_COMMIT_REVIEW));
             }
             AiOutcome::NothingToCommit => {
@@ -6064,7 +6073,7 @@ fn ai_commit_outcome(git: &Git) -> AiOutcome {
         Err(error) => return AiOutcome::Failed(error),
     }
     match herdr_sidebar::ai_commit::generate(git.root()) {
-        Ok(message) => AiOutcome::Message(message),
+        Ok(generated) => AiOutcome::Message(generated),
         Err(error) => AiOutcome::Failed(error),
     }
 }
