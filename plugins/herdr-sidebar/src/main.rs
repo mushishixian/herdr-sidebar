@@ -18,7 +18,7 @@ use std::time::Duration;
 use crossterm::event::{
     self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
 };
-use herdr_sidebar::{ensure, launch, state, viewer};
+use herdr_sidebar::{ensure, launch, shortcut_tip, state, viewer};
 use state::{Exit, View};
 
 /// How often the source-control view re-reads `git status` while idle.
@@ -29,6 +29,10 @@ const POPUP_FOCUS_POLL: Duration = Duration::from_millis(200);
 
 fn main() -> std::io::Result<()> {
     let mode = std::env::args().nth(1);
+    shortcut_tip::announce_flag(
+        mode.as_deref().unwrap_or(""),
+        std::env::args().nth(2).as_deref(),
+    );
     match mode.as_deref() {
         Some("--ensure") => return ensure::run(ensure::Mode::Ensure),
         Some("--toggle") => {
@@ -65,6 +69,19 @@ fn main() -> std::io::Result<()> {
         }
         Some("--file-popup-open") => {
             return herdr_sidebar::file_popup::open();
+        }
+        Some("--git-action") => {
+            let op = std::env::args().nth(2).unwrap_or_default();
+            return herdr_sidebar::git_action::run(&op);
+        }
+        Some("--git-pull") => {
+            return herdr_sidebar::git_action::run("pull");
+        }
+        Some("--git-push") => {
+            return herdr_sidebar::git_action::run("push");
+        }
+        Some("--git-commit") => {
+            return herdr_sidebar::git_action::run("commit");
         }
         Some("--launch-decision") => {
             // Optional second arg picks the source-control decision; default

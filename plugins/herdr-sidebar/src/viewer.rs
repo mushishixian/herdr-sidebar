@@ -929,7 +929,7 @@ fn copy_on_select_now(read: Option<std::io::Result<String>>, last_good: &mut Opt
 /// then `$XDG_CONFIG_HOME/herdr` (honored on Windows too), then on Windows
 /// `%APPDATA%\herdr`, `%USERPROFILE%\AppData\Roaming\herdr` or
 /// `$HOME/.config/herdr`, elsewhere `~/.config/herdr`.
-fn herdr_config_path() -> Option<PathBuf> {
+pub(crate) fn herdr_config_path() -> Option<PathBuf> {
     let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
     if let Some(path) = set("HERDR_CONFIG_PATH") {
         return Some(PathBuf::from(path));

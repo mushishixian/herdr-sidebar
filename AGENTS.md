@@ -50,7 +50,30 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
 - Manifest format: `herdr-plugin.toml` (`[[build]]`, `[[panes]]`, `[[actions]]`).
 - herdr.dev/docs/plugins lists an `[[actions]]` `contexts` field as REQUIRED, but no
   working plugin ships it (checked herdr-file-viewer, herdr-spreader, ours, herdr-notes)
-  — doc/implementation drift; leave it out.
+  — doc/implementation drift; leave it out. herdr 0.9.5's schema accepts
+  `contexts = ["global"|"workspace"|"tab"|"pane"|"selection"]`, but the pane right-click menu is
+  hardcoded (`src/client/shell/context_menu.rs`, upstream 2026-10-16) and never lists plugin
+  actions, so a plugin cannot add items to herdr's own right-click menu.
+- `pane.send_text` writes raw bytes (newlines submit an agent's prompt); `pane.send_input {text}`
+  wraps text in bracketed paste when the target app enabled it — use it to paste into an agent.
+- Shortcut reminders (`src/shortcut_tip.rs`): when an action runs from a herdr key binding, its
+  toast carries the bound key (title "Switch branch", body "Ctrl+Alt+C"; git pull/push/AI-commit
+  append " · <Key>" to the first notification). It acts ONLY when `HERDR_PLUGIN_ACTION_ID` is set, so
+  hooks and internal calls never toast. The key comes from herdr's config.toml (`[[keys.command]]`
+  `type = "plugin_action"`, `-windows` twin accepted, `[keys] prefix` for `prefix+x` chords) via the
+  same `herdr_config_path()` the viewer uses. Flag→action mapping lives in `announce_flag`, shared by
+  `main.rs` and the Windows sidecar.
+- Background Git actions (e.g. `git-pull`, `git-push`): Git `--progress` emits `\r` carriage returns
+  and sends push updates/progress to stderr even on exit code 0. Always set `GIT_TERMINAL_PROMPT=0`
+  and null stdin to fail fast instead of hanging on credential prompts. Rate-limit toast notifications
+  via `notification.show` (1-2s interval) to keep Herdr's UI smooth, and guard operations with
+  repository-scoped `File::try_lock()` to avoid Git index lock collisions from rapid keystrokes.
+- AI commit (`--git-commit`, action `git-commit-ai`): `git add -A`, then OpenCommit `oco --yes`
+  writes the commit. `--yes` only skips the message confirmation — after committing, oco still
+  PROMPTS to push unless `OCO_GITPUSH=false` is in its env. An unconfigured oco (no AI provider)
+  starts its setup wizard and, with null stdin, crashes with `ERR_TTY_INIT_FAILED` (verified,
+  oco 3.3.11); `summarize_oco_failure` maps that to "run `oco setup`". On Windows npm installs
+  `oco.cmd`, which `Command::new("oco")` cannot resolve, so it goes through `cmd /C` (untested live).
 
 ### Reference implementations (installed locally, read these before designing)
 
@@ -677,6 +700,13 @@ HACKING.md — budget time for that before promising a patched build.
   again focuses the live pane through `focus_tab_for_client` instead of launching a duplicate. The
   token is cleared when the editor exits. The saved command wins over `HERDR_SIDEBAR_EDITOR`,
   `VISUAL`, and `EDITOR` fallbacks.
+- **SCM changed-file routing** (`scm_app.rs` `open_diff` / `diff_opens_in_editor`): with the custom
+  editor opted in (`custom_editor_on_click` AND `custom_editor_inline`, re-read on SCM tick), a
+  configured editor, a non-`D` status and an existing path, clicking/Enter/hover-open/`o` on a staged
+  or unstaged file runs `actions::open_in_editor_inline_env(root, file, [HERDR_SIDEBAR_OPEN_DIFF=1])`
+  instead of the preview pane. `HERDR_SIDEBAR_OPEN_DIFF=1` is the contract with the editor: open the
+  file and show its diff against HEAD. Launch failure flashes the error and falls back to the viewer.
+  Context menu "Open Diff Preview" always uses `open_diff_viewer`; drawer refs keep the viewer.
 - **Title-bar action buttons** (`ui.rs` `TitleAction`/`title_action_spans`): VS Code-style
   hover buttons at the header's top-right (Explorer: New File / New Folder / Refresh /
   Collapse All; SCM: Refresh / Collapse All), left of the standalone ⚙. Terminals emit NO

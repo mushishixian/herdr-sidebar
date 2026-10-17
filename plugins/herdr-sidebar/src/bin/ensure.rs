@@ -5,6 +5,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() {
+    let flag = std::env::args().nth(1).unwrap_or_default();
+    herdr_sidebar::shortcut_tip::announce_flag(&flag, std::env::args().nth(2).as_deref());
     match std::env::args().nth(1).as_deref() {
         Some("--update-latest") => {
             if let Err(error) = herdr_sidebar::updates::run() {
@@ -15,6 +17,35 @@ fn main() {
         }
         Some("--refresh-sidebars") => {
             if let Err(error) = herdr_sidebar::updates::refresh() {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--git-action") => {
+            let op = std::env::args().nth(2).unwrap_or_default();
+            if let Err(error) = herdr_sidebar::git_action::run(&op) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--git-pull") => {
+            if let Err(error) = herdr_sidebar::git_action::run("pull") {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--git-push") => {
+            if let Err(error) = herdr_sidebar::git_action::run("push") {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--git-commit") => {
+            if let Err(error) = herdr_sidebar::git_action::run("commit") {
                 eprintln!("{error}");
                 std::process::exit(1);
             }

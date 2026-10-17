@@ -818,6 +818,13 @@ pub fn run_configured_editor() -> io::Result<()> {
 /// forwards the file to an editor pane in the same tab can find it. Nothing
 /// on screen changes besides what that command does.
 pub fn open_in_editor_inline(root: &Path, file: &Path) -> io::Result<()> {
+    open_in_editor_inline_env(root, file, &[])
+}
+
+/// [`open_in_editor_inline`] plus extra environment variables for the editor
+/// process. Source Control uses `HERDR_SIDEBAR_OPEN_DIFF=1` to ask the editor
+/// to show the file's diff against HEAD.
+pub fn open_in_editor_inline_env(root: &Path, file: &Path, env: &[(&str, &str)]) -> io::Result<()> {
     let command = configured_editor().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -829,11 +836,29 @@ pub fn open_in_editor_inline(root: &Path, file: &Path) -> io::Result<()> {
     } else {
         root.join(file)
     };
-    let argv = editor_argv(&command, &editor_file)?;
+    let mut child = inline_editor_command(&command, root, &editor_file, env)?.spawn()?;
+    // Reap it in the background so finished editors don't linger as zombies.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// The inline editor process, unspawned: argv from the configured command,
+/// cwd at the repo root, null stdio, its own process group on Unix, and the
+/// extra `env` pairs applied on top of the inherited environment.
+fn inline_editor_command(
+    command: &str,
+    root: &Path,
+    editor_file: &Path,
+    env: &[(&str, &str)],
+) -> io::Result<std::process::Command> {
+    let argv = editor_argv(command, editor_file)?;
     let mut child = std::process::Command::new(&argv[0]);
     child
         .args(&argv[1..])
         .current_dir(root)
+        .envs(env.iter().copied())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -843,12 +868,7 @@ pub fn open_in_editor_inline(root: &Path, file: &Path) -> io::Result<()> {
         // Its own process group: a Ctrl+C in the sidebar never reaches it.
         child.process_group(0);
     }
-    let mut child = child.spawn()?;
-    // Reap it in the background so finished editors don't linger as zombies.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    Ok(child)
 }
 
 pub fn open_in_editor_tab(my_pane_id: &str, root: &Path, file: &Path) -> io::Result<()> {
@@ -1081,6 +1101,31 @@ pub fn pick_folder(start: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_editor_command_applies_extra_env_and_repo_cwd() {
+        let root = Path::new("/repo");
+        let file = Path::new("/repo/src/main.rs");
+        let cmd = inline_editor_command(
+            "fresh --wait",
+            root,
+            file,
+            &[("HERDR_SIDEBAR_OPEN_DIFF", "1")],
+        )
+        .expect("builds");
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+            .collect();
+        assert!(envs.contains(&(
+            "HERDR_SIDEBAR_OPEN_DIFF".into(),
+            Some(std::ffi::OsString::from("1"))
+        )));
+        assert_eq!(cmd.get_program(), "fresh");
+        assert_eq!(cmd.get_current_dir(), Some(root));
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["--wait", "/repo/src/main.rs"]);
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("aa-ft-actions-{}-{tag}", std::process::id()));

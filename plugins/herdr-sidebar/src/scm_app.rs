@@ -21,7 +21,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 
-use herdr_sidebar::actions::{ClipboardWrite, copy_to_clipboard, open_external, reveal};
+use herdr_sidebar::actions::{self, ClipboardWrite, copy_to_clipboard, open_external, reveal};
 use herdr_sidebar::branch_ui::{
     BranchPicker, FooterZones, PickerAction, draw_git_footer, sync_glyph,
 };
@@ -645,6 +645,7 @@ enum MenuTarget {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
     OpenDiff,
+    OpenDiffPreview,
     StageOrUnstage,
     Discard,
     CopyPath,
@@ -1319,6 +1320,8 @@ impl App {
     /// pick up external changes, and collect finished ✧ suggestion / sync runs.
     pub fn tick(&mut self) {
         let shared = sidebar::load_state();
+        self.sidebar_state.custom_editor_on_click = shared.custom_editor_on_click;
+        self.sidebar_state.custom_editor_inline = shared.custom_editor_inline;
         self.sidebar_state.git_deco = shared.git_deco;
         self.sidebar_state.show_git_footer = shared.show_git_footer;
         self.sidebar_state.dock_right = shared.dock_right;
@@ -2213,7 +2216,10 @@ impl App {
             _ => return, // section headers have no menu
         };
         let Some(entry) = entry.cloned() else { return };
-        let mut entries = vec![MenuEntry::Action(MenuAction::OpenDiff, "Open Diff")];
+        let mut entries = vec![
+            MenuEntry::Action(MenuAction::OpenDiff, "Open Diff"),
+            MenuEntry::Action(MenuAction::OpenDiffPreview, "Open Diff Preview"),
+        ];
         // A deleted file has nothing left on disk to hand to the shell.
         if entry.letter != 'D' {
             entries.push(MenuEntry::Action(
@@ -3105,6 +3111,7 @@ impl App {
                 self.refresh();
             }
             MenuAction::OpenDiff => self.open_diff(repo, &entry, staged),
+            MenuAction::OpenDiffPreview => self.open_diff_viewer(repo, &entry, staged),
             MenuAction::Discard => self.overlay = Some(Overlay::ConfirmDiscard { repo, entry }),
             MenuAction::CopyPath | MenuAction::CopyRelativePath => {
                 let rel = entry.path.replace('/', std::path::MAIN_SEPARATOR_STR);
@@ -3338,9 +3345,54 @@ impl App {
         }
     }
 
+    /// Open a changed file's diff. With the custom editor opted in (inline
+    /// mode, on click) the file opens in that editor with
+    /// `HERDR_SIDEBAR_OPEN_DIFF=1`; otherwise, or when the editor cannot be
+    /// launched, the diff goes to the preview pane.
+    fn open_diff(&mut self, repo: usize, entry: &FileEntry, staged: bool) {
+        let Some(r) = self.repos.get(repo) else {
+            return;
+        };
+        let root = r.git.root().to_path_buf();
+        let exists = root.join(&entry.path).exists();
+        let want_editor =
+            self.sidebar_state.custom_editor_on_click && self.sidebar_state.custom_editor_inline;
+        let editor_configured = want_editor && actions::configured_editor().is_some();
+        if diff_opens_in_editor(
+            self.sidebar_state.custom_editor_on_click,
+            self.sidebar_state.custom_editor_inline,
+            editor_configured,
+            entry.letter,
+            exists,
+        ) {
+            self.open_diff_in_editor(repo, &root, entry, staged);
+        } else {
+            self.open_diff_viewer(repo, entry, staged);
+        }
+    }
+
+    /// Hand the file to the custom editor, asking it to show its diff vs HEAD.
+    /// On failure the flash shows the error and the diff opens in the viewer.
+    fn open_diff_in_editor(&mut self, repo: usize, root: &Path, entry: &FileEntry, staged: bool) {
+        let name = entry
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(entry.path.as_str())
+            .to_string();
+        let file = root.join(&entry.path);
+        match actions::open_in_editor_inline_env(root, &file, &[(OPEN_DIFF_ENV, "1")]) {
+            Ok(()) => self.flash = Some((format!("opened diff in editor: {name}"), false)),
+            Err(error) => {
+                self.flash = Some((format!("custom editor failed: {error}"), true));
+                self.open_diff_viewer(repo, entry, staged);
+            }
+        }
+    }
+
     /// Show a file's diff in the preview pane beside the sidebar. Staged
     /// rows show the staged diff; untracked files render as one addition.
-    fn open_diff(&mut self, repo: usize, entry: &FileEntry, staged: bool) {
+    fn open_diff_viewer(&mut self, repo: usize, entry: &FileEntry, staged: bool) {
         let Some(pane_id) = self.pane_ctl.as_ref().map(|c| c.pane_id.clone()) else {
             self.flash = Some(("diff preview needs a herdr pane".into(), true));
             return;
@@ -5615,9 +5667,38 @@ fn no_repo_layout(area: Rect, merged: bool) -> [Rect; 2] {
     .areas(area)
 }
 
+/// Env var telling the custom editor to open a file and show its diff vs HEAD.
+/// Contract shared with the editor integration: `1` means "show the diff".
+const OPEN_DIFF_ENV: &str = "HERDR_SIDEBAR_OPEN_DIFF";
+
+/// Whether a changed-file row opens in the custom editor (with its diff)
+/// instead of the preview pane. A deleted file has nothing on disk to open.
+fn diff_opens_in_editor(
+    on_click: bool,
+    inline: bool,
+    editor_configured: bool,
+    letter: char,
+    exists: bool,
+) -> bool {
+    on_click && inline && editor_configured && letter != 'D' && exists
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_routes_to_editor_only_when_every_condition_holds() {
+        assert!(diff_opens_in_editor(true, true, true, 'M', true));
+        assert!(diff_opens_in_editor(true, true, true, 'U', true));
+        // Each condition alone breaks the route.
+        assert!(!diff_opens_in_editor(false, true, true, 'M', true));
+        assert!(!diff_opens_in_editor(true, false, true, 'M', true));
+        assert!(!diff_opens_in_editor(true, true, false, 'M', true));
+        assert!(!diff_opens_in_editor(true, true, true, 'M', false));
+        // A deletion, on either side, keeps the viewer.
+        assert!(!diff_opens_in_editor(true, true, true, 'D', true));
+    }
 
     #[test]
     fn clean_diverged_repo_uses_sync_as_the_primary_action() {

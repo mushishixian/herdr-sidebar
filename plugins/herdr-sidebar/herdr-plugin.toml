@@ -100,6 +100,48 @@ description = "Popup: quickly search and open files in current workspace/repo."
 command = ["./target/release/herdr-sidebar", "--file-popup-open"]
 
 [[actions]]
+id = "git-pull"
+platforms = ["linux", "macos"]
+title = "Git Pull"
+description = "Pull changes from remote with live asynchronous progress notification."
+command = ["./target/release/herdr-sidebar", "--git-pull"]
+
+[[actions]]
+id = "git-pull-windows"
+platforms = ["windows"]
+title = "Git Pull"
+description = "Pull changes from remote with live asynchronous progress notification."
+command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--git-pull"]
+
+[[actions]]
+id = "git-push"
+platforms = ["linux", "macos"]
+title = "Git Push"
+description = "Push changes to remote with live asynchronous progress notification."
+command = ["./target/release/herdr-sidebar", "--git-push"]
+
+[[actions]]
+id = "git-push-windows"
+platforms = ["windows"]
+title = "Git Push"
+description = "Push changes to remote with live asynchronous progress notification."
+command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--git-push"]
+
+[[actions]]
+id = "git-commit-ai"
+platforms = ["linux", "macos"]
+title = "Git: AI Commit"
+description = "Stage all changes (git add -A) and commit with an OpenCommit-generated message."
+command = ["./target/release/herdr-sidebar", "--git-commit"]
+
+[[actions]]
+id = "git-commit-ai-windows"
+platforms = ["windows"]
+title = "Git: AI Commit"
+description = "Stage all changes (git add -A) and commit with an OpenCommit-generated message."
+command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--git-commit"]
+
+[[actions]]
 id = "git-switch-branch"
 platforms = ["linux", "macos"]
 title = "Switch branch"
