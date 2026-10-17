@@ -1384,6 +1384,11 @@ fn is_video_file(target: &Path) -> bool {
     )
 }
 
+/// Pictures and videos: the preview renders them; a text editor cannot.
+pub fn is_media_file(target: &Path) -> bool {
+    is_image_file(target) || is_video_file(target)
+}
+
 fn decode_image_file(target: &Path) -> Result<image::RgbaImage, String> {
     let file_bytes = std::fs::metadata(target)
         .map_err(|error| error.to_string())?
@@ -1801,10 +1806,14 @@ fn report_identity(mode: &ViewMode, doc_key: Option<&str>, control: &Path) {
             "tokens": tokens,
         }),
     );
-    let _ = ipc::call_text(
-        "pane.rename",
-        serde_json::json!({ "pane_id": pane_id, "label": mode_pane_label(mode) }),
-    );
+    // A hosted viewer keeps the host pane's own label ("Fresh"), which the
+    // user's scripts look up by.
+    if !runs_hosted() {
+        let _ = ipc::call_text(
+            "pane.rename",
+            serde_json::json!({ "pane_id": pane_id, "label": mode_pane_label(mode) }),
+        );
+    }
     let Some(doc_key) = doc_key else { return };
     // The tab is the user's, not the document's, when we share it.
     if inline {
@@ -1830,6 +1839,45 @@ fn report_identity(mode: &ViewMode, doc_key: Option<&str>, control: &Path) {
 /// a running viewer's placement is whatever its pane already is.
 fn runs_inline() -> bool {
     std::env::var(crate::state::PREVIEW_INLINE_ENV).is_ok_and(|value| value == "1")
+}
+
+/// This viewer runs inside a host pane it covers (see [`spawn_hosted`]). The
+/// host pane keeps its own label, tab and process; the viewer only ever clears
+/// its own metadata tokens on the way out.
+fn runs_hosted() -> bool {
+    std::env::var(crate::state::PREVIEW_HOSTED_ENV).is_ok_and(|value| value == "1")
+}
+
+/// Null every viewer token on this process's own pane. `report_metadata`
+/// merges maps, so a null value is what actually removes a token. The host
+/// token is deliberately not in the list: it belongs to the host, not us.
+fn clear_viewer_tokens() {
+    let Ok(pane_id) = std::env::var("HERDR_PANE_ID") else {
+        return;
+    };
+    if pane_id.is_empty() {
+        return;
+    }
+    let tokens: serde_json::Map<String, serde_json::Value> = [
+        METADATA_SOURCE,
+        TOKEN_PATH,
+        TOKEN_CONTROL,
+        TOKEN_INLINE,
+        TOKEN_ORIGIN_TAB,
+        TOKEN_PINNED,
+        TOKEN_DEDICATED,
+    ]
+    .into_iter()
+    .map(|key| (key.to_string(), serde_json::Value::Null))
+    .collect();
+    let _ = ipc::call_text(
+        "pane.report_metadata",
+        serde_json::json!({
+            "pane_id": pane_id,
+            "source": METADATA_SOURCE,
+            "tokens": tokens,
+        }),
+    );
 }
 
 fn preview_pane_label(doc_name: &str) -> String {
@@ -1858,6 +1906,14 @@ fn close_own_pane(control: &Path, current: &Option<Request>, notice: &mut Option
     };
     if pane_id.is_empty() {
         return false;
+    }
+    if runs_hosted() {
+        // The host pane is the user's editor: never close it or its tab. Clear
+        // our tokens and let the process exit; the host brings the editor back.
+        clear_viewer_tokens();
+        remove_control_file(control);
+        remove_control_file(&control_path_for_pane(&pane_id));
+        return true;
     }
     if runs_inline() {
         let list = ipc::call_text("pane.list", serde_json::json!({})).unwrap_or_default();
@@ -2599,6 +2655,11 @@ pub fn run(control: &Path) -> std::io::Result<()> {
             last_diff_refresh = Instant::now();
         }
     };
+    // Every exit route (q, Esc, the header close, a control-file close, an
+    // error) clears a hosted viewer's tokens here, so none outlives the process.
+    if runs_hosted() {
+        clear_viewer_tokens();
+    }
     let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
@@ -2857,7 +2918,7 @@ pub fn open_in_pane(
     payload: &str,
 ) -> Result<PreviewTarget, String> {
     let state = crate::state::load_state();
-    let inline = state.preview_placement.is_inline();
+    let mut inline = state.preview_placement.is_inline();
     let list = ipc::call_text("pane.list", serde_json::json!({}))
         .map_err(|e| format!("preview failed: {e}"))?;
     let caller_tab_id = crate::launch::tab_of(&list, my_pane_id);
@@ -2899,6 +2960,11 @@ pub fn open_in_pane(
                 .into(),
         );
     }
+    // A live viewer covering a host pane in this tab is an inline viewer of
+    // this tab whatever the placement setting says, so clicks route to it.
+    if hosted_viewer_in(&list, &caller_tab_id).is_some_and(|hosted| !hosted.stale) {
+        inline = true;
+    }
     previews.retain(|preview| routable(preview, inline, &caller_tab_id));
     previews.sort_by(|a, b| a.tab_id.cmp(&b.tab_id).then(a.pane_id.cmp(&b.pane_id)));
     let origin_tab_id = preview_origin_tab(&previews, &caller_tab_id);
@@ -2931,6 +2997,15 @@ pub fn open_in_pane(
             origin_tab_id,
             inline,
         });
+    }
+
+    // 3a. A host pane in this tab (a Fresh editor the viewer covers) takes the
+    // viewer in place of a new pane or tab. Only a host that did not claim the
+    // request in time falls through to the paths below.
+    if let Some(host) = preview_host_in(&list, &caller_tab_id)
+        && let Some(result) = spawn_hosted(&host, spawn_cwd, doc_key, payload, &caller_tab_id)
+    {
+        return result;
     }
 
     // 3. Nothing reusable — a pane beside the sidebar, or a tab of its own.
@@ -3093,6 +3168,231 @@ pub(crate) fn spawn_inline_pane(
     })
 }
 
+/// Run the viewer INSIDE `host` (a pane that covers it, e.g. a Fresh editor)
+/// instead of splitting a new pane. The host script claims the request by
+/// renaming `X.req` to `X.run`; the request file disappearing is the ack.
+///
+/// `None` means nothing was handed over (no ack before the deadline, or the
+/// request could not be written): the request and control file are removed
+/// and the caller keeps its normal path. `Some(Err)` means the host claimed the
+/// request but the viewer could not be identified, so the viewer is already
+/// running and nothing may spawn a second one.
+fn spawn_hosted(
+    host: &str,
+    spawn_cwd: &Path,
+    doc_key: &str,
+    payload: &str,
+    caller_tab: &str,
+) -> Option<Result<PreviewTarget, String>> {
+    crate::rundir::ensure_private(&scratch_dir()).ok()?;
+    let control = fresh_control_path();
+    write_scratch_file(&control, payload).ok()?;
+    let request = host_request_path(host);
+    let text = host_request_text(
+        &std::env::current_exe().ok()?,
+        spawn_cwd,
+        &preview_spawn_env(&control, true),
+    );
+    let written = request
+        .as_deref()
+        .is_some_and(|request| write_host_request(request, &text).is_ok());
+    let Some(request) = request.filter(|_| written) else {
+        remove_control_file(&control);
+        return None;
+    };
+    if !wait_for_host_ack(&request, Duration::from_millis(1500)) {
+        let _ = std::fs::remove_file(&request);
+        remove_control_file(&control);
+        return None;
+    }
+    if let Err(error) = stamp_hosted_viewer(host, &control, doc_key) {
+        remove_control_file(&control);
+        return Some(Err(error));
+    }
+    remember_origin(host, caller_tab);
+    Some(Ok(PreviewTarget {
+        pane_id: host.to_string(),
+        tab_id: caller_tab.to_string(),
+        origin_tab_id: caller_tab.to_string(),
+        inline: true,
+    }))
+}
+
+/// `<state dir>/preview-host/<pane id>.req`, with `:` (not valid in a file
+/// name on Windows) replaced by `_`.
+fn host_request_path(host: &str) -> Option<PathBuf> {
+    Some(
+        crate::state::state_dir()?
+            .join("preview-host")
+            .join(format!("{}.req", host.replace(':', "_"))),
+    )
+}
+
+/// The request body the host reads, one item per line: the viewer executable,
+/// its working directory, then `KEY=VALUE` env entries (the viewer's spawn env
+/// plus [`crate::state::PREVIEW_HOSTED_ENV`]). Entries with a newline are
+/// dropped so they cannot forge a line.
+fn host_request_text(exe: &Path, cwd: &Path, env: &serde_json::Value) -> String {
+    let mut text = format!("{}\n{}\n", exe.display(), cwd.display());
+    if let Some(entries) = env.as_object() {
+        for (key, value) in entries {
+            let Some(value) = value.as_str() else {
+                continue;
+            };
+            if key.is_empty()
+                || key.contains('=')
+                || key.contains(['\n', '\r'])
+                || value.contains(['\n', '\r'])
+            {
+                continue;
+            }
+            text.push_str(&format!("{key}={value}\n"));
+        }
+    }
+    text.push_str(&format!("{}=1\n", crate::state::PREVIEW_HOSTED_ENV));
+    text
+}
+
+/// Write the request atomically: a temp file in the same directory, then a
+/// rename, so the host never reads a half-written request.
+fn write_host_request(path: &Path, text: &str) -> std::io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("preview host request has no directory"))?;
+    std::fs::create_dir_all(dir)?;
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temp, text)?;
+    std::fs::rename(&temp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })
+}
+
+/// Poll until the host has claimed (renamed away) the request, or the deadline.
+fn wait_for_host_ack(request: &Path, deadline: Duration) -> bool {
+    let started = Instant::now();
+    while request.exists() {
+        if started.elapsed() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    true
+}
+
+/// Stamp the viewer tokens on the HOST pane, as `register_viewer_pane` does for
+/// its own pane. Never renames the host and never closes it.
+fn stamp_hosted_viewer(host: &str, control: &Path, doc_key: &str) -> Result<(), String> {
+    let tokens = serde_json::json!({
+        METADATA_SOURCE: crate::state::unix_now().to_string(),
+        TOKEN_PATH: document_token(doc_key),
+        TOKEN_CONTROL: control_token(control),
+        TOKEN_INLINE: "1",
+    });
+    if ipc::call_text(
+        "pane.report_metadata",
+        serde_json::json!({
+            "pane_id": host,
+            "source": METADATA_SOURCE,
+            "tokens": tokens,
+        }),
+    )
+    .is_ok_and(|response| ipc_succeeded(&response))
+    {
+        Ok(())
+    } else {
+        Err("preview host could not be identified".into())
+    }
+}
+
+/// Panes of a `pane.list` payload as JSON values (empty when unparsable).
+fn pane_entries(pane_list_json: &str) -> Vec<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(crate::launch::strip_bom(pane_list_json))
+        .ok()
+        .and_then(|value| value["result"]["panes"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// The lexically smallest pane in `caller_tab` that advertises
+/// [`TOKEN_PREVIEW_HOST`] and is not already hosting a viewer.
+pub(crate) fn preview_host_in(pane_list_json: &str, caller_tab: &str) -> Option<String> {
+    if caller_tab.is_empty() {
+        return None;
+    }
+    let mut hosts: Vec<String> = pane_entries(pane_list_json)
+        .iter()
+        .filter(|pane| pane["tab_id"].as_str() == Some(caller_tab))
+        .filter(|pane| {
+            pane["tokens"][TOKEN_PREVIEW_HOST]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        })
+        .filter(|pane| pane["tokens"][METADATA_SOURCE].is_null())
+        .filter_map(|pane| pane["pane_id"].as_str().map(str::to_string))
+        .collect();
+    hosts.sort();
+    hosts.into_iter().next()
+}
+
+/// A viewer currently covering a host pane.
+#[derive(Debug, PartialEq, Eq)]
+struct HostedViewer {
+    pane_id: String,
+    control: PathBuf,
+    stale: bool,
+}
+
+/// The viewer covering a host pane in `caller_tab`, if any (lexically first).
+fn hosted_viewer_in(pane_list_json: &str, caller_tab: &str) -> Option<HostedViewer> {
+    if caller_tab.is_empty() {
+        return None;
+    }
+    let panes = pane_entries(pane_list_json);
+    let mut hosted: Vec<&serde_json::Value> = panes
+        .iter()
+        .filter(|pane| pane["tab_id"].as_str() == Some(caller_tab))
+        .filter(|pane| {
+            pane["tokens"][TOKEN_PREVIEW_HOST]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        })
+        .filter(|pane| !pane["tokens"][METADATA_SOURCE].is_null())
+        .collect();
+    hosted.sort_by_key(|pane| pane["pane_id"].as_str().unwrap_or_default().to_string());
+    let pane = hosted.first()?;
+    let pane_id = pane["pane_id"].as_str()?.to_string();
+    let now = crate::state::unix_now();
+    let stale = pane["tokens"][METADATA_SOURCE]
+        .as_str()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|stamp| now.saturating_sub(stamp) > crate::launch::HEARTBEAT_STALE_SECS)
+        .unwrap_or(true);
+    let control = pane["tokens"][TOKEN_CONTROL]
+        .as_str()
+        .map(control_from_token)
+        .unwrap_or_else(|| control_path_for_pane(&pane_id));
+    Some(HostedViewer {
+        pane_id,
+        control,
+        stale,
+    })
+}
+
+/// Before a file goes to the user's inline editor, close a viewer covering the
+/// host pane in the caller's tab so the editor is visible again. The viewer's
+/// own unsaved-changes prompt still guards a dirty buffer.
+pub fn uncover_host(caller_pane_id: &str) {
+    if caller_pane_id.is_empty() {
+        return;
+    }
+    let Ok(list) = ipc::call_text("pane.list", serde_json::json!({})) else {
+        return;
+    };
+    let tab = crate::launch::tab_of(&list, caller_pane_id);
+    if let Some(hosted) = hosted_viewer_in(&list, &tab) {
+        let _ = write_scratch_file(&hosted.control, "close");
+    }
+}
+
 fn remember_origin(pane_id: &str, tab_id: &str) {
     if tab_id.is_empty() {
         return;
@@ -3238,6 +3538,9 @@ pub const TOKEN_ORIGIN_TAB: &str = "hs-preview-origin-tab";
 /// (`PreviewPlacement::Pane`). Routing needs it on the PANE so flipping the
 /// setting cannot hand a tab-mode click an inline pane, or the reverse.
 pub const TOKEN_INLINE: &str = "hs-preview-inline";
+/// Set by a host script (the dotfiles `fresh-ide`) on a pane that can host a
+/// viewer covering it. Non-empty value; this module only reads it.
+pub const TOKEN_PREVIEW_HOST: &str = "hs-preview-host";
 
 /// A live preview pane and the document it is showing. State lives on the
 /// pane, so it cannot outlive what it describes.
@@ -3837,6 +4140,9 @@ mod tests {
         assert!(is_video_file(Path::new("clip.MP4")));
         assert!(!is_video_file(Path::new("photo.png")));
         assert!(!is_image_file(Path::new("notes.txt")));
+        assert!(is_media_file(Path::new("photo.PNG")));
+        assert!(is_media_file(Path::new("clip.mp4")));
+        assert!(!is_media_file(Path::new("notes.txt")));
     }
 
     #[test]
@@ -5446,6 +5752,134 @@ mod tests {
             viewer_pane_in_tab(resumed, "w1:p1"),
             Some(("w1:p2".into(), true)),
             "document-labelled resumed viewers remain reclaimable"
+        );
+    }
+
+    fn host_pane_list() -> String {
+        serde_json::json!({
+            "result": { "panes": [
+                { "pane_id": "w1:p9", "tab_id": "w1:t1", "tokens": {
+                    TOKEN_PREVIEW_HOST: "1" } },
+                { "pane_id": "w1:p3", "tab_id": "w1:t1", "tokens": {
+                    TOKEN_PREVIEW_HOST: "1" } },
+                { "pane_id": "w1:p1", "tab_id": "w1:t2", "tokens": {
+                    TOKEN_PREVIEW_HOST: "1" } },
+                { "pane_id": "w1:p4", "tab_id": "w1:t1", "tokens": {
+                    TOKEN_PREVIEW_HOST: "" } },
+                { "pane_id": "w1:p5", "tab_id": "w1:t1", "tokens": {} }
+            ] }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn preview_host_in_finds_the_host_in_the_callers_tab() {
+        // Lexically smallest host of the tab, not the first in the list.
+        assert_eq!(
+            preview_host_in(&host_pane_list(), "w1:t1").as_deref(),
+            Some("w1:p3")
+        );
+    }
+
+    #[test]
+    fn preview_host_in_ignores_other_tabs_and_empty_tokens() {
+        assert_eq!(
+            preview_host_in(&host_pane_list(), "w1:t2").as_deref(),
+            Some("w1:p1")
+        );
+        assert_eq!(preview_host_in(&host_pane_list(), "w1:t9"), None);
+        assert_eq!(preview_host_in(&host_pane_list(), ""), None);
+    }
+
+    #[test]
+    fn preview_host_in_skips_a_pane_already_hosting_a_viewer() {
+        let list = serde_json::json!({
+            "result": { "panes": [
+                { "pane_id": "w1:p2", "tab_id": "w1:t1", "tokens": {
+                    TOKEN_PREVIEW_HOST: "1",
+                    METADATA_SOURCE: "1700000000" } },
+                { "pane_id": "w1:p7", "tab_id": "w1:t1", "tokens": {
+                    TOKEN_PREVIEW_HOST: "1" } }
+            ] }
+        })
+        .to_string();
+        assert_eq!(preview_host_in(&list, "w1:t1").as_deref(), Some("w1:p7"));
+        let only_busy = serde_json::json!({
+            "result": { "panes": [
+                { "pane_id": "w1:p2", "tab_id": "w1:t1", "tokens": {
+                    TOKEN_PREVIEW_HOST: "1",
+                    METADATA_SOURCE: "1700000000" } }
+            ] }
+        })
+        .to_string();
+        assert_eq!(preview_host_in(&only_busy, "w1:t1"), None);
+    }
+
+    #[test]
+    fn preview_host_in_returns_none_without_a_host() {
+        let list = serde_json::json!({
+            "result": { "panes": [
+                { "pane_id": "w1:p2", "tab_id": "w1:t1", "tokens": {} }
+            ] }
+        })
+        .to_string();
+        assert_eq!(preview_host_in(&list, "w1:t1"), None);
+    }
+
+    #[test]
+    fn hosted_viewer_in_reports_the_covering_viewer() {
+        let now = crate::state::unix_now();
+        let list = serde_json::json!({
+            "result": { "panes": [
+                { "pane_id": "w1:p3", "tab_id": "w1:t1", "tokens": {
+                    TOKEN_PREVIEW_HOST: "1",
+                    METADATA_SOURCE: now.to_string(),
+                    TOKEN_CONTROL: "p-abc.ctl" } },
+                { "pane_id": "w1:p4", "tab_id": "w1:t1", "tokens": {
+                    TOKEN_PREVIEW_HOST: "1" } }
+            ] }
+        })
+        .to_string();
+        let hosted = hosted_viewer_in(&list, "w1:t1").expect("covering viewer");
+        assert_eq!(hosted.pane_id, "w1:p3");
+        assert!(!hosted.stale);
+        assert_eq!(hosted_viewer_in(&list, "w1:t2"), None);
+    }
+
+    #[test]
+    fn host_request_text_orders_exe_cwd_env_and_the_hosted_entry() {
+        let env = serde_json::json!({
+            "HERDR_PLUGIN_STATE_DIR": "/state",
+            "HERDR_SIDEBAR_PREVIEW_CONTROL": "/scratch/p-1.ctl",
+            "HERDR_SIDEBAR_PREVIEW_INLINE": "1"
+        });
+        let text = host_request_text(
+            Path::new("/bin/herdr-sidebar"),
+            Path::new("/work/repo"),
+            &env,
+        );
+        assert_eq!(
+            text,
+            "/bin/herdr-sidebar\n/work/repo\n\
+             HERDR_PLUGIN_STATE_DIR=/state\n\
+             HERDR_SIDEBAR_PREVIEW_CONTROL=/scratch/p-1.ctl\n\
+             HERDR_SIDEBAR_PREVIEW_INLINE=1\n\
+             HERDR_SIDEBAR_PREVIEW_HOSTED=1\n"
+        );
+    }
+
+    #[test]
+    fn host_request_text_skips_entries_with_newlines() {
+        let env = serde_json::json!({
+            "GOOD": "ok",
+            "BAD_VALUE": "line one\nline two",
+            "BAD\nKEY": "x",
+            "NOT_A_STRING": 7
+        });
+        let text = host_request_text(Path::new("/exe"), Path::new("/cwd"), &env);
+        assert_eq!(
+            text,
+            "/exe\n/cwd\nGOOD=ok\nHERDR_SIDEBAR_PREVIEW_HOSTED=1\n"
         );
     }
 }

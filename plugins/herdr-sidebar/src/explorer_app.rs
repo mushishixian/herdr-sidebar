@@ -1279,6 +1279,8 @@ impl App {
                     }
                 } else if self.sidebar_state.custom_editor_on_click
                     && actions::configured_editor().is_some()
+                    // Pictures and videos always open in the preview, which can draw them.
+                    && !herdr_sidebar::viewer::is_media_file(&path)
                 {
                     if !double {
                         self.open_custom_editor(&path);

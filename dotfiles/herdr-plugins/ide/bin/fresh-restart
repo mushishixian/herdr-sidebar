@@ -14,6 +14,8 @@
 #   - Fresh is the pane's root process: the pane closes when Fresh exits, so
 #     a new editor pane is split above the tab's Terminal, as herdr-ide does,
 #     and the tab's remembered sizes are applied to it.
+#   - a sidebar preview covers the pane (its hs-preview-control token): the
+#     pane is skipped with a warning; close the preview and rerun.
 #
 # Deliberately no `set -e`: a function called as `if restart_one` runs with
 # errors ignored, so every step checks its own result and reports it.
@@ -114,6 +116,13 @@ restart_one() {
   [ -n "$cwd" ] || { warn "cannot find the project directory of pane $pane"; return 1; }
   root=$(project_root "$cwd")
   project=$(basename "$root")
+
+  # A sidebar preview is covering this pane (fresh-ide's preview host): no
+  # fresh process runs here, and the rerun below would type into the viewer.
+  if [ -n "$(jq -r '.tokens["hs-preview-control"] // empty' <<<"$info")" ]; then
+    warn "$project: a preview covers pane $pane; close it (q) and rerun"
+    return 1
+  fi
 
   if [ -n "$fresh_pid" ] && [ "$fresh_pid" = "$shell_pid" ]; then
     root_mode=1

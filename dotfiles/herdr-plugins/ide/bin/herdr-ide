@@ -57,6 +57,9 @@ split() { # pane direction ratio -> new pane id
 if [ -n "$anchor_agent" ]; then
   # An agent is already running here: it becomes the right column.
   agent=$anchor
+  # No hook runs in an agent that is already going, so nothing clears this
+  # title when that agent exits (run ide-agent-title --clear PANE to do it).
+  "$here/ide-agent-title" "$agent" "$anchor_agent"
   # The ratio sizes the first (left) slot, which the middle takes after the swap.
   middle=$(split "$agent" right 0.6)
   [ -n "$middle" ] || die "pane split failed"
@@ -71,7 +74,10 @@ else
   if [ "$agent_cmd" != none ]; then
     agent=$(split "$term" right 0.6)
     [ -n "$agent" ] || die "pane split failed"
-    "$HERDR" pane run "$agent" "$agent_cmd" >/dev/null
+    # The hook titles this pane for the command and clears the title when the
+    # agent exits; the first line is not hooked yet, so title it directly.
+    "$HERDR" pane run "$agent" ". $(printf '%q' "$here/../shell/agent-title.zsh"); $agent_cmd" >/dev/null
+    "$here/ide-agent-title" "$agent" "$agent_cmd"
   fi
   editor=$(new_editor_pane "$term" "$root") || die "pane split failed"
 fi

@@ -6,6 +6,8 @@ record it here in the relevant section before finishing the task, the way the Wi
 below were captured. If you're working in a feature worktree, commit the AGENTS.md update on
 your branch so it lands on main with the merge.
 
+**Changes that touch the IDE (the `dotfiles/` layer, anything `docs/herdr-ide.md` describes, and any sidebar↔dotfiles contract) must update `docs/herdr-ide.md`, `docs/install-herdr-ide.sh` and the `dotfiles/` scripts and configs in the same change.** See `dotfiles/AGENTS.md` for the checklist.
+
 One herdr plugin, a VS Code-style sidebar for the terminal, as a **self-contained Rust crate**:
 
 - `plugins/herdr-sidebar` — file explorer + source control in ONE binary (ratatui TUI).
@@ -711,13 +713,17 @@ HACKING.md — budget time for that before promising a patched build.
   their workspace, and heartbeat every 5s against the common 20s stale limit; clicking that file
   again focuses the live pane through `focus_tab_for_client` instead of launching a duplicate. The
   token is cleared when the editor exits. The saved command wins over `HERDR_SIDEBAR_EDITOR`,
-  `VISUAL`, and `EDITOR` fallbacks.
+  `VISUAL`, and `EDITOR` fallbacks. Pictures and videos (`viewer::is_media_file`) never go to the
+  custom editor on click: Explorer clicks and the Ctrl+Q file popup open them in the preview, which
+  renders them, and the explicit "Open in Editor" menu item still uses the editor.
 - **SCM changed-file routing** (`scm_app.rs` `open_diff` / `diff_opens_in_editor`): with the custom
   editor opted in (`custom_editor_on_click` AND `custom_editor_inline`, re-read on SCM tick), a
   configured editor, a non-`D` status and an existing path, clicking/Enter/hover-open/`o` on a staged
   or unstaged file runs `actions::open_in_editor_inline_env(root, file, [HERDR_SIDEBAR_OPEN_DIFF=1])`
   instead of the preview pane. `HERDR_SIDEBAR_OPEN_DIFF=1` is the contract with the editor: open the
   file and show its diff against HEAD. Launch failure flashes the error and falls back to the viewer.
+  Media files are excluded from this routing too (`diff_opens_in_editor`'s `media` flag, from
+  `viewer::is_media_file`), so a changed picture opens the diff viewer.
   Context menu "Open Diff Preview" always uses `open_diff_viewer`; drawer refs keep the viewer.
   **Conflicted files (`!`) never send `HERDR_SIDEBAR_OPEN_DIFF`** (`editor_live_diff`): they still
   open in the editor, but without the live-diff request. Fresh's live diff overlays would paint over
@@ -1038,6 +1044,23 @@ It replaced the original pane-ID-keyed park/restore implementation; the optional
   Spawn roots prefer `foreground_cwd` but fall back to `cwd` because Windows herdr 0.8 does
   not currently emit the live field; continuous following still requires `foreground_cwd`
   and never resurrects stale `cwd`. Toggles stay unscoped (a deliberate act on the focused tab).
+- **Preview host (covering the editor pane).** A pane in the caller's tab that carries the
+  metadata token `hs-preview-host` (non-empty; `viewer::TOKEN_PREVIEW_HOST`) is a host, normally
+  the Fresh editor pane. When a preview has no reusable viewer, `open_in_pane` (step 3a, ahead of
+  the placement-specific spawns) asks the lexically smallest idle host to run the viewer inside
+  itself instead of splitting or making a tab. The request is `<state dir>/preview-host/<pane id,
+  ':' → '_'>.req`, written atomically: line 1 the viewer executable, line 2 its cwd, then `KEY=VALUE`
+  spawn-env lines (entries with a newline are dropped) and `HERDR_SIDEBAR_PREVIEW_HOSTED=1`. The
+  host runs `cd <cwd> && env <KEY=VALUE…> <exe> --preview`. The host claims the request by renaming
+  `X.req` → `X.run`; the sidebar polls (25 ms) up to 1500 ms for `X.req` to disappear, then stamps
+  the viewer tokens on the HOST pane (inline, never renamed). No ack means the request is removed and
+  the normal placement path runs, so a host without the script never swallows a click. A live
+  hosted viewer counts as an inline viewer of its tab, so later clicks route to it through its
+  control file. A hosted viewer never renames its pane and never calls `pane.close`, `tab.close` or
+  `takeover::restore`: it nulls its own viewer tokens (never `hs-preview-host`) and exits, and the
+  host script then brings the editor back. Before any file goes to the inline custom editor,
+  `viewer::uncover_host` writes `close` to a hosted viewer in the caller's tab, so the editor shows
+  again (a dirty buffer still gets its unsaved-changes prompt). Tabs without a host are unchanged.
 
 ### Diff preview
 
@@ -1550,7 +1573,9 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
 
 ## dotfiles/ (the IDE layer)
 
+- Agent instructions and the "when you change X, update Y" checklist for this layer: `dotfiles/AGENTS.md`.
 - The herdr + Fresh IDE around the sidebar lives in `dotfiles/`, merged from the former standalone `~/code/dotfiles` repo. The old upstream-patch set is gone because this repo is the fork.
+- The Agent pane title comes from `pane report-metadata --title` (a metadata title beats the manual label on the border, so the "Agent" label the scripts rely on is untouched). `bin/ide-agent-title` sets it from the typed command, through a zsh preexec/precmd hook (`shell/agent-title.zsh`) that `herdr-ide` sources into that pane.
 - `dotfiles/` is not a Rust crate and the plugin manifest never references it, so `plugins/herdr-sidebar` stays upstream-shaped and standalone.
 - Entry points: `docs/install-herdr-ide.sh` runs `dotfiles/install.sh`, which runs `dotfiles/herdr-sidebar/build.sh` (builds this checkout and points herdr's `herdr-sidebar` registration at it).
 - Installs are symlinks into `~/.config` and `~/.local/bin`, so edits apply live. Rerunning the installer re-points links left at an old checkout, including the `dotfiles-ide` registration and `editor-command.txt`.

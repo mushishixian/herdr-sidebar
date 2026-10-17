@@ -6,13 +6,21 @@
 # fresh-open can hand files to it from anywhere. Two workspaces on one project
 # get separate editors: Fresh draws one editor to every attached client.
 # Inside herdr the pane is labelled "Fresh" so the other IDE actions can find it.
+#
+# Inside herdr this script also hosts the sidebar's previews. The sidebar can
+# ask for a viewer to cover this pane (a request file, see below). Fresh's
+# client is then suspended, the viewer runs in the same pane, and once it
+# exits Fresh is attached again. The daemon keeps every buffer throughout.
 set -euo pipefail
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 
+bin_dir=$(dirname "$(readlink -f "$0")")
 root=$(project_root "${1:-$PWD}")
+host_pane=""
 if [ -n "${HERDR_PANE_ID:-}" ] && in_herdr; then
   name=$(ide_daemon_for "$root" "$cur_ws")
   mark_fresh_pane "$HERDR_PANE_ID" "$name" || true
+  host_pane=$HERDR_PANE_ID
 else
   name=$(daemon_name "$root")
 fi
@@ -23,9 +31,138 @@ cd "$root"
 # for it ourselves once Fresh is on its alternate screen: the protocol's flags
 # are kept per screen, so asking before Fresh starts would not stick. The
 # second push covers a slow start; pushing twice is harmless.
-( for delay in 1.5 2.5; do sleep "$delay"; printf '\033[>1u' >/dev/tty; done ) 2>/dev/null &
+push_kitty() {
+  (
+    for delay in 1.5 2.5; do
+      sleep "$delay"
+      # In the host loop a viewer may have taken the pane meanwhile. The
+      # request would then land on the viewer, so stop when fresh is gone.
+      if [ -n "$host_pane" ] && ! pgrep -P "$$" -x fresh >/dev/null 2>&1; then
+        break
+      fi
+      printf '\033[>1u' >/dev/tty
+    done
+  ) 2>/dev/null &
+}
 # selection_share.ts reads this to find its live-diff requests.
 export FRESH_IDE_DAEMON="$name"
 # The daemon inherits this, so Fresh plugins find fresh-to-agent wherever the repo is checked out.
-export DOTFILES_IDE_BIN; DOTFILES_IDE_BIN=$(dirname "$(readlink -f "$0")")
-exec fresh -a "$name"
+export DOTFILES_IDE_BIN="$bin_dir"
+
+# Outside herdr there is no pane to host previews in: plain attach, as before.
+if [ -z "$host_pane" ]; then
+  push_kitty
+  exec fresh -a "$name"
+fi
+
+# ── Preview host ───────────────────────────────────────────────────────
+# To cover this pane, the sidebar writes <pane>.req (absolute viewer exe,
+# working dir, then KEY=VALUE env lines) into its own state dir.
+# A watcher claims the request by renaming it to <pane>.run and only then
+# suspends the Fresh client (the daemon keeps the buffers). When the client
+# is back, the loop runs the viewer in this pane, then reattaches Fresh.
+# The viewer's pane tokens (hs-preview-*) are cleared after every run as a
+# safety net: a stale set would make the sidebar think a frozen preview
+# still owns this tab.
+# The SIDEBAR's state dir. Not $HERDR_PLUGIN_STATE_DIR: in an action or hook
+# that names the calling plugin's dir (dotfiles-ide), not herdr-sidebar's.
+state_base=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr-sidebar
+host_dir=$state_base/preview-host
+host_key=${host_pane//:/_}
+req=$host_dir/$host_key.req
+run=$host_dir/$host_key.run
+rpc=$bin_dir/herdr-rpc
+mkdir -p "$host_dir"
+
+# Set the host token. Stamped once the loop starts, so the sidebar only
+# hands requests to a pane that is really listening.
+stamp_host() {
+  "$HERDR" pane report-metadata "$host_pane" --source "$TOKEN_SOURCE" --token hs-preview-host=1 >/dev/null || true
+}
+
+# Null a token map on this pane; `report_metadata` merges, so removing a
+# token needs an explicit JSON null.
+report_nulls() { # source token...
+  local source=$1 payload
+  shift
+  payload=$(jq -nc --arg p "$host_pane" --arg s "$source" '$ARGS.positional as $t
+    | {pane_id: $p, source: $s, tokens: ($t | map({(.): null}) | add)}' --args "$@") || return 0
+  "$rpc" pane.report_metadata "$payload" >/dev/null 2>&1 || true
+}
+
+clear_viewer_tokens() {
+  report_nulls herdr-sidebar-preview herdr-sidebar-preview hs-preview-path hs-preview-control \
+    hs-preview-inline hs-preview-origin-tab hs-preview-pinned hs-preview-dedicated
+}
+
+# Run the viewer described by request file $1. The request is claimed (renamed
+# to .run) before this is called, so a failure here never reruns it. A bad
+# request is skipped with a warning; the loop goes on either way.
+run_viewer() { # file
+  local -a lines=() envs=()
+  local exe cwd line
+  [ -r "$1" ] || return 0
+  mapfile -t lines <"$1"
+  exe=${lines[0]:-}
+  cwd=${lines[1]:-}
+  for line in "${lines[@]:2}"; do
+    # env(1) would read a bare word as the program to run, so keep KEY=VALUE only.
+    [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && envs+=("$line")
+  done
+  if [[ $exe != /* ]] || [ ! -x "$exe" ]; then
+    warn "preview host: not an executable viewer: $exe"
+    return 0
+  fi
+  if [[ $cwd != /* ]] || [ ! -d "$cwd" ]; then
+    warn "preview host: no such directory: $cwd"
+    return 0
+  fi
+  (cd "$cwd" && env "${envs[@]}" "$exe" --preview) || true
+}
+
+# Claim requests while the Fresh client runs: rename to .run, then suspend
+# the client. Exits when this script does (its pid is checked each tick).
+watch_requests() {
+  local shell=$$
+  while kill -0 "$shell" 2>/dev/null; do
+    sleep 0.2
+    [ -f "$req" ] || continue
+    if pgrep -P "$shell" -x fresh >/dev/null 2>&1; then
+      mv -f "$req" "$run" 2>/dev/null || continue
+      pkill -TERM -P "$shell" -x fresh 2>/dev/null || true
+    fi
+  done
+}
+
+watcher=""
+cleanup_host() {
+  if [ -n "$watcher" ]; then kill "$watcher" 2>/dev/null || true; fi
+  rm -f "$req" "$run"
+  report_nulls "$TOKEN_SOURCE" hs-preview-host || true
+}
+trap cleanup_host EXIT
+# A plain TERM or HUP (pane closed, killed by hand) skips EXIT traps in bash.
+# INT is left alone: Ctrl+C in the pane reaches a running viewer, not the host.
+trap 'exit 129' HUP
+trap 'exit 143' TERM
+
+watch_requests &
+watcher=$!
+stamp_host
+
+while :; do
+  # A request that arrived while no client was running.
+  if [ -f "$req" ]; then mv -f "$req" "$run" 2>/dev/null || true; fi
+  if [ -f "$run" ]; then
+    run_viewer "$run"
+    rm -f "$run"
+    clear_viewer_tokens
+    mark_fresh_pane "$host_pane" "$name" || true
+    continue
+  fi
+  push_kitty
+  fresh -a "$name" || true
+  # Suspended for a preview: loop around and run it. Anything else (quit,
+  # detach, daemon killed) ends the host, back to the shell as before.
+  [ -f "$run" ] || break
+done

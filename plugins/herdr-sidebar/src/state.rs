@@ -61,6 +61,11 @@ pub const PREVIEW_CONTROL_ENV: &str = "HERDR_SIDEBAR_PREVIEW_CONTROL";
 /// re-read from the settings file, which the user can flip mid-life.
 pub const PREVIEW_INLINE_ENV: &str = "HERDR_SIDEBAR_PREVIEW_INLINE";
 
+/// Set on a viewer that runs INSIDE a host pane (a Fresh editor pane covered
+/// by the preview, see `viewer::spawn_hosted`). Such a viewer never renames
+/// its pane, never closes it or its tab, and only clears its own tokens.
+pub const PREVIEW_HOSTED_ENV: &str = "HERDR_SIDEBAR_PREVIEW_HOSTED";
+
 /// One-shot activity requested by a host-level action while opening a fresh
 /// sidebar pane.
 pub const INITIAL_ACTIVITY_ENV: &str = "HERDR_SIDEBAR_INITIAL_ACTIVITY";

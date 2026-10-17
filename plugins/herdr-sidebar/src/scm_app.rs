@@ -3533,6 +3533,7 @@ impl App {
             editor_configured,
             entry.letter,
             exists,
+            herdr_sidebar::viewer::is_media_file(Path::new(&entry.path)),
         ) {
             self.open_diff_in_editor(repo, &root, entry, staged);
         } else {
@@ -6030,15 +6031,17 @@ fn no_repo_layout(area: Rect, merged: bool) -> [Rect; 2] {
 const OPEN_DIFF_ENV: &str = "HERDR_SIDEBAR_OPEN_DIFF";
 
 /// Whether a changed-file row opens in the custom editor (with its diff)
-/// instead of the preview pane. A deleted file has nothing on disk to open.
+/// instead of the preview pane. A deleted file has nothing on disk to open,
+/// and a picture or video stays in the diff viewer (a text editor cannot show it).
 fn diff_opens_in_editor(
     on_click: bool,
     inline: bool,
     editor_configured: bool,
     letter: char,
     exists: bool,
+    media: bool,
 ) -> bool {
-    on_click && inline && editor_configured && letter != 'D' && exists
+    on_click && inline && editor_configured && letter != 'D' && exists && !media
 }
 
 /// Whether the editor is asked for a live diff vs HEAD (`OPEN_DIFF_ENV`). A
@@ -6080,21 +6083,27 @@ mod tests {
 
     #[test]
     fn diff_routes_to_editor_only_when_every_condition_holds() {
-        assert!(diff_opens_in_editor(true, true, true, 'M', true));
-        assert!(diff_opens_in_editor(true, true, true, 'U', true));
+        assert!(diff_opens_in_editor(true, true, true, 'M', true, false));
+        assert!(diff_opens_in_editor(true, true, true, 'U', true, false));
         // Each condition alone breaks the route.
-        assert!(!diff_opens_in_editor(false, true, true, 'M', true));
-        assert!(!diff_opens_in_editor(true, false, true, 'M', true));
-        assert!(!diff_opens_in_editor(true, true, false, 'M', true));
-        assert!(!diff_opens_in_editor(true, true, true, 'M', false));
+        assert!(!diff_opens_in_editor(false, true, true, 'M', true, false));
+        assert!(!diff_opens_in_editor(true, false, true, 'M', true, false));
+        assert!(!diff_opens_in_editor(true, true, false, 'M', true, false));
+        assert!(!diff_opens_in_editor(true, true, true, 'M', false, false));
         // A deletion, on either side, keeps the viewer.
-        assert!(!diff_opens_in_editor(true, true, true, 'D', true));
+        assert!(!diff_opens_in_editor(true, true, true, 'D', true, false));
+    }
+
+    #[test]
+    fn media_file_opens_diff_viewer_not_editor() {
+        assert!(!diff_opens_in_editor(true, true, true, 'M', true, true));
+        assert!(!diff_opens_in_editor(true, true, true, '!', true, true));
     }
 
     #[test]
     fn conflicted_file_opens_in_editor_without_live_diff() {
         // Conflicts (`!`) still route to the editor...
-        assert!(diff_opens_in_editor(true, true, true, '!', true));
+        assert!(diff_opens_in_editor(true, true, true, '!', true, false));
         // ...but must not request the live diff, which would fight the
         // inline conflict resolver. Ordinary changes still do.
         assert!(!editor_live_diff('!'));

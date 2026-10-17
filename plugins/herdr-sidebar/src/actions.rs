@@ -880,6 +880,15 @@ fn spawn_inline_editor(
     line: Option<usize>,
     env: &[(&str, &str)],
 ) -> io::Result<()> {
+    // A viewer covering the caller's host pane (the editor's pane) must step
+    // aside first, or the editor would stay hidden behind it.
+    let caller = env
+        .iter()
+        .find(|(key, _)| *key == "HERDR_PANE_ID")
+        .map(|(_, value)| value.to_string())
+        .or_else(|| std::env::var("HERDR_PANE_ID").ok())
+        .unwrap_or_default();
+    crate::viewer::uncover_host(&caller);
     let command = configured_editor().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,

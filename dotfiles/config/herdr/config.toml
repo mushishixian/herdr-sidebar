@@ -5,8 +5,9 @@ onboarding = false
 
 [theme]
 # Follow the host terminal's palette (set Dark+ there), with VS Code's blue accent.
-name = "terminal"
+name = "vesper"
 
+auto_switch = false
 [theme.custom]
 accent = "#007acc"
 

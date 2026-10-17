@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# ide-agent-title PANE COMMAND — title the Agent pane after the agent COMMAND
+# runs (border shows "◆ CLAUDE"); ide-agent-title --clear PANE — back to "Agent".
+# Pane label stays "Agent" (scripts find it by label); only the title changes.
+set -euo pipefail
+here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+. "$here/lib.sh"
+
+SOURCE=dotfiles-ide-agent
+
+# Command word -> agent name. Extend here.
+declare -A AGENT_OF=(
+  [claude]=claude [claude-code]=claude
+  [codex]=codex [gemini]=gemini [opencode]=opencode [aider]=aider
+  [pi]=pi [amp]=amp [cursor-agent]=cursor [copilot]=copilot
+  [qwen]=qwen [crush]=crush [goose]=goose [kimi]=kimi [droid]=droid
+)
+
+# Print the agent name for command line $1, or nothing. Splits on whitespace
+# only (no eval): skips assignments and wrappers, then runs through package
+# runners (npx pnpm dlx ...) to the package name.
+agent_of() {
+  local -a words
+  local i n w base canon
+  read -ra words <<<"${1:-}"
+  n=${#words[@]}
+  i=0
+  while (( i < n )); do
+    w=${words[i]}
+    if [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then i=$((i + 1)); continue; fi
+    case $w in
+      command|exec|noglob|builtin|nohup|time) i=$((i + 1)) ;;
+      sudo) i=$((i + 1)); while (( i < n )) && [[ ${words[i]} == -* ]]; do i=$((i + 1)); done ;;
+      env)
+        i=$((i + 1))
+        while (( i < n )); do
+          case ${words[i]} in
+            -u|-C|-S) i=$((i + 2)) ;;
+            -*|*=*) i=$((i + 1)) ;;
+            *) break ;;
+          esac
+        done ;;
+      *) break ;;
+    esac
+  done
+  (( i < n )) || return 0
+  w=${words[i]}
+  base=${w##*/}
+  case $base in
+    npx|bunx|pnpx|uvx|npm|pnpm|yarn)
+      i=$((i + 1))
+      if [[ $base == npm || $base == pnpm || $base == yarn ]]; then
+        case ${words[i]:-} in dlx|exec) i=$((i + 1)) ;; *) return 0 ;; esac
+      fi
+      while (( i < n )) && [[ ${words[i]} == -* ]]; do i=$((i + 1)); done
+      (( i < n )) || return 0
+      w=${words[i]}
+      base=${w##*/}
+      ;;
+  esac
+  base=${base%%@*}
+  canon=${AGENT_OF[$base]:-}
+  [ -z "$canon" ] || printf '%s\n' "$canon"
+  return 0
+}
+
+# Only when run, not when sourced for agent_of.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  if [ "${1:-}" = --clear ]; then
+    pane=${2:-}
+    [ -n "$pane" ] || exit 0
+    "$HERDR" pane report-metadata "$pane" --source "$SOURCE" \
+      --clear-title --clear-display-agent >/dev/null 2>&1 || true
+    exit 0
+  fi
+  pane=${1:-}
+  [ -n "$pane" ] || exit 0
+  agent=$(agent_of "${2:-}")
+  [ -n "$agent" ] || exit 0
+  "$HERDR" pane report-metadata "$pane" --source "$SOURCE" \
+    --title "◆ ${agent^^}" --display-agent "$agent" >/dev/null 2>&1 || true
+fi

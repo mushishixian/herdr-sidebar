@@ -198,6 +198,23 @@ menu, `s` Settings, `b` hide, `c` change folder, `q` quit.
   above. Started from an agent pane, that agent becomes the right column; from
   a shell, the shell becomes the Terminal and a new agent opens (agent command:
   plugin config `agent` file, else `$IDE_AGENT`, else `claude`; `none` = no column).
+- **Agent pane title.** The Agent pane's border shows the agent it runs: `◆ CLAUDE`,
+  `◆ CODEX`, and so on, taken from the command you type there (`claude -r`,
+  `codex resume xxxx`, `npx @openai/codex@latest`, `env X=1 claude`, `~/.local/bin/claude`
+  all work). `bin/ide-agent-title` parses the command without `eval` and reports it through
+  `pane report-metadata --title`. A metadata title is drawn in preference to the manual
+  label, so the pane stays labelled `Agent` for the scripts while the border reads
+  `◆ CLAUDE`. When the agent exits back to the shell prompt the title clears and the
+  border reads `Agent` again. The table of known agents (claude, codex, gemini, opencode,
+  aider, pi, amp, cursor-agent, copilot, qwen, crush, goose, kimi, droid) is at the top of
+  `bin/ide-agent-title`; add a line there to teach it another. The clearing needs the
+  zsh hook `shell/agent-title.zsh`, which `herdr-ide` sources into the pane before starting
+  the agent. An agent that was already running when the layout was built gets its title
+  once, with no hook, so that title stays after it exits (clear it with
+  `dotfiles/herdr-plugins/ide/bin/ide-agent-title --clear <pane>`). Panes created before
+  this change get the hook after `ctrl+b i` (or by running
+  `. ~/code/herdr-sidebar/dotfiles/herdr-plugins/ide/shell/agent-title.zsh` in the Agent
+  pane once).
 - `bin/fresh-ide DIR` runs `fresh -a ide-<sha1(project root)[:10]>`: **one Fresh
   daemon per project per herdr workspace**. The first workspace on a project
   gets `ide-<hash>`, the next `ide-<hash>-s2`, `-s3`, and so on; a workspace
@@ -236,6 +253,30 @@ menu, `s` Settings, `b` hide, `c` change folder, `q` quit.
 - `bin/herdr-rpc METHOD JSON` is a tiny Python client for socket methods the
   CLI does not wrap (`pane.focus` by id, `pane.send_input`).
 
+### Previews cover the Fresh pane
+
+With the IDE layout, a sidebar preview opens **inside the Fresh pane** instead of
+splitting a new pane. That covers pictures, Source Control commits, stashes and
+branches, diffs (including deleted and binary files), and Enter on a file. `q` or Esc
+(or Esc in the sidebar) closes the preview and brings Fresh back with all of its
+buffers. Clicking a text file in the sidebar also closes the cover and opens the file
+in Fresh.
+
+How it works: `fresh-ide` runs a small host loop in the Fresh pane and stamps the pane
+with the `hs-preview-host` token. When the sidebar wants a preview there, it writes a
+request file under its state directory (`preview-host/<pane>.req`: the viewer, its
+directory and its environment). The host claims the request by renaming it, then
+suspends the Fresh client. The daemon keeps every buffer, so nothing is lost. The
+viewer runs in the same pane, and when it exits the host clears the preview's pane
+tokens and attaches Fresh again.
+
+- Fresh panes started before this change have no host loop: run
+  `dotfiles/herdr-plugins/ide/bin/fresh-restart --all` once.
+- Tabs without a Fresh pane keep the old split or tab behaviour.
+- `fresh-restart` skips a pane that a preview covers and says so
+  (`a preview covers pane …; close it (q) and rerun`), because restarting it would type
+  `fresh-ide` into the viewer.
+
 ### herdr-sidebar fork (this repo)
 
 Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on
@@ -254,7 +295,9 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on
 | 2a64708 | **AI commit through Source Control** | `src/ai_commit.rs`: `ctrl+shift+a` writes a per-tab request; that tab's Source Control sidebar stages everything, gets the OpenCommit message (prepare-commit-msg hook mode), fills Message, and commits through the ✓ Commit path. |
 | aedfbd6 | **Popup → editor caller context; AI-commit button animation** | Popups belong to no tab, so the inline editor is started with the CALLER pane's `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`. The ✓ Commit button shows a braille spinner with "AI generating…" / "Committing…" and a sweeping highlight band while an AI commit runs, and blocks a second commit. |
 | 2c02d3e | **Search popup + line-aware open** | `src/search_popup.rs`; the engine moved to lib `src/content_search.rs` (shared with the sidebar Search view); preview highlighted with `syntax::highlight_lines`; `actions::open_in_editor_inline_at` (`{line}` placeholder, or `file:line` for `fresh` / `fresh-open`). |
-| *uncommitted* | **Replace popup + conflict routing** | Replace mode of the search popup (`HERDR_SIDEBAR_SEARCH_MODE=replace`, action `replace-popup`; `content_search::replace_in_text` / `apply_replacements`: engine-identical matching, `$1` expansion in regex mode, line endings / BOM / permissions kept, atomic write, root-confined). Conflicted (`!`) files open in the editor without Live Diff (`editor_live_diff`). |
+| c5661c3 | **Replace popup + conflict routing** | Replace mode of the search popup (`HERDR_SIDEBAR_SEARCH_MODE=replace`, action `replace-popup`; `content_search::replace_in_text` / `apply_replacements`: engine-identical matching, `$1` expansion in regex mode, line endings / BOM / permissions kept, atomic write, root-confined). Conflicted (`!`) files open in the editor without Live Diff (`editor_live_diff`). |
+| 261bccb | **Dotfiles folded into this repo** | The standalone `~/code/dotfiles` now lives in `dotfiles/`; the upstream patch set was dropped. `dotfiles/herdr-sidebar/build.sh` builds this checkout and points herdr's `herdr-sidebar` registration at it. |
+| *uncommitted* | **Media opens in the preview; previews cover Fresh; Agent pane title** | `viewer::is_media_file` keeps pictures and videos out of the custom editor (Explorer click, Ctrl+Q popup; Source Control's `diff_opens_in_editor` media flag). Preview host: `fresh-ide` runs a host loop in the Fresh pane (token `hs-preview-host`); the sidebar writes `<sidebar state dir>/preview-host/<pane>.req`, the host claims it by rename, and the viewer runs there with `HERDR_SIDEBAR_PREVIEW_HOSTED=1`; `viewer::uncover_host` runs before the editor launches. Agent pane title: `ide-agent-title` + `shell/agent-title.zsh` (zsh preexec/precmd) → `pane report-metadata --title "◆ CLAUDE"`. |
 
 **AI commit** (`ctrl+shift+a`): the action does not commit. It writes a per-tab
 request (`src/ai_commit.rs`, under the sidebar's private runtime dir) for the focused
@@ -277,6 +320,14 @@ and a sweeping highlight band. Clicking ✓ Commit during that just says "AI com
 Sidebar defaults seeded by the installer (`dotfiles/herdr-sidebar/state.json`):
 VS Code colours, git footer, auto-open, follow the neighbour pane's folder,
 preview in a pane (a git-change diff opens beside the sidebar inside the IDE tab, so the Agent column stays visible; Esc/q closes it), editor on click, editor inline.
+
+Pictures and videos never open in Fresh. An Explorer click, Enter, or a pick in the Ctrl+Q popup
+opens them in the sidebar's preview, which draws them in the terminal; `q` or Esc closes it.
+Pictures: png, jpg/jpeg, gif, webp, bmp, ico, tif/tiff. Videos (avi, flv, m4v, mkv, mov, mp4, mpeg,
+mpg, webm, wmv) show their first frame and need `ffmpeg`. For the full-resolution file, use `m` →
+"Open with Default App" (runs `xdg-open`; on WSL, `dotfiles/bin/wsl-open <file>` hands it to Windows).
+A changed picture in Source Control opens the diff preview, not Fresh. The explicit "Open in Editor"
+menu item still sends a picture to Fresh.
 
 ### Search / replace popups
 
@@ -392,14 +443,17 @@ popups, and conflict routing.
 
 | Symptom | Check |
 |---|---|
+| Preview still splits a new pane in the IDE tab | Restart Fresh with `fresh-restart --all` (a Fresh pane started before the host loop has no host). `herdr pane list` should show `hs-preview-host` in the Fresh pane's tokens |
 | A Fresh key does nothing | `fresh --cmd config show \| grep selection_` (config linked?), `ls -la ~/.config/fresh/plugins`, restart the daemon |
 | `ctrl+shift+a` does nothing | Windows Terminal's Select-all binding; `herdr plugin action invoke herdr-sidebar.git-commit-ai` to test without the key |
 | "OpenCommit is not configured" toast | run `oco setup` |
+| Agent pane title stays "Agent" | the pane's shell must be zsh with the hook sourced (`. …/shell/agent-title.zsh`, or rebuild with `ctrl+b i`); check the title with `herdr pane list \| jq '.result.panes[] \| select(.label=="Agent") \| .title'` |
 | "No Agent pane in this tab" | the tab has no pane labelled `Agent`; run `ctrl+b i` |
 | Sidebar lacks a new feature | `herdr plugin list --json` → `plugin_root` must be this checkout; rebuild + redeploy |
 | Actions missing in `herdr plugin action list` | manifest error: `herdr plugin log list --plugin herdr-sidebar` |
 | Conflict colors/keys missing | the file must contain `<<<<<<<` markers; `ls -la ~/.config/fresh/config.json` must be a symlink; `fresh --cmd config show \| grep conflict_`; restart Fresh with `fresh-restart` |
 | `ctrl+alt+f` / `ctrl+alt+e` does nothing | `herdr plugin action list \| grep -E 'search-popup\|replace-popup'`; `herdr server reload-config` |
+| A picture opens as garbage in Fresh | pictures open in the sidebar preview since the media-routing change; rebuild and redeploy the sidebar (`dotfiles/herdr-sidebar/build.sh`) if an old build is still running. The explicit "Open in Editor" menu item still sends it to Fresh |
 | A file opens in another workspace's Fresh | fixed: `fresh-open` only uses this workspace's editor; check the Fresh pane's `fresh_daemon` token with `herdr pane list` |
 | `ctrl+shift+a` message never appears in the box | the tab needs a sidebar (its Source Control view takes the request); the request expires after 30 s; `oco setup` |
 | `ctrl+b alt+g` (lazygit) does nothing | `command -v lazygit` (it is in `dotfiles/packages.txt`: rerun the installer without `--no-packages`, or `sudo apt install lazygit`) |
