@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# fresh-to-agent TEXT — paste TEXT into the IDE's Agent pane composer.
+#
+# Used by the Fresh "Selection: Send to Agent" command (config/fresh/plugins/
+# selection_share.ts). The text goes through pane.send_input, which wraps it
+# in bracketed paste when the agent has enabled it, so embedded newlines do
+# not submit. Nothing is sent: the user reviews and presses Enter.
+#
+# The Fresh pane is the focused "Fresh" pane when there is one, else the
+# pane this script was started from ($HERDR_PANE_ID). The Agent pane is the
+# first "Agent" in the same tab — never another tab's, which may be a
+# different agent session. The Agent pane is focused afterwards.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+. "$here/lib.sh"
+
+[ $# -eq 1 ] || die "usage: fresh-to-agent TEXT"
+text=$1
+
+panes=$("$HERDR" pane list)
+
+fresh=$(jq -r '[.result.panes[] | select(.focused and .label == "Fresh")][0].pane_id // empty' <<<"$panes")
+if [ -z "$fresh" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+  fresh=$(jq -r --arg p "$HERDR_PANE_ID" '[.result.panes[] | select(.pane_id == $p)][0].pane_id // empty' <<<"$panes")
+fi
+[ -n "$fresh" ] || die "Can't find the Fresh pane"
+
+fresh_tab=$(jq -r --arg p "$fresh" '.result.panes[] | select(.pane_id == $p) | .tab_id' <<<"$panes")
+
+agent=$(jq -r --arg tab "$fresh_tab" --arg label "$AGENT_LABEL" \
+  '[.result.panes[] | select(.tab_id == $tab and .label == $label)][0].pane_id // empty' <<<"$panes")
+[ -n "$agent" ] || die "No Agent pane in this tab — open the IDE layout first"
+
+params=$(jq -nc --arg p "$agent" --arg t "$text" '{pane_id: $p, text: $t, keys: []}')
+if ! reply=$("$here/herdr-rpc" pane.send_input "$params" 2>&1); then
+  die "pane.send_input failed: $reply"
+fi
+if grep -q '"error"' <<<"$reply"; then
+  die "pane.send_input failed: $reply"
+fi
+
+focus_pane "$agent"

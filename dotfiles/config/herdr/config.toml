@@ -1,0 +1,151 @@
+# herdr — terminal workspace manager (managed by herdr-sidebar/dotfiles)
+# Full reference: `herdr --default-config`. Reload: prefix+shift+r.
+
+onboarding = false
+
+[theme]
+# Follow the host terminal's palette (set Dark+ there), with VS Code's blue accent.
+name = "terminal"
+
+[theme.custom]
+accent = "#007acc"
+
+[terminal]
+new_cwd = "follow"
+
+[ui]
+tab_bar_position = "top"
+# herdr draws its own steady cursor on WSL by default; "native" keeps the
+# terminal's cursor and puts IME candidate windows (中文/日本語) in the right
+# place, at the cost of occasional flicker during heavy output.
+host_cursor = "native"
+status_indicators = "symbols"
+
+[ui.toast]
+delivery = "herdr"
+
+[keys]
+# Defaults kept: prefix = ctrl+b, v / minus split, h j k l focus, z zoom,
+# c new tab, g goto, b toggles the agent sidebar, ? shows every binding.
+
+# ── IDE (dotfiles-ide plugin) ──────────────────────────────────────────
+[[keys.command]]
+key = "prefix+i"
+type = "plugin_action"
+command = "dotfiles-ide.layout"
+description = "IDE layout: sidebar | Fresh / terminal | agent"
+
+[[keys.command]]
+key = "prefix+backtick"
+type = "plugin_action"
+command = "dotfiles-ide.toggle-terminal"
+description = "toggle terminal (Ctrl+`)"
+
+# ── Sidebar (herdr-sidebar plugin) ─────────────────────────────────────
+[[keys.command]]
+key = "prefix+a"
+type = "plugin_action"
+command = "herdr-sidebar.open-sidebar"
+description = "toggle explorer sidebar (Ctrl+B)"
+
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "herdr-sidebar.quick-open"
+description = "quick open file (Ctrl+P)"
+
+[[keys.command]]
+key = "prefix+/"
+type = "plugin_action"
+command = "herdr-sidebar.show-search"
+description = "search in files (sidebar view)"
+
+[[keys.command]]
+key = "prefix+d"
+type = "plugin_action"
+command = "herdr-sidebar.show-git"
+description = "source control (Ctrl+Shift+G)"
+
+# ── File search popup ──────────────────────────────────────────────────
+# Direct, global chord: opens centered file search modal from any pane.
+[[keys.command]]
+key = "ctrl+q"
+type = "plugin_action"
+command = "herdr-sidebar.file-search"
+description = "quick open file popup (Ctrl+Q)"
+
+# Search file contents with a live preview (popup). Ctrl+Alt+F, like the
+# other Ctrl+Alt chords: terminals pass it through (Ctrl+Shift+F is Find).
+[[keys.command]]
+key = "ctrl+alt+f"
+type = "plugin_action"
+command = "herdr-sidebar.search-popup"
+description = "search in files popup (Ctrl+Alt+F)"
+
+# Replace across files (the search popup in replace mode). Not Ctrl+Alt+H:
+# without the kitty protocol that arrives as Alt+Backspace.
+[[keys.command]]
+key = "ctrl+alt+e"
+type = "plugin_action"
+command = "herdr-sidebar.replace-popup"
+description = "replace in files popup (Ctrl+Alt+E)"
+
+# ── Git branch popups (patched herdr-sidebar) ──────────────────────────
+# Direct, global chords: they work from any pane. Windows Terminal passes
+# Ctrl+Alt+letter through (unlike Ctrl+Shift+C, which it keeps for copy).
+[[keys.command]]
+key = "ctrl+alt+c"
+type = "plugin_action"
+command = "herdr-sidebar.git-switch-branch"
+description = "git: switch branch"
+
+[[keys.command]]
+key = "ctrl+alt+r"
+type = "plugin_action"
+command = "herdr-sidebar.git-rename-branch"
+description = "git: rename current branch"
+
+[[keys.command]]
+key = "ctrl+alt+x"
+type = "plugin_action"
+command = "herdr-sidebar.git-merge-branch"
+description = "git: merge a branch into current"
+
+# ── Git remote operations (with async progress toast) ──────────────────
+[[keys.command]]
+key = "ctrl+alt+p"
+type = "plugin_action"
+command = "herdr-sidebar.git-pull"
+description = "git pull (Ctrl+Alt+P)"
+
+[[keys.command]]
+key = "ctrl+alt+k"
+type = "plugin_action"
+command = "herdr-sidebar.git-push"
+description = "git push (Ctrl+Alt+K)"
+
+# git add -A + commit with an OpenCommit (oco) generated message.
+# Windows Terminal binds Ctrl+Shift+A to "Select all" by default — unbind it
+# there or this chord never reaches herdr.
+[[keys.command]]
+key = "ctrl+shift+a"
+type = "plugin_action"
+command = "herdr-sidebar.git-commit-ai"
+description = "git: add -A + AI commit (Ctrl+Shift+A)"
+
+# ── Popups ─────────────────────────────────────────────────────────────
+[[keys.command]]
+key = "prefix+alt+g"
+type = "popup"
+command = "herdr notification show Lazygit --body 'Ctrl+B Alt+G' >/dev/null 2>&1; exec lazygit"
+description = "lazygit"
+width = "90%"
+height = "90%"
+
+[[keys.command]]
+key = "prefix+t"
+type = "popup"
+command = "herdr notification show 'Scratch terminal' --body 'Ctrl+B T' >/dev/null 2>&1; exec \"${SHELL:-sh}\""
+description = "scratch terminal"
+width = "80%"
+height = "80%"

@@ -1,0 +1,78 @@
+// Fresh editor (managed by herdr-sidebar/dotfiles). JSONC: comments and trailing commas are fine.
+// Effective config: `fresh --cmd config show`.
+{
+  "version": 2,
+  // Built-in "dark" is VS Code's Dark+ palette (#1e1e1e / #d4d4d4).
+  "theme": "dark",
+
+  // herdr is the orchestrator here: no Fresh workspace dock, and the
+  // herdr-ide script picks one named daemon per project.
+  "orchestrator_mode": false,
+  "plugins": {
+    "orchestrator": { "settings": { "autoOpenDock": "never" }, "enabled": true },
+    "welcome_screen": { "enabled": true, "settings": { "showOnStartup": true } },
+  },
+
+  "editor": {
+    "restore_previous_session": true,
+    "trim_trailing_whitespace_on_save": true,
+    "ensure_final_newline_on_save": true,
+    "mouse_hover_enabled": true,
+    "smooth_scroll": false,
+    "rainbow_indentation": true,
+  },
+
+  // herdr-sidebar is the explorer; don't pop Fresh's own tree open.
+  "file_explorer": {
+    "auto_open_on_last_buffer_close": false,
+  },
+
+  // OSC 52 reaches the Windows clipboard through the terminal.
+  "clipboard": {
+    "use_osc52": true,
+    "use_system_clipboard": true,
+  },
+
+  // Ctrl+Alt+O: git history of the selected lines, in a herdr popup.
+  // (Not Ctrl+Alt+H: terminals send Ctrl+H as Backspace.)
+  // (plugins/git_line_history.ts + the patched herdr-sidebar).
+  "keybindings": [
+    { "key": "o", "modifiers": ["ctrl", "alt"], "action": "git_line_history" },
+
+    // Ctrl+Alt+Y / L / A: share the selected lines (plugins/selection_share.ts).
+    // Copy the text, copy "<path>:<lines>" + a code block, or send that
+    // reference to the IDE's Agent pane (herdr-plugins/ide/bin/fresh-to-agent).
+    { "key": "y", "modifiers": ["ctrl", "alt"], "action": "selection_copy_text" },
+    { "key": "l", "modifiers": ["ctrl", "alt"], "action": "selection_copy_reference" },
+    { "key": "a", "modifiers": ["ctrl", "alt"], "action": "selection_send_to_agent" },
+
+    // Ctrl+Tab: jump to the previously used open tab; again = back
+    // (plugins/selection_share.ts). Only while editing ("when": "normal").
+    // Windows Terminal binds Ctrl+Tab to its own "next tab": unbind it there.
+    { "key": "tab", "modifiers": ["ctrl"], "action": "recent_tab", "when": "normal" },
+
+    // Alt+C / I / M: accept current / incoming / both of the merge conflict at
+    // the cursor; Alt+D next, Alt+Shift+D previous (plugins/selection_share.ts,
+    // "Inline merge conflicts"). Free in Fresh's default keymap: Alt+1/2/3 are
+    // bookmarks, Alt+N/P find-selection, Alt+Shift+N/P sidebar sections.
+    { "key": "c", "modifiers": ["alt"], "action": "conflict_accept_current", "when": "normal" },
+    { "key": "i", "modifiers": ["alt"], "action": "conflict_accept_incoming", "when": "normal" },
+    { "key": "m", "modifiers": ["alt"], "action": "conflict_accept_both", "when": "normal" },
+    { "key": "d", "modifiers": ["alt"], "action": "conflict_next", "when": "normal" },
+    { "key": "d", "modifiers": ["alt", "shift"], "action": "conflict_prev", "when": "normal" },
+  ],
+
+  // Markdown LSP off (set in Fresh's settings UI).
+  "lsp": {
+    "markdown": {
+      "enabled": false,
+      "auto_start": true,
+      "process_limits": { "max_memory_percent": 50, "max_cpu_percent": 90, "enabled": true },
+    },
+  },
+
+  // Language servers stay on Fresh's default (start from the LSP menu). To
+  // start one automatically once installed (install.sh --lsp), add e.g.
+  // `"typescript": { "auto_start": true }` to the "lsp" block above.
+  // A server that is set to auto-start but missing opens its log as a tab.
+}

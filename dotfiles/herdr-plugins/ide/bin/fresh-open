@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# fresh-open — open a file in the IDE's Fresh editor instead of a new process.
+#
+#   fresh-open src/main.rs:42[:7]        path with optional line/column
+#   fresh-open file:///abs/path#42:7     OSC 8 link (rg, delta, eza, fd ...)
+#   fresh-open --link                    read HERDR_PLUGIN_CLICKED_URL (Ctrl+click)
+#
+# Inside herdr the file goes to the nearest pane labelled "Fresh" (this tab,
+# then this workspace; another workspace's editor is never used, even for the
+# same project: that workspace's tab gets its own IDE, attached to the same
+# project daemon), which is then focused. With no IDE yet, the current tab is
+# turned into one first. Outside herdr it reuses the project's Fresh daemon if
+# one runs, else opens Fresh right here.
+#
+# herdr-sidebar runs this as its custom editor ("editor-command.txt"), in a
+# throwaway tab it creates per click; that tab is closed after the handoff.
+#
+# With HERDR_SIDEBAR_OPEN_DIFF=1 (the sidebar's git-change clicks) the file is
+# also asked to open with Fresh's Live Diff vs HEAD. fresh-open cannot drive
+# Fresh itself, so it leaves a request (line 1 the absolute path, line 2 the
+# epoch seconds): $STATE/live-diff-request-<daemon> for the daemon the file is
+# handed to (one per daemon, so no other editor consumes it), or the legacy
+# $STATE/live-diff-request when no daemon is involved. selection_share.ts
+# consumes its daemon's file when that buffer is active and turns the diff on.
+# Without the variable
+# nothing is written and the file opens plain.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+. "$here/lib.sh"
+
+[ "${1:-}" = --link ] && set -- "${HERDR_PLUGIN_CLICKED_URL:-}"
+[ $# -eq 1 ] && [ -n "$1" ] || die "usage: fresh-open FILE[:LINE[:COL]] | file://URL | --link"
+
+spec=$1 file='' line='' col=''
+case $spec in
+  file://*)
+    path=${spec#file://}
+    path=/${path#*/}                     # drop the host part
+    if [[ $path == *'#'* ]]; then
+      frag=${path#*#} path=${path%%#*}
+      # Fragments seen in the wild: 42, 42:7, L42, L42C7, L42-L50
+      if [[ $frag =~ ^L?([0-9]+)([:C]([0-9]+))? ]]; then
+        line=${BASH_REMATCH[1]} col=${BASH_REMATCH[3]}
+      fi
+    fi
+    file=$(printf '%b' "${path//%/\\x}")  # percent-decode
+    ;;
+  *) file=$spec ;;
+esac
+
+# path:line[:col], unless the whole thing is a real file name.
+if [ -z "$line" ] && [ ! -e "$file" ] && [[ $file =~ ^(.+):([0-9]+)(:([0-9]+))?:?$ ]]; then
+  file=${BASH_REMATCH[1]} line=${BASH_REMATCH[2]} col=${BASH_REMATCH[4]}
+fi
+[[ $file == /* ]] || file=$PWD/$file
+
+if [ -d "$file" ]; then
+  warn "${file} is a directory"
+  exit 0
+fi
+target=$file${line:+:$line}${col:+:$col}
+
+hand_off() { # daemon
+  timeout 10 fresh --cmd daemon open-file "$1" "$target" </dev/null >/dev/null 2>&1
+}
+
+# Ask selection_share.ts to turn on Live Diff vs HEAD for $1 once it is the
+# active buffer. Written atomically (tmp + mv) so the plugin never reads half
+# a request. The plugin rejects requests older than 15s, so a stale file is
+# harmless.
+# With a daemon, the request is for that daemon's editor only; without one, the
+# legacy file that daemons started before per-daemon requests still read.
+live_diff_request() { # abs file [daemon]
+  local dir req tmp
+  dir=${XDG_STATE_HOME:-$HOME/.local/state}/fresh-ide
+  req=$dir/live-diff-request${2:+-$2}
+  mkdir -p "$dir"
+  tmp=$(mktemp "$dir/.live-diff-request.XXXXXX")
+  printf '%s\n%s\n' "$1" "$(date +%s)" >"$tmp"
+  mv -f "$tmp" "$req"
+}
+
+# Ask for Live Diff only when the sidebar asked (HERDR_SIDEBAR_OPEN_DIFF=1).
+# $2 is the daemon the file is handed to, if any.
+request_live_diff() { # abs file [daemon]
+  [ "${HERDR_SIDEBAR_OPEN_DIFF:-}" = 1 ] || return 0
+  live_diff_request "$1" "${2:-}" || warn "could not record the live-diff request for ${1}"
+}
+
+if ! in_herdr; then
+  name=$(daemon_name "$(project_root "$(dirname "$file")")")
+  if daemon_alive "$name"; then
+    request_live_diff "$file" "$name"
+    hand_off "$name" && exit 0
+  fi
+  request_live_diff "$file"
+  exec fresh "$target"
+fi
+
+# Only editors in this workspace count. One whose project contains the file
+# wins; otherwise the first one here. Another workspace's editor is never
+# used, even for the same project: that tab gets its own IDE, attached to the
+# same project daemon.
+editor='' daemon=''
+while IFS=$'\t' read -r pane ws name cwd; do
+  if [ -z "$cur_ws" ] || [ "$ws" != "$cur_ws" ]; then continue; fi
+  if [ -z "$name" ] || ! daemon_alive "$name"; then continue; fi
+  if [[ $file == "$(project_root "$cwd")"/* ]]; then
+    editor=$pane daemon=$name
+    break
+  fi
+  if [ -z "$editor" ]; then editor=$pane daemon=$name; fi
+done < <(fresh_panes)
+
+if [ -n "${HERDR_SIDEBAR_EDITOR_FILE:-}" ]; then
+  # Called from herdr-sidebar inside its per-file tab.
+  if [ -z "$editor" ]; then   # no IDE: edit in that tab
+    request_live_diff "$file"
+    exec fresh "$target"
+  fi
+  # Jump back to the IDE tab first so the sidebar's tab barely shows, then
+  # close that tab from a detached process (closing it ends this one).
+  focus_pane "$editor"
+  request_live_diff "$file" "$daemon"
+  hand_off "$daemon"
+  setsid -f bash -c '"$0" tab close "$1"; "$2" pane.focus "{\"pane_id\":\"$3\"}"' \
+    "$HERDR" "$cur_tab" "$here/herdr-rpc" "$editor" </dev/null >/dev/null 2>&1
+  exit 0
+fi
+
+if [ -z "$editor" ]; then
+  editor=$("$here/herdr-ide" | tail -n1)
+  daemon=$("$HERDR" pane list | jq -r --arg p "$editor" \
+    'first(.result.panes[] | select(.pane_id == $p) | .tokens.fresh_daemon) // empty')
+  [ -n "$daemon" ] || die "could not start the IDE editor"
+  for _ in $(seq 50); do daemon_alive "$daemon" && break; sleep 0.1; done
+fi
+
+request_live_diff "$file" "$daemon"
+hand_off "$daemon" || die "Fresh did not accept ${target}"
+focus_pane "$editor"

@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# fresh-restart [--all | PANE_ID...] — gracefully restart Fresh editors in place
+# (the "Restart Fresh" action).
+#
+#   fresh-restart             the Fresh pane of the current tab
+#   fresh-restart --all       every Fresh pane, in every tab
+#   fresh-restart PANE_ID...  the given Fresh panes
+#
+# Each restart is `fresh --cmd daemon kill`, which is GRACEFUL: the server
+# quits, auto-saves on exit and keeps unsaved buffers (hot exit), so the
+# next `fresh -a` brings that work back. Then fresh-ide runs again for the
+# same project. Two pane cases:
+#   - a shell runs under Fresh: the pane stays, and fresh-ide starts in it.
+#   - Fresh is the pane's root process: the pane closes when Fresh exits, so
+#     a new editor pane is split above the tab's Terminal, as herdr-ide does,
+#     and the tab's remembered sizes are applied to it.
+#
+# Deliberately no `set -e`: a function called as `if restart_one` runs with
+# errors ignored, so every step checks its own result and reports it.
+set -uo pipefail
+here=$(dirname "$(readlink -f "$0")")
+. "$here/lib.sh"
+
+in_herdr || die "fresh-restart must run inside herdr"
+
+all=0
+panes=()
+for arg in "$@"; do
+  case $arg in
+    --all) all=1 ;;
+    -*) die "unknown option: $arg (usage: fresh-restart [--all | PANE_ID...])" ;;
+    *) panes+=("$arg") ;;
+  esac
+done
+
+snapshot=$("$HERDR" pane list) || die "herdr pane list failed"
+focused=$(jq -r 'first(.result.panes[] | select(.focused) | .pane_id) // empty' <<<"$snapshot")
+focus_target=$focused
+
+if [ "$all" = 1 ]; then
+  targets=$(jq -r '.result.panes[]
+    | select(.label == "Fresh" and (.tokens.fresh_daemon // "") != "") | .pane_id' <<<"$snapshot")
+  [ -n "$targets" ] || die "no Fresh panes to restart"
+elif [ "${#panes[@]}" -gt 0 ]; then
+  targets=$(printf '%s\n' "${panes[@]}")
+else
+  tab=$cur_tab
+  if [ -z "$tab" ] && [ -n "$cur_pane" ]; then
+    tab=$(jq -r --arg p "$cur_pane" 'first(.result.panes[] | select(.pane_id == $p) | .tab_id) // empty' <<<"$snapshot")
+  fi
+  [ -n "$tab" ] || tab=$(jq -r 'first(.result.panes[] | select(.focused) | .tab_id) // empty' <<<"$snapshot")
+  [ -n "$tab" ] || die "no current tab to restart Fresh in"
+  targets=$(jq -r --arg t "$tab" '.result.panes[]
+    | select(.tab_id == $t and .label == "Fresh" and (.tokens.fresh_daemon // "") != "") | .pane_id' <<<"$snapshot" | head -n1)
+  [ -n "$targets" ] || die "no Fresh pane in this tab (open the IDE layout first)"
+fi
+
+pane_exists() { # pane
+  "$HERDR" pane list | jq -e --arg p "$1" 'any(.result.panes[]; .pane_id == $p)' >/dev/null
+}
+
+# Is a process named fresh in the foreground of pane $1?
+# shellcheck disable=SC2329
+fresh_running() {
+  "$HERDR" pane process-info --pane "$1" \
+    | jq -e '[.result.process_info.foreground_processes[]? | select(.name == "fresh")] | length > 0' >/dev/null
+}
+
+# Predicates for poll_until (shellcheck cannot see those indirect calls).
+# shellcheck disable=SC2329
+daemon_gone() { ! daemon_alive "$1"; }
+# shellcheck disable=SC2329
+pane_gone() { ! pane_exists "$1"; }
+# shellcheck disable=SC2329
+fresh_gone_in() { ! fresh_running "$1"; }
+
+# poll_until SECONDS COMMAND... — retry COMMAND every 0.2s for up to SECONDS.
+poll_until() {
+  local i
+  for ((i = 0; i < $1 * 5; i++)); do
+    "${@:2}" && return 0
+    sleep 0.2
+  done
+  "${@:2}"
+}
+
+# Restart the Fresh pane $1. Returns 1 (after reporting why) when it could
+# not be restarted; the other targets still run.
+restart_one() {
+  local pane=$1 info label daemon tab cwd root procs shell_pid fresh_pid
+  local root_mode=0 saved term editor project
+
+  info=$("$HERDR" pane list | jq -c --arg p "$pane" 'first(.result.panes[] | select(.pane_id == $p)) // empty')
+  if [ -z "$info" ]; then
+    warn "pane $pane does not exist"
+    return 1
+  fi
+  label=$(jq -r .label <<<"$info")
+  daemon=$(jq -r '.tokens.fresh_daemon // empty' <<<"$info")
+  tab=$(jq -r .tab_id <<<"$info")
+  if [ "$label" != "$FRESH_LABEL" ] || [ -z "$daemon" ]; then
+    warn "pane $pane is not a Fresh editor (label '$label')"
+    return 1
+  fi
+
+  procs=$("$HERDR" pane process-info --pane "$pane") || { warn "process-info failed for $pane"; return 1; }
+  shell_pid=$(jq -r '.result.process_info.shell_pid // empty' <<<"$procs")
+  fresh_pid=$(jq -r 'first(.result.process_info.foreground_processes[]? | select(.name == "fresh") | .pid) // empty' <<<"$procs")
+
+  cwd=$(jq -r '.foreground_cwd // .cwd // empty' <<<"$info")
+  if [ -z "$cwd" ] && [ -n "$fresh_pid" ]; then
+    cwd=$(readlink "/proc/$fresh_pid/cwd" 2>/dev/null || true)
+  fi
+  [ -n "$cwd" ] || { warn "cannot find the project directory of pane $pane"; return 1; }
+  root=$(project_root "$cwd")
+  project=$(basename "$root")
+
+  if [ -n "$fresh_pid" ] && [ "$fresh_pid" = "$shell_pid" ]; then
+    root_mode=1
+    # Check before killing anything: without a Terminal there is no place
+    # to put the new editor, and the pane would close with Fresh.
+    term=$(pane_with_label "$tab" "$TERM_LABEL")
+    if [ -z "$term" ]; then
+      warn "$project: Fresh is the root of pane $pane and tab $tab has no Terminal pane, so it was NOT restarted; press Ctrl+B I to rebuild the IDE layout"
+      return 1
+    fi
+  fi
+
+  # Read the sizes before the kill: a closing layout may not be saved again.
+  saved=$(saved_entry "$daemon")
+
+  if daemon_alive "$daemon"; then
+    if ! fresh --cmd daemon kill "$daemon" >/dev/null 2>&1; then
+      warn "$project: fresh --cmd daemon kill $daemon failed; pane $pane left running"
+      return 1
+    fi
+    if ! poll_until 10 daemon_gone "$daemon"; then
+      warn "$project: daemon $daemon did not stop within 10s; pane $pane left as is"
+      return 1
+    fi
+  fi
+
+  # A root pane closes a moment after Fresh exits; give it up to 5s. If it
+  # stays open, it was not really a root pane and the shell path applies.
+  if [ "$root_mode" = 1 ]; then
+    poll_until 5 pane_gone "$pane" || true
+  fi
+
+  if pane_exists "$pane"; then
+    if ! poll_until 5 fresh_gone_in "$pane"; then
+      warn "$project: fresh is still running in pane $pane after 5s; not starting it again"
+      return 1
+    fi
+    if ! "$HERDR" pane run "$pane" "$(printf '%q %q' "$here/fresh-ide" "$root")" >/dev/null; then
+      warn "$project: could not start fresh-ide in pane $pane"
+      return 1
+    fi
+  else
+    # The pane closed with Fresh: rebuild it above the Terminal.
+    term=$(pane_with_label "$tab" "$TERM_LABEL")
+    if [ -z "$term" ]; then
+      warn "$project: pane $pane closed and tab $tab has no Terminal pane; press Ctrl+B I to rebuild the IDE layout"
+      return 1
+    fi
+    editor=$(new_editor_pane "$term" "$root") || { warn "$project: could not split a new editor pane above $term"; return 1; }
+    [ "$focus_target" = "$pane" ] && focus_target=$editor
+    pane=$editor
+    mark_fresh_pane "$pane" "$daemon" || warn "$project: could not label pane $pane"
+    "$HERDR" pane run "$pane" "$(printf '%q %q' "$here/fresh-ide" "$root")" >/dev/null \
+      || { warn "$project: could not start fresh-ide in pane $pane"; return 1; }
+    restore_sizes "$tab" "$saved" || warn "$project: could not restore the layout sizes"
+  fi
+
+  if ! poll_until 10 daemon_alive "$daemon"; then
+    warn "$project: daemon $daemon is not running 10s after the restart"
+    return 1
+  fi
+  "$HERDR" notification show "Fresh restarted" --body "$project" >/dev/null 2>&1 || true
+  printf 'restarted %s (%s) in pane %s\n' "$daemon" "$root" "$pane"
+}
+
+status=0
+while IFS= read -r pane; do
+  [ -n "$pane" ] || continue
+  restart_one "$pane" || status=1
+done <<<"$targets"
+
+if [ -n "$focus_target" ] && pane_exists "$focus_target"; then
+  focus_pane "$focus_target" || warn "could not restore focus to pane $focus_target"
+fi
+exit "$status"

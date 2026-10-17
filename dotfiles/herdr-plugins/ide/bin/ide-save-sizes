@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# ide-save-sizes — pane.focused / tab.focused hook: remember the IDE sizes.
+#
+# Resizes happen in herdr without any event, so the sizes are sampled whenever
+# focus moves. The hook saves every tab that holds an IDE, not only the tab
+# the event names: the user resizes in one tab and then switches away, and
+# that tab's last resize would otherwise never be recorded.
+#
+# Must stay silent and always exit 0: hooks run concurrently with the user's
+# focus changes, and a failure here must never surface as an error.
+set -uo pipefail
+here=$(dirname "$(readlink -f "$0")")
+{
+  . "$here/lib.sh"
+  panes=$("$HERDR" pane list) || exit 0
+  while read -r tab; do
+    [ -n "$tab" ] && save_sizes "$tab" "$panes"
+  done < <(jq -r --arg label "$FRESH_LABEL" '
+    .result.panes[] | select(.label == $label and (.tokens.fresh_daemon // "") != "")
+    | .tab_id' <<<"$panes" | sort -u)
+} >/dev/null 2>&1 || true
+exit 0

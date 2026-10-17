@@ -1,0 +1,57 @@
+# dotfiles-ide — the VS Code-shaped layer on top of herdr-sidebar.
+#
+# herdr-sidebar already provides the explorer, search, source control and
+# quick open. This plugin adds what it leaves out:
+#   - layout:          Sidebar | Fresh over a terminal | agent pinned on the right,
+#                      one Fresh daemon per project
+#   - toggle-terminal: Ctrl+`-style show/hide/focus of that terminal
+#   - open-file-link:  Ctrl+click on file:// links (rg, delta, eza, fd) opens Fresh
+#
+# Linked, not installed: `herdr plugin link <repo>/dotfiles/herdr-plugins/ide`
+# (install.sh does it), so editing the scripts here takes effect immediately.
+
+id = "dotfiles-ide"
+name = "Dotfiles IDE"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "IDE layout with Fresh in the middle and the agent on the right, terminal toggle, Ctrl+click file:line -> Fresh."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "layout"
+title = "IDE layout"
+description = "Sidebar | Fresh over a terminal | agent on the right; focus Fresh if already there."
+command = ["./bin/herdr-ide"]
+
+[[actions]]
+id = "toggle-terminal"
+title = "Toggle terminal"
+description = "Focus the terminal under Fresh, collapse it, or open it again (the agent column stays)."
+command = ["./bin/herdr-ide-term"]
+
+[[actions]]
+id = "open-file-link"
+title = "Open link in Fresh"
+description = "Open a clicked file:// link at its line in the IDE's Fresh."
+command = ["./bin/fresh-open", "--link"]
+
+[[actions]]
+id = "restart-fresh"
+title = "Restart Fresh"
+description = "Gracefully restart this tab's Fresh editor (unsaved work is kept)."
+command = ["./bin/fresh-restart"]
+
+[[link_handlers]]
+id = "file-link"
+title = "Open in Fresh"
+pattern = "^file://"
+action = "open-file-link"
+
+# Remember the IDE panes' sizes whenever focus moves (herdr has no resize hook).
+[[events]]
+on = "pane.focused"
+command = ["./bin/ide-save-sizes"]
+
+[[events]]
+on = "tab.focused"
+command = ["./bin/ide-save-sizes"]

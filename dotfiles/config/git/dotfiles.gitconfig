@@ -1,0 +1,25 @@
+# Included from ~/.gitconfig by install.sh ([include] path = ...).
+# Identity stays in ~/.gitconfig.
+[core]
+	editor = fresh
+	pager = delta
+[interactive]
+	diffFilter = delta --color-only
+[delta]
+	navigate = true
+	dark = true
+	line-numbers = true
+	syntax-theme = Visual Studio Dark+
+	# Ctrl+click a hunk's file:line in herdr -> Fresh at that line.
+	hyperlinks = true
+	hyperlinks-file-link-format = "file://{path}#{line}"
+[merge]
+	conflictstyle = zdiff3
+[diff]
+	colorMoved = default
+[init]
+	defaultBranch = main
+[pull]
+	rebase = true
+[push]
+	autoSetupRemote = true

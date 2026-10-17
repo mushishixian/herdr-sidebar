@@ -1,0 +1,9 @@
+{
+  "colors": "vscode",
+  "git_footer": true,
+  "auto_open": true,
+  "follow_cwd": true,
+  "preview_placement": "pane",
+  "custom_editor_on_click": true,
+  "custom_editor_inline": true
+}

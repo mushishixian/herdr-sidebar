@@ -1,0 +1,6 @@
+# ripgrep (RIPGREP_CONFIG_PATH points here). One flag per line.
+--smart-case
+--hidden
+--glob=!.git/
+# OSC 8 links carry line:col, so Ctrl+click on a match in herdr opens it in Fresh.
+--hyperlink-format=file://{host}{path}#{line}:{column}

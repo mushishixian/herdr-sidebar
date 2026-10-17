@@ -1,0 +1,13 @@
+# lazygit (managed by herdr-sidebar/dotfiles)
+gui:
+  nerdFontsVersion: "3"
+  showIcons: true
+git:
+  pagers:
+    - pager: delta --dark --paging=never --hyperlinks --hyperlinks-file-link-format="file://{path}#{line}"
+os:
+  # Edits go to the IDE's Fresh pane (or a Fresh right here when there is none).
+  edit: 'fresh-open {{filename}}'
+  editAtLine: 'fresh-open {{filename}}:{{line}}'
+  editAtLineAndWait: 'fresh {{filename}}:{{line}}'
+  editInTerminal: true

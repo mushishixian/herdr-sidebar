@@ -1,0 +1,22 @@
+# apt packages for install.sh (Ubuntu 24.04+). One per line.
+zsh
+zsh-autosuggestions
+zsh-syntax-highlighting
+git
+curl
+jq
+python3
+unzip
+ripgrep
+fd-find
+bat
+eza
+fzf
+zoxide
+git-delta
+btop
+lazygit
+starship
+shellcheck
+rustc
+cargo

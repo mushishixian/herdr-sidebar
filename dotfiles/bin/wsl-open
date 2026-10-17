@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# wsl-open URL — open a web/mail link in the Windows default browser.
+# Used as $BROWSER, and as xdg-open when the distro has none (herdr opens
+# Ctrl+clicked http(s) links through it). Only URLs: files stay in WSL.
+set -euo pipefail
+url=${1:?usage: wsl-open URL}
+case $url in
+  http://*|https://*|mailto:*) ;;
+  *) echo "wsl-open: only http(s)/mailto URLs are handed to Windows: $url" >&2; exit 2 ;;
+esac
+# rundll32 takes the URL as one argv entry, so & ? # survive unquoted.
+exec /mnt/c/Windows/System32/rundll32.exe url.dll,FileProtocolHandler "$url"

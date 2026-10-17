@@ -1471,14 +1471,14 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
 - A popup pane belongs to NO tab, so a process it starts inherits no usable `HERDR_TAB_ID` /
   `HERDR_WORKSPACE_ID`. The inline custom editor is therefore started with the CALLER pane's
   `HERDR_PANE_ID`/`HERDR_TAB_ID`/`HERDR_WORKSPACE_ID` (from `pane.list`); without them the dotfiles
-  `fresh-open` (which only uses editors in the current workspace) failed with "no current herdr tab".
+  `dotfiles/herdr-plugins/ide/bin/fresh-open` (which only uses editors in the current workspace) failed with "no current herdr tab".
 
 ### Search / replace popup (Ctrl+Alt+F / Ctrl+Alt+E)
 
 - Entry points: `--search-popup` (pane `[[panes]] id = "search-popup"`, placement `popup`, 90%x85%,
   `src/search_popup.rs::run`) and `--search-popup-open` (action `search-popup`, plus the Windows twin
   `search-popup-windows` that goes through `herdr-sidebar-ensure.exe`). The host key is
-  `ctrl+alt+f` in the dotfiles `config.toml` (it started as Ctrl+Shift+F, which Windows Terminal and
+  `ctrl+alt+f` in `dotfiles/config/herdr/config.toml` (it started as Ctrl+Shift+F, which Windows Terminal and
   similar hosts keep for Find; Ctrl+Alt+letter passes through, like the git chords). Both the open request and the pane
   spawn share `file_popup::request_popup_pane`, so the caller-pane env travels the same way as Ctrl+Q.
 - Engine: `src/content_search.rs` (LIB), moved out of `explorer_app.rs` so the Explorer Search view
@@ -1544,9 +1544,20 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   plus `, K skipped` when files were skipped or requested occurrences did not change. The popup then
   re-searches so the list matches disk, and drops its cached file text and preview.
 - Why not Ctrl+Alt+H: without the kitty protocol it arrives as Alt+Backspace. The host key is
-  `ctrl+alt+e` in the dotfiles `config.toml`.
+  `ctrl+alt+e` in `dotfiles/config/herdr/config.toml`.
 - Open editor buffers (Fresh) do not get a notification. They see the change on disk as an external
   change through their own reload or conflict handling.
+
+## dotfiles/ (the IDE layer)
+
+- The herdr + Fresh IDE around the sidebar lives in `dotfiles/`, merged from the former standalone `~/code/dotfiles` repo. The old upstream-patch set is gone because this repo is the fork.
+- `dotfiles/` is not a Rust crate and the plugin manifest never references it, so `plugins/herdr-sidebar` stays upstream-shaped and standalone.
+- Entry points: `docs/install-herdr-ide.sh` runs `dotfiles/install.sh`, which runs `dotfiles/herdr-sidebar/build.sh` (builds this checkout and points herdr's `herdr-sidebar` registration at it).
+- Installs are symlinks into `~/.config` and `~/.local/bin`, so edits apply live. Rerunning the installer re-points links left at an old checkout, including the `dotfiles-ide` registration and `editor-command.txt`.
+- Keep the herdr plugin id `dotfiles-ide`: its state dir and key bindings use it.
+- Fresh's settings UI replaces the symlinked `config.json` with a plain copy. Merge the copy into `dotfiles/config/fresh/config.json`, then rerun the installer to re-link.
+- `fresh-ide` exports `FRESH_IDE_DAEMON` and `DOTFILES_IDE_BIN`; the Fresh daemon inherits both.
+- `dotfiles/.gitattributes` pins LF. User docs: `docs/herdr-ide.md`.
 
 ## Herdr workspace
 

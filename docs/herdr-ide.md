@@ -26,52 +26,79 @@ plugins, configuration, and this fork of herdr-sidebar.
 | Piece | Location | Kind |
 |---|---|---|
 | herdr-sidebar fork | `~/code/herdr-sidebar`, branch `fresh-inline-editor` (this repo) | Rust herdr plugin, linked with `herdr plugin link` |
-| Dotfiles | `~/code/dotfiles` (local git repo, **no remote**: back it up yourself) | configs + scripts |
-| dotfiles installer | `~/code/dotfiles/install.sh` | apt, herdr, Fresh, symlinks, plugins |
-| Sidebar build helper | `~/code/dotfiles/herdr-sidebar/build.sh` + `000N-*.patch` | rebuilds the fork (clones + applies patches on a new machine) |
-| IDE plugin `dotfiles-ide` | `~/code/dotfiles/herdr-plugins/ide` | bash herdr plugin (layout, terminal toggle, Ctrl+click → Fresh) |
-| herdr config | `~/code/dotfiles/config/herdr/config.toml` → `~/.config/herdr/config.toml` | symlink |
-| Fresh config | `~/code/dotfiles/config/fresh/config.json` → `~/.config/fresh/config.json` | symlink |
-| Fresh plugins | `~/code/dotfiles/config/fresh/plugins/*.ts` → `~/.config/fresh/plugins/` | one symlink per file |
+| Dotfiles | `dotfiles/` in this repo (branch `fresh-inline-editor`; backed up wherever this branch is pushed) | configs + scripts |
+| dotfiles installer | `dotfiles/install.sh` | apt, herdr, Fresh, symlinks, plugins |
+| Sidebar build helper | `dotfiles/herdr-sidebar/build.sh` | builds this checkout (`plugins/herdr-sidebar`) and points herdr's `herdr-sidebar` registration at it |
+| IDE plugin `dotfiles-ide` | `dotfiles/herdr-plugins/ide` | bash herdr plugin (layout, terminal toggle, Ctrl+click → Fresh) |
+| herdr config | `dotfiles/config/herdr/config.toml` → `~/.config/herdr/config.toml` | symlink |
+| Fresh config | `dotfiles/config/fresh/config.json` → `~/.config/fresh/config.json` | symlink |
+| Fresh plugins | `dotfiles/config/fresh/plugins/*.ts` → `~/.config/fresh/plugins/` | one symlink per file |
 | Sidebar settings | `~/.local/state/herdr/plugins/herdr-sidebar/state.json` | seeded from `dotfiles/herdr-sidebar/state.json` |
 | OpenCommit | `~/.local/bin/oco` (`npm install -g --prefix ~/.local opencommit`) | npm CLI |
 | One-shot installer | `docs/install-herdr-ide.sh` (this folder) | wraps all of the above |
 
+### Repository layout
+
+```
+herdr-sidebar/                 this repo (branch fresh-inline-editor)
+├── plugins/herdr-sidebar/     Rust plugin: explorer, search, source control (upstream-shaped, builds standalone)
+├── dotfiles/                  IDE layer: install.sh, herdr/Fresh/lazygit/shell configs, dotfiles-ide plugin, build.sh
+└── docs/                      this document and install-herdr-ide.sh
+```
+
+`plugins/herdr-sidebar` never references `dotfiles/`, so upstream merges stay clean.
+
 ## Install
 
+On a new machine, clone this repo's `fresh-inline-editor` branch from wherever it
+is pushed (your fork, not `alexarthurs/herdr-sidebar`: `origin` there is upstream
+and would NOT contain these commits). The dotfiles live in its `dotfiles/`
+directory, so there is no second repo to fetch.
+
 ```bash
-# 1. Put the dotfiles repo at ~/code/dotfiles (copy it over, it has no remote)
-# 2. Copy this repo to ~/code/herdr-sidebar (branch fresh-inline-editor). Its
-#    `origin` is upstream, so a fresh clone would NOT contain these commits.
+git clone -b fresh-inline-editor <your fork URL> ~/code/herdr-sidebar
 cd ~/code/herdr-sidebar
-docs/install-herdr-ide.sh            # --help for options (--lsp, --no-packages, --no-claude, --no-oco, --dotfiles DIR)
+docs/install-herdr-ide.sh            # --help for options (--lsp, --no-packages, --no-claude, --no-oco)
 ```
 
 What it does, in order:
 
-1. Warns if Fresh or herdr replaced their config symlink with a plain copy
-   (see *Gotchas*) and shows the diff so you can merge it back first.
-2. Runs `~/code/dotfiles/install.sh` with `HERDR_SIDEBAR_SRC` pointing at this
-   checkout: apt packages (incl. `rustc cargo jq`), herdr + Fresh official
-   installers, all symlinks, `build.sh` (cargo build of this repo), links
-   `dotfiles-ide`, seeds the sidebar settings, installs herdr's Claude Code hook.
-3. Makes sure herdr's registered `herdr-sidebar` is **this** checkout (re-links
-   it if it points elsewhere or is the unpatched GitHub install).
-4. Installs OpenCommit into `~/.local`.
-5. Verifies the actions, Fresh plugins and keys are visible, reloads herdr.
+1. Drift check: warns if Fresh or herdr replaced their config symlink with a plain
+   copy (see *Gotchas*) and shows the diff so you can merge it into `dotfiles/config/` first.
+2. Runs `dotfiles/install.sh`: apt packages (incl. `rustc cargo jq`), herdr + Fresh
+   official installers, all symlinks, `dotfiles/herdr-sidebar/build.sh` (builds
+   `plugins/herdr-sidebar` from this checkout and points herdr's `herdr-sidebar`
+   registration at it, replacing any other registration), links `dotfiles-ide`,
+   seeds the sidebar settings, installs herdr's Claude Code hook.
+3. Installs OpenCommit into `~/.local`.
+4. Verifies the actions, Fresh plugins and keys are visible, that the `herdr-sidebar`
+   and `dotfiles-ide` registrations both point into this repo, then reloads herdr.
 
 Afterwards, once:
 
 - `oco setup`: choose the AI provider and key for the AI-commit key.
-- Restart running Fresh so new plugins/keys load: `~/code/dotfiles/herdr-plugins/ide/bin/fresh-restart --all`
-  (see *Updating*).
+- Restart running Fresh so new plugins/keys load: `dotfiles/herdr-plugins/ide/bin/fresh-restart --all`
+  from the repo root (see *Updating*).
 - Windows Terminal (and Pebrel): remove its default **Ctrl+Shift+A → Select all** and **Ctrl+Tab → next tab**
   bindings (Settings → Actions), or the AI-commit and recent-tab chords never reach herdr and Fresh.
 - Start `herdr`, open a project pane, press `ctrl+b i` for the IDE layout.
 
+### Migrating from the old `~/code/dotfiles`
+
+Machines set up before the merge still have the old checkout, and their symlinks
+point into `~/code/dotfiles`. Pull this branch into `~/code/herdr-sidebar` and rerun
+`docs/install-herdr-ide.sh`. Its `link()` re-points any symlink that points elsewhere
+(the replaced files go to `~/.dotfiles-backup/<timestamp>/`), re-links the
+`dotfiles-ide` plugin when its registration points at an old root, and rewrites
+`editor-command.txt` on every run. After that the old `~/code/dotfiles` checkout is
+unused and can be archived. If Fresh's settings screen had left
+`~/.config/fresh/config.json` as a plain copy, the drift check shows its diff: merge
+that into `dotfiles/config/fresh/config.json` before rerunning, because the re-link
+moves the copy aside.
+
 ## Keys
 
-### herdr, global (`config/herdr/config.toml`)
+### herdr, global (`dotfiles/config/herdr/config.toml`)
 
 | Key | Does |
 |---|---|
@@ -116,7 +143,7 @@ change. herdr-sidebar toasts only when started as a plugin action
 dotfiles-ide uses `tip` in `lib.sh`; the two `popup` keys run
 `herdr notification show` before their command.
 
-### Fresh (`config/fresh/config.json`)
+### Fresh (`dotfiles/config/fresh/config.json`)
 
 | Key | Does |
 |---|---|
@@ -279,8 +306,10 @@ preview in a pane (a git-change diff opens beside the sidebar inside the IDE tab
   History is from the saved file, so it warns on unsaved buffers.
 - **`selection_share.ts`**: the copy / reference / send-to-agent commands. The
   path is relative to Fresh's cwd (the project root). Send-to-agent spawns
-  `$DOTFILES_IDE_BIN/fresh-to-agent` (default
-  `~/code/dotfiles/herdr-plugins/ide/bin`) and caps text at 200 000 chars.
+  `$DOTFILES_IDE_BIN/fresh-to-agent` and caps text at 200 000 chars.
+  `fresh-ide` exports `DOTFILES_IDE_BIN` (its own bin dir) and the Fresh daemon
+  inherits it, so this finds the script wherever the repo is checked out. The
+  fallback is `~/code/herdr-sidebar/dotfiles/herdr-plugins/ide/bin`.
 - **`recent_tab`** (`ctrl+tab`, `when: normal`): switches to the previously used open file tab; again goes
   back. It never opens files.
 - **Live diff on request**: polls `$XDG_STATE_HOME/fresh-ide/live-diff-request-<FRESH_IDE_DAEMON>` every
@@ -301,34 +330,35 @@ preview in a pane (a git-change diff opens beside the sidebar inside the IDE tab
 herdr server reload-config
 
 # Fresh config or plugin edits: daemons load them only at start
-~/code/dotfiles/herdr-plugins/ide/bin/fresh-restart --all   # graceful; unsaved buffers come back (hot exit)
+dotfiles/herdr-plugins/ide/bin/fresh-restart --all   # graceful; unsaved buffers come back (hot exit), run from the repo root
 # by hand, if fresh-restart is unavailable: fresh --cmd daemon list; fresh --cmd daemon kill <name>; then fresh-ide in that pane
 
-# keep the dotfiles patch set in sync with this branch (commit first)
-rm ~/code/dotfiles/herdr-sidebar/*.patch
-git format-patch "$(git merge-base origin/main HEAD)" -o ~/code/dotfiles/herdr-sidebar
+# pull this branch (or rerun docs/install-herdr-ide.sh), then rebuild and re-point herdr at this checkout
+git pull
+dotfiles/herdr-sidebar/build.sh
 
-# rebase the fork onto the newest upstream release (rewrites the patches)
-~/code/dotfiles/herdr-sidebar/build.sh --update
+# take upstream herdr-sidebar changes (origin is alexarthurs/herdr-sidebar), then rebuild the same way
+git fetch origin && git merge origin/main
+dotfiles/herdr-sidebar/build.sh
 ```
 
 `fresh-restart` with no argument restarts only this tab's Fresh (it is also the dotfiles-ide action
 `restart-fresh`).
 
-The dotfiles patch set still stops at 01dea4e (its latest patch is 0006 line-history). Not in it yet:
-the file-search popup, git pull / push / AI commit, the search and replace popups, and conflict routing.
-A new machine that runs `build.sh` without this repo gets the older feature set until the patches are
-re-exported (above). `docs/install-herdr-ide.sh` avoids that by building this checkout directly.
+There is no patch set to maintain: the fork and the dotfiles are one repo, so an upstream update is a
+normal git merge and `build.sh` builds whatever is checked out. A machine that gets this branch gets the
+full feature set, including the file-search popup, git pull / push / AI commit, the search and replace
+popups, and conflict routing.
 
 ## Gotchas (verified)
 
 - **Fresh replaces symlinked `config.json`** when its settings UI saves, turning
   the dotfiles symlink into a plain copy; later dotfiles edits then silently do
   nothing. Check `ls -la ~/.config/fresh`, merge the copy's changes into
-  dotfiles, rerun the installer (it backs up and re-links). New Fresh plugins
+  `dotfiles/config/fresh/config.json`, rerun the installer (it backs up and re-links). New Fresh plugins
   also need their own symlink: rerun the installer. It recurs every time the settings screen saves
   (seen again: `smooth_scroll`, `highlight_current_column` and `rainbow_indentation` lived only in the
-  copy), so edit settings in the dotfiles file instead.
+  copy), so edit settings in `dotfiles/config/fresh/config.json` instead.
 - **herdr's right-click pane menu cannot be extended by plugins.** Its items are
   hard-coded (`src/client/shell/context_menu.rs`); the manifest `contexts` field
   is accepted but unused for menus. Hence the Fresh keys + Selection menu.
@@ -372,7 +402,8 @@ re-exported (above). `docs/install-herdr-ide.sh` avoids that by building this ch
 | `ctrl+alt+f` / `ctrl+alt+e` does nothing | `herdr plugin action list \| grep -E 'search-popup\|replace-popup'`; `herdr server reload-config` |
 | A file opens in another workspace's Fresh | fixed: `fresh-open` only uses this workspace's editor; check the Fresh pane's `fresh_daemon` token with `herdr pane list` |
 | `ctrl+shift+a` message never appears in the box | the tab needs a sidebar (its Source Control view takes the request); the request expires after 30 s; `oco setup` |
-| `ctrl+b alt+g` (lazygit) does nothing | `command -v lazygit` (it is in `packages.txt`: rerun the installer without `--no-packages`, or `sudo apt install lazygit`) |
+| `ctrl+b alt+g` (lazygit) does nothing | `command -v lazygit` (it is in `dotfiles/packages.txt`: rerun the installer without `--no-packages`, or `sudo apt install lazygit`) |
+| Ctrl+click / Send to Agent / sidebar click still run scripts from `~/code/dotfiles` | rerun `docs/install-herdr-ide.sh` (it re-points the links, the `dotfiles-ide` registration and `editor-command.txt`), then `dotfiles/herdr-plugins/ide/bin/fresh-restart --all` so the daemons pick up `DOTFILES_IDE_BIN` |
 
 More internals (herdr behaviour, heartbeat liveness, preview tabs, release
 flow) are in the repo's `AGENTS.md`.

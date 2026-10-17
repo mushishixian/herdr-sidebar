@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# herdr-ide [DIR] — turn the current herdr tab into the IDE layout for DIR's
+# project (default: the current pane's directory):
+#
+#   ┌─────────┬──────────────────────┬───────────┐
+#   │ Sidebar │ Fresh (project       │ Agent     │
+#   │ explorer│ daemon)              │ (claude)  │
+#   │ search  ├──────────────────────┤           │
+#   │ git     │ Terminal             │           │
+#   └─────────┴──────────────────────┴───────────┘
+#
+# The Sidebar is docked by the herdr-sidebar plugin on its own. Started from
+# an agent pane, that agent becomes the right column; started from a shell,
+# the shell becomes the Terminal and a new agent opens on the right.
+# Running it again just focuses the editor.
+#
+# Agent command: first line of $(herdr plugin config-dir dotfiles-ide)/agent,
+# else $IDE_AGENT, else "claude". "none" leaves the right column out.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+. "$here/lib.sh"
+
+in_herdr || die "herdr-ide must run inside herdr"
+[ -n "$cur_tab" ] || die "no current herdr tab"
+[ -z "${HERDR_PLUGIN_ACTION_ID:-}" ] || tip "IDE layout" dotfiles-ide.layout
+
+existing=$(pane_with_label "$cur_tab" "$FRESH_LABEL")
+if [ -n "$existing" ]; then
+  focus_pane "$existing"
+  exit 0
+fi
+
+# Build from the pane the user is in, unless that is the sidebar or a preview.
+anchor_json=$("$HERDR" pane list | jq -c --arg tab "$cur_tab" --arg cur "$cur_pane" '
+  [.result.panes[] | select(.tab_id == $tab)
+   | select((.label // "") as $l | ($l != "Sidebar")
+       and ($l | test("^(Preview|Editor · )|( · preview| · editor)$") | not))]
+  | (first(.[] | select(.pane_id == $cur)) // first(.[])) // empty')
+[ -n "$anchor_json" ] || die "no pane to build the layout from"
+anchor=$(jq -r .pane_id <<<"$anchor_json")
+anchor_agent=$(jq -r '.agent // empty' <<<"$anchor_json")
+cwd=$(jq -r '.foreground_cwd // .cwd // empty' <<<"$anchor_json")
+root=$(project_root "${1:-${cwd:-$HOME}}")
+name=$(ide_daemon_for "$root" "$cur_ws")
+# Read now: the hooks save the default layout while this one is being built.
+saved=$(saved_entry "$name")
+
+agent_cmd=${IDE_AGENT:-claude}
+agent_file="$HOME/.config/herdr/plugins/config/dotfiles-ide/agent"
+[ -s "$agent_file" ] && agent_cmd=$(head -n1 "$agent_file")
+
+split() { # pane direction ratio -> new pane id
+  "$HERDR" pane split "$1" --direction "$2" --ratio "$3" --cwd "$root" \
+    | jq -r '.result.pane.pane_id // empty'
+}
+
+if [ -n "$anchor_agent" ]; then
+  # An agent is already running here: it becomes the right column.
+  agent=$anchor
+  # The ratio sizes the first (left) slot, which the middle takes after the swap.
+  middle=$(split "$agent" right 0.6)
+  [ -n "$middle" ] || die "pane split failed"
+  "$HERDR" pane swap --source-pane "$agent" --target-pane "$middle" >/dev/null
+  editor=$middle
+  term=$(split "$editor" down 0.7)
+  [ -n "$term" ] || die "pane split failed"
+else
+  # A shell: it stays as the Terminal, under a new editor, left of a new agent.
+  term=$anchor
+  agent=''
+  if [ "$agent_cmd" != none ]; then
+    agent=$(split "$term" right 0.6)
+    [ -n "$agent" ] || die "pane split failed"
+    "$HERDR" pane run "$agent" "$agent_cmd" >/dev/null
+  fi
+  editor=$(new_editor_pane "$term" "$root") || die "pane split failed"
+fi
+
+[ -n "$agent" ] && "$HERDR" pane rename "$agent" "$AGENT_LABEL" >/dev/null
+"$HERDR" pane rename "$term" "$TERM_LABEL" >/dev/null
+mark_fresh_pane "$editor" "$name"
+"$HERDR" pane run "$editor" "$(printf '%q %q' "$here/fresh-ide" "$root")" >/dev/null
+restore_sizes "$cur_tab" "$saved" || true
+focus_pane "$editor"
+printf '%s\n' "$editor"

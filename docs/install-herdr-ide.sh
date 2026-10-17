@@ -2,7 +2,6 @@
 # install-herdr-ide.sh — one-shot install of the herdr + Fresh IDE on WSL Ubuntu.
 #
 #   docs/install-herdr-ide.sh                 full install (sudo for apt when needed)
-#   docs/install-herdr-ide.sh --dotfiles DIR  dotfiles checkout (default ~/code/dotfiles)
 #   docs/install-herdr-ide.sh --lsp           also language servers (passed to dotfiles)
 #   docs/install-herdr-ide.sh --no-packages   skip apt (passed to dotfiles)
 #   docs/install-herdr-ide.sh --no-claude     skip the Claude Code hook (passed to dotfiles)
@@ -15,17 +14,13 @@ set -euo pipefail
 BIN="$HOME/.local/bin"
 export PATH="$BIN:$PATH"
 
-DOTFILES=$HOME/code/dotfiles
 with_oco=1
 passthrough=()
 while [ $# -gt 0 ]; do
   case $1 in
-    --dotfiles)
-      [ $# -ge 2 ] || { echo "--dotfiles needs a directory" >&2; exit 2; }
-      DOTFILES=$2; shift ;;
     --lsp|--no-packages|--no-claude) passthrough+=("$1") ;;
     --no-oco) with_oco=0 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -46,10 +41,8 @@ grep -qi microsoft /proc/version 2>/dev/null || warn "note: not WSL; Windows bri
 REPO=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 PLUGIN=$REPO/plugins/herdr-sidebar
 [ -f "$PLUGIN/herdr-plugin.toml" ] || die "herdr-sidebar plugin not found at $PLUGIN"
-
-DOTFILES=$(cd "$DOTFILES" 2>/dev/null && pwd) || die "dotfiles dir $DOTFILES does not exist"
-[ -f "$DOTFILES/install.sh" ] ||
-  die "no install.sh in $DOTFILES: copy your dotfiles repo to $DOTFILES first (it has no git remote)"
+DOTFILES=$REPO/dotfiles
+[ -f "$DOTFILES/install.sh" ] || die "dotfiles/ missing in $REPO"
 info "sidebar source: $REPO"
 info "dotfiles:       $DOTFILES"
 
@@ -73,31 +66,9 @@ drift_check "$DOTFILES/config/herdr/config.toml" "$HOME/.config/herdr/config.tom
 
 # ── 2. Dotfiles installer (packages, herdr, Fresh, configs, plugins) ───
 step "dotfiles installer"
-HERDR_SIDEBAR_SRC="$REPO" "$DOTFILES/install.sh" ${passthrough[@]+"${passthrough[@]}"}
+"$DOTFILES/install.sh" ${passthrough[@]+"${passthrough[@]}"}
 
-# ── 3. herdr must run THIS checkout of herdr-sidebar ───────────────────
-step "herdr-sidebar points at this checkout"
-registered=$(herdr plugin list --json 2>/dev/null |
-  jq -r '.result.plugins[]? | select(.plugin_id=="herdr-sidebar") | .plugin_root' 2>/dev/null || true)
-if [ -n "$registered" ] && [ "$registered" != "$PLUGIN" ]; then
-  kind=$(herdr plugin list --json 2>/dev/null |
-    jq -r '.result.plugins[]? | select(.plugin_id=="herdr-sidebar") | .source.kind' 2>/dev/null || true)
-  info "herdr runs $registered (source: ${kind:-unknown}); switching to $PLUGIN"
-  if [ "$kind" = local ]; then
-    herdr plugin unlink herdr-sidebar >/dev/null
-  else
-    herdr plugin uninstall herdr-sidebar >/dev/null
-  fi
-  herdr plugin link "$PLUGIN" >/dev/null
-  herdr plugin action invoke herdr-sidebar.redeploy >/dev/null 2>&1 || true
-elif [ -z "$registered" ]; then
-  herdr plugin link "$PLUGIN" >/dev/null
-  info "linked $PLUGIN"
-else
-  info "already linked to $PLUGIN"
-fi
-
-# ── 4. OpenCommit (oco) for the Ctrl+Shift+A AI commit ─────────────────
+# ── 3. OpenCommit (oco) for the Ctrl+Shift+A AI commit ─────────────────
 if [ "$with_oco" = 1 ]; then
   step "OpenCommit (oco)"
   if command -v oco >/dev/null; then
@@ -115,7 +86,7 @@ else
   info "skipped (--no-oco)"
 fi
 
-# ── 5. Verify (report only; never aborts) ──────────────────────────────
+# ── 4. Verify (report only; never aborts) ──────────────────────────────
 step "verify"
 actions=$(herdr plugin action list 2>/dev/null || true)
 for a in git-commit-ai git-pull git-push file-search search-popup replace-popup git-switch-branch restart-fresh; do
@@ -171,13 +142,27 @@ if [ "$with_oco" = 1 ]; then
   fi
 fi
 
+plugin_root() {
+  herdr plugin list --json 2>/dev/null |
+    jq -r --arg id "$1" '.result.plugins[]? | select(.plugin_id==$id) | .plugin_root' 2>/dev/null || true
+}
+for entry in "herdr-sidebar:$PLUGIN" "dotfiles-ide:$DOTFILES/herdr-plugins/ide"; do
+  id=${entry%%:*} want=${entry#*:}
+  got=$(plugin_root "$id")
+  if [ "$got" = "$want" ]; then
+    ok "$id runs $want"
+  else
+    bad "$id runs ${got:-nothing} (expected $want)"
+  fi
+done
+
 if herdr server reload-config >/dev/null 2>&1; then
   ok "reloaded the running herdr server"
 else
   info "no running herdr server to reload (fine)"
 fi
 
-# ── 6. Next steps ──────────────────────────────────────────────────────
+# ── 5. Next steps ──────────────────────────────────────────────────────
 step "next steps"
 [ "$with_oco" = 1 ] && info "1. oco setup   (once: choose the AI provider and key for the AI commit)"
 info "2. Restart Fresh so plugins and keys load (graceful: unsaved buffers come back):"
@@ -187,5 +172,9 @@ info "   default (Pebrel too): remove both, or the AI-commit and recent-tab keys
 info "   herdr and Fresh."
 info "4. Start: herdr, then in a project pane press ctrl+b i for the IDE layout."
 info "   Full docs: $REPO/docs/herdr-ide.md"
+if [ -d "$HOME/code/dotfiles" ] && [ "$(cd "$HOME/code/dotfiles" && pwd)" != "$DOTFILES" ]; then
+  info "The old standalone $HOME/code/dotfiles checkout is no longer used by anything"
+  info "once this has run; archive or delete it."
+fi
 [ -d "$HOME/.dotfiles-backup" ] && info "5. Replaced files were backed up under ~/.dotfiles-backup/"
 exit 0

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# fresh-ide [DIR] — run (or reattach to) the Fresh daemon for DIR's project.
+#
+# One daemon per project per herdr workspace, so the editor survives closing
+# its pane (Ctrl+Shift+D detaches; run fresh-ide again to come back), and
+# fresh-open can hand files to it from anywhere. Two workspaces on one project
+# get separate editors: Fresh draws one editor to every attached client.
+# Inside herdr the pane is labelled "Fresh" so the other IDE actions can find it.
+set -euo pipefail
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+root=$(project_root "${1:-$PWD}")
+if [ -n "${HERDR_PANE_ID:-}" ] && in_herdr; then
+  name=$(ide_daemon_for "$root" "$cur_ws")
+  mark_fresh_pane "$HERDR_PANE_ID" "$name" || true
+else
+  name=$(daemon_name "$root")
+fi
+
+cd "$root"
+# Fresh's daemon client never asks the terminal for the kitty keyboard
+# protocol (its direct mode does), so Ctrl+Tab arrives as a plain Tab. Ask
+# for it ourselves once Fresh is on its alternate screen: the protocol's flags
+# are kept per screen, so asking before Fresh starts would not stick. The
+# second push covers a slow start; pushing twice is harmless.
+( for delay in 1.5 2.5; do sleep "$delay"; printf '\033[>1u' >/dev/tty; done ) 2>/dev/null &
+# selection_share.ts reads this to find its live-diff requests.
+export FRESH_IDE_DAEMON="$name"
+# The daemon inherits this, so Fresh plugins find fresh-to-agent wherever the repo is checked out.
+export DOTFILES_IDE_BIN; DOTFILES_IDE_BIN=$(dirname "$(readlink -f "$0")")
+exec fresh -a "$name"
