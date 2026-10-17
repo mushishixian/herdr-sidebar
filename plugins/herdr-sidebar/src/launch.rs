@@ -30,6 +30,11 @@ pub const STARTING_TOKEN: &str = "herdr-sidebar-starting";
 const MIN_SIDEBAR_SHARE: f64 = 0.15;
 const MAX_SIDEBAR_SHARE: f64 = 0.5;
 
+/// How close (in terminal columns) a dragged pane's share may sit to one of
+/// the 15%/50% share bounds before the width reads as geometry-limited rather
+/// than chosen.
+pub const DRAG_SHARE_EPSILON_COLS: f64 = 1.0;
+
 #[derive(Deserialize)]
 struct PaneListMsg {
     result: PaneListResult,
@@ -195,6 +200,8 @@ struct Layout {
     splits: Vec<LayoutSplit>,
     area: Option<Rect>,
     tab_id: Option<String>,
+    #[serde(default)]
+    zoomed: bool,
 }
 
 #[derive(Deserialize)]
@@ -493,6 +500,92 @@ pub fn open_plan(layout_json: &str, dock_right: bool, target_cols: u16) -> Strin
 pub fn layout_width(layout_json: &str) -> Option<i64> {
     let msg = serde_json::from_str::<LayoutMsg>(strip_bom(layout_json)).ok()?;
     msg.result.layout.area.map(|area| area.width)
+}
+
+/// The pane's new width, in terminal columns, when the only difference between
+/// two `pane layout` snapshots is this pane's own divider — i.e. the user
+/// dragged it. `None` for anything else (window resize, split/close, zoom, an
+/// unparsable snapshot), and `None` when the resulting share sits on the
+/// MIN/MAX_SIDEBAR_SHARE clamp, where the width is geometry-limited rather than
+/// chosen (adopting it would corrupt the stored target on a narrow tab).
+///
+/// The caller still clamps to the settings range; this helper only decides
+/// whether the drag was an intentional width choice at all.
+pub fn dragged_width(before: &str, after: &str, pane_id: &str, term_cols_now: u16) -> Option<u16> {
+    if pane_id.is_empty() {
+        return None;
+    }
+    let before = serde_json::from_str::<LayoutMsg>(strip_bom(before))
+        .ok()?
+        .result
+        .layout;
+    let after = serde_json::from_str::<LayoutMsg>(strip_bom(after))
+        .ok()?
+        .result
+        .layout;
+    if before.zoomed || after.zoomed {
+        return None;
+    }
+    let before_area = before.area.as_ref()?;
+    let after_area = after.area.as_ref()?;
+    if before_area.width != after_area.width {
+        return None;
+    }
+    // A split, a close, or a preview pane appearing changes the pane set.
+    let pane_set = |layout: &Layout| -> Vec<String> {
+        let mut ids: Vec<String> = layout
+            .panes
+            .iter()
+            .filter_map(|pane| pane.pane_id.clone())
+            .collect();
+        ids.sort();
+        ids
+    };
+    if pane_set(&before) != pane_set(&after) {
+        return None;
+    }
+    let before_rect = before
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id.as_deref() == Some(pane_id))?
+        .rect
+        .as_ref()?;
+    let after_rect = after
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id.as_deref() == Some(pane_id))?
+        .rect
+        .as_ref()?;
+    if before_rect.width == after_rect.width {
+        return None;
+    }
+    // Either dock side: the divider is the pane's left or right edge. Take the
+    // first edge carrying a covering horizontal split (the dock side is not
+    // needed for the clamp check).
+    let split = [after_rect.x + after_rect.width, after_rect.x]
+        .into_iter()
+        .find_map(|divider_x| {
+            after
+                .splits
+                .iter()
+                .filter(|split| split.direction.as_deref() == Some("right"))
+                .filter_map(|split| Some((split.rect.as_ref()?, split.ratio?)))
+                .filter(|(rect, ratio)| {
+                    let split_divider =
+                        rect.x + (f64::from(rect.width as i32) * ratio).round() as i64;
+                    rect.x <= after_rect.x
+                        && (split_divider - divider_x).abs() <= 2
+                        && rect.width > 0
+                })
+                .min_by_key(|(rect, _)| rect.width)
+        })?;
+    let share = after_rect.width as f64 / split.0.width as f64;
+    let epsilon = DRAG_SHARE_EPSILON_COLS / split.0.width as f64;
+    if (share - MIN_SIDEBAR_SHARE).abs() <= epsilon || (share - MAX_SIDEBAR_SHARE).abs() <= epsilon
+    {
+        return None;
+    }
+    Some(term_cols_now)
 }
 
 /// The tab (preferred) or workspace the event concerns, from
@@ -1540,6 +1633,94 @@ mod tests {
         format!(
             r#"{{"id":"x","result":{{"layout":{{"area":{{"x":0,"y":0,"width":180,"height":50}},"tab_id":"w1:t1","panes":[{panes}]}}}}}}"#
         )
+    }
+
+    /// A `pane.layout` snapshot with the tab area, the pane list, and one
+    /// horizontal split spanning 160 columns whose divider sits at `ratio`.
+    fn drag_snapshot(area_w: i64, panes: &str, ratio: f64, zoomed: bool) -> String {
+        format!(
+            r#"{{"result":{{"layout":{{"zoomed":{zoomed},"area":{{"x":0,"y":0,"width":{area_w},"height":50}},"panes":[{panes}],"splits":[{{"direction":"right","ratio":{ratio:.6},"rect":{{"x":0,"y":0,"width":160,"height":50}}}}]}}}}}}"#
+        )
+    }
+
+    /// A left-docked sidebar `side_w` columns wide beside one working pane.
+    fn drag_panes(side_w: i64) -> String {
+        let rest = 160 - side_w;
+        format!(
+            r#"{{"pane_id":"e","rect":{{"x":0,"y":0,"width":{side_w},"height":50}}}},{{"pane_id":"p1","rect":{{"x":{side_w},"y":0,"width":{rest},"height":50}}}}"#
+        )
+    }
+
+    #[test]
+    fn dragged_width_accepts_a_real_drag() {
+        let before = drag_snapshot(160, &drag_panes(32), 32.0 / 160.0, false);
+        let wider = drag_snapshot(160, &drag_panes(44), 44.0 / 160.0, false);
+        assert_eq!(dragged_width(&before, &wider, "e", 42), Some(42));
+        let narrower = drag_snapshot(160, &drag_panes(26), 26.0 / 160.0, false);
+        assert_eq!(dragged_width(&wider, &narrower, "e", 24), Some(24));
+    }
+
+    #[test]
+    fn dragged_width_rejects_a_window_resize() {
+        let before = drag_snapshot(160, &drag_panes(32), 32.0 / 160.0, false);
+        let after = drag_snapshot(170, &drag_panes(44), 44.0 / 170.0, false);
+        assert_eq!(dragged_width(&before, &after, "e", 42), None);
+    }
+
+    #[test]
+    fn dragged_width_rejects_a_changed_pane_set() {
+        let before = drag_snapshot(160, &drag_panes(32), 32.0 / 160.0, false);
+        // A split (or a preview pane) appeared between the two snapshots.
+        let added = format!(
+            r#"{},{{"pane_id":"p2","rect":{{"x":150,"y":0,"width":10,"height":50}}}}"#,
+            drag_panes(44)
+        );
+        let after = drag_snapshot(160, &added, 44.0 / 160.0, false);
+        assert_eq!(dragged_width(&before, &after, "e", 42), None);
+        // …and a pane disappeared.
+        assert_eq!(dragged_width(&after, &before, "e", 30), None);
+    }
+
+    #[test]
+    fn dragged_width_rejects_zoom() {
+        let plain = drag_snapshot(160, &drag_panes(44), 44.0 / 160.0, false);
+        let zoomed = drag_snapshot(160, &drag_panes(32), 32.0 / 160.0, true);
+        assert_eq!(dragged_width(&zoomed, &plain, "e", 42), None);
+        let zoomed_after = drag_snapshot(160, &drag_panes(44), 44.0 / 160.0, true);
+        assert_eq!(dragged_width(&plain, &zoomed_after, "e", 42), None);
+    }
+
+    #[test]
+    fn dragged_width_rejects_an_unchanged_width() {
+        let before = drag_snapshot(160, &drag_panes(32), 32.0 / 160.0, false);
+        let after = drag_snapshot(160, &drag_panes(32), 32.0 / 160.0, false);
+        assert_eq!(dragged_width(&before, &after, "e", 30), None);
+    }
+
+    #[test]
+    fn dragged_width_rejects_widths_pinned_on_the_share_clamp() {
+        // On a 160-column split the share bounds sit at 24 and 80 columns.
+        let before = drag_snapshot(160, &drag_panes(32), 32.0 / 160.0, false);
+        let min = drag_snapshot(160, &drag_panes(24), 0.15, false);
+        assert_eq!(dragged_width(&before, &min, "e", 22), None);
+        let max = drag_snapshot(160, &drag_panes(80), 0.5, false);
+        assert_eq!(dragged_width(&before, &max, "e", 78), None);
+    }
+
+    #[test]
+    fn dragged_width_rejects_garbage_unknown_pane_and_missing_split() {
+        let before = drag_snapshot(160, &drag_panes(32), 32.0 / 160.0, false);
+        let after = drag_snapshot(160, &drag_panes(44), 44.0 / 160.0, false);
+        assert_eq!(dragged_width("not json", &after, "e", 42), None);
+        assert_eq!(dragged_width(&before, "not json", "e", 42), None);
+        assert_eq!(dragged_width(&before, &after, "", 42), None);
+        assert_eq!(dragged_width(&before, &after, "missing", 42), None);
+        // Same area and pane set, but no horizontal split covers the pane.
+        let splitless = format!(
+            r#"{{"result":{{"layout":{{"area":{{"x":0,"y":0,"width":160,"height":50}},"panes":[{}]}}}}}}"#,
+            drag_panes(44)
+        );
+        assert_eq!(dragged_width(&before, &splitless, "e", 42), None);
     }
 
     #[test]

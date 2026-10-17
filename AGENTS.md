@@ -607,8 +607,14 @@ HACKING.md — budget time for that before promising a patched build.
   the last-active view.
 - Sidebar width is a persisted column target (32 by default, 24–80 in 4-column steps), not
   a frozen split ratio. A change to the whole tab area re-applies it through the ratio-aware
-  resize path; a pane-only divider resize is respected for the current layout instead of
-  snapping back. The existing 15%–50% share bounds still win at extreme tab widths.
+  resize path. A pane-only divider resize is now ADOPTED as that target: `on_resize` keeps the
+  previous `pane.layout` snapshot and asks `launch::dragged_width` whether this pane's own
+  width changed while nothing else did (tab area width unchanged + same pane set + not zoomed +
+  the new share is not pinned on the 15%/50% clamp); the candidate lands in `pending_width` and
+  `flush_pending_width` (polled every `WIDTH_SETTLE_POLL` from both event loops, ~500 ms
+  `WIDTH_SETTLE`) writes it through `state::clamp_sidebar_width` + `update_state` without a
+  further resize. It is ONE global setting, so a separated Explorer/Source Control pair follows
+  whichever pane was dragged last. The 15%–50% share bounds still win at extreme tab widths.
 - Every Settings action uses `state::update_state`, a lock-protected read-modify-write.
   State/tree/SCM/root writers use persistent sibling `.lock` files with OS-backed locks; the
   kernel releases ownership on process death, so do not poll, age, or delete those files.

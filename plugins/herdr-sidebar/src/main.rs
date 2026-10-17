@@ -26,6 +26,8 @@ const REFRESH_EVERY: Duration = Duration::from_millis(1500);
 const ANIMATION_FRAME: Duration = Duration::from_millis(120);
 /// While a popup is open, how often to check the pane still has focus.
 const POPUP_FOCUS_POLL: Duration = Duration::from_millis(200);
+/// How often to check whether a dragged pane width has settled.
+const WIDTH_SETTLE_POLL: Duration = Duration::from_millis(200);
 
 fn main() -> std::io::Result<()> {
     let mode = std::env::args().nth(1);
@@ -566,13 +568,16 @@ fn run_explorer(
         terminal.draw(|frame| app.draw(frame))?;
         // 500ms: quick enough that a finished folder pick lands promptly,
         // still cheap for the heartbeat.
-        let timeout = if app.is_syncing() {
+        let mut timeout = if app.is_syncing() {
             ANIMATION_FRAME
         } else if app.has_transient_popup() {
             POPUP_FOCUS_POLL
         } else {
             Duration::from_millis(500)
         };
+        if app.has_pending_width() {
+            timeout = timeout.min(WIDTH_SETTLE_POLL);
+        }
         if event::poll(timeout)? {
             let exit = match event::read()? {
                 Event::Key(key) => app.on_key(key),
@@ -595,6 +600,7 @@ fn run_explorer(
             }
         }
         app.heartbeat();
+        app.flush_pending_width();
         app.poll_picker();
         app.tick();
         app.dismiss_popups_if_unfocused();
@@ -619,6 +625,9 @@ fn run_scm(
         }
         if app.has_transient_popup() {
             timeout = timeout.min(POPUP_FOCUS_POLL);
+        }
+        if app.has_pending_width() {
+            timeout = timeout.min(WIDTH_SETTLE_POLL);
         }
         if event::poll(timeout)? {
             let exit = match event::read()? {
@@ -648,6 +657,7 @@ fn run_scm(
             }
         }
         app.heartbeat();
+        app.flush_pending_width();
         app.poll_picker();
         app.dismiss_popups_if_unfocused();
         if last_tick.elapsed() >= REFRESH_EVERY {

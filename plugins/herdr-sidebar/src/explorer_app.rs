@@ -49,6 +49,9 @@ const MY_VIEW: View = View::Explorer;
 /// that.
 const DECO_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
 const TREE_SYNC_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+/// How long a divider drag must stay put before it is adopted as the sidebar
+/// width setting — a drag is a burst of resize events, not one.
+const WIDTH_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
 struct RepoDecorationRefresh {
     root: PathBuf,
@@ -147,13 +150,13 @@ impl PaneCtl {
         );
     }
 
-    fn layout_width(&self) -> Option<i64> {
-        let layout = herdr_sidebar::ipc::call_text(
+    /// Raw `pane.layout` JSON for this pane (one IPC round trip per resize).
+    fn layout(&self) -> Option<String> {
+        herdr_sidebar::ipc::call_text(
             "pane.layout",
             serde_json::json!({ "pane_id": self.pane_id }),
         )
-        .ok()?;
-        herdr_sidebar::launch::layout_width(&layout)
+        .ok()
     }
 }
 
@@ -305,9 +308,13 @@ pub struct App {
     /// Pane size from the last draw; sizing decisions and PageUp/PageDown
     /// strides are based on what was actually rendered.
     last_width: u16,
-    /// Whole tab area width from the last layout snapshot. A divider drag
-    /// changes only this pane; surrounding terminal chrome changes this too.
-    last_layout_width: Option<i64>,
+    /// Previous `pane.layout` snapshot. A divider drag leaves the tab area
+    /// width unchanged and only moves this pane's own edge, which is what
+    /// [`herdr_sidebar::launch::dragged_width`] compares against.
+    last_layout: Option<String>,
+    /// A divider drag observed in [`Self::on_resize`], waiting for
+    /// [`Self::flush_pending_width`] to adopt it as the width setting.
+    pending_width: Option<(u16, std::time::Instant)>,
     last_height: u16,
     page: usize,
     /// Row index under the mouse cursor, for the hover highlight.
@@ -442,7 +449,7 @@ impl App {
             sidebar::load_state().icons,
         );
         let pane_ctl = PaneCtl::from_env();
-        let last_layout_width = pane_ctl.as_ref().and_then(PaneCtl::layout_width);
+        let last_layout = pane_ctl.as_ref().and_then(PaneCtl::layout);
         // The other view ships in this same binary — always available.
         let other_exe = std::env::current_exe().ok();
         let sidebar_state = sidebar::load_state();
@@ -462,7 +469,8 @@ impl App {
             pane_ctl,
             pane_named: true,
             last_width: sidebar_state.sidebar_width,
-            last_layout_width,
+            last_layout,
+            pending_width: None,
             last_height: 24,
             page: 20,
             hovered: None,
@@ -588,12 +596,32 @@ impl App {
         self.last_width = width;
         let unified_close_completed = self.poll_unified_close();
         if let Some(ctl) = &self.pane_ctl {
-            let layout_width = ctl.layout_width();
+            let layout = ctl.layout();
+            let area_now = layout
+                .as_deref()
+                .and_then(herdr_sidebar::launch::layout_width);
             let surrounding_changed = self
-                .last_layout_width
-                .zip(layout_width)
+                .last_layout
+                .as_deref()
+                .and_then(herdr_sidebar::launch::layout_width)
+                .zip(area_now)
                 .is_some_and(|(before, now)| before != now);
-            self.last_layout_width = layout_width.or(self.last_layout_width);
+            // Set on EVERY resize event: a candidate left over from an
+            // earlier drag must not survive a real layout change.
+            self.pending_width = if unified_close_completed || surrounding_changed {
+                None
+            } else {
+                self.last_layout
+                    .as_deref()
+                    .zip(layout.as_deref())
+                    .and_then(|(before, after)| {
+                        herdr_sidebar::launch::dragged_width(before, after, &ctl.pane_id, width)
+                    })
+                    .map(|cols| (cols, std::time::Instant::now()))
+            };
+            if let Some(snapshot) = layout {
+                self.last_layout = Some(snapshot);
+            }
             if !unified_close_completed && surrounding_changed {
                 ctl.resize_preferred(
                     width,
@@ -602,6 +630,30 @@ impl App {
                 );
             }
         }
+    }
+
+    /// Adopt a settled divider drag as the persisted sidebar width. The pane is
+    /// already that wide, so no resize is issued; the value is one global
+    /// setting, which is why a separated Explorer/Source Control pair follows
+    /// whichever pane was dragged last.
+    pub fn flush_pending_width(&mut self) {
+        let Some((cols, at)) = self.pending_width else {
+            return;
+        };
+        if at.elapsed() < WIDTH_SETTLE {
+            return;
+        }
+        self.pending_width = None;
+        let cols = sidebar::clamp_sidebar_width(cols);
+        if cols != self.sidebar_state.sidebar_width {
+            self.sidebar_state = sidebar::update_state(|state| state.sidebar_width = cols);
+        }
+    }
+
+    /// A drag candidate is waiting for its settle window; the event loop polls
+    /// faster so it can be adopted promptly.
+    pub fn has_pending_width(&self) -> bool {
+        self.pending_width.is_some()
     }
 
     /// Queue a status read off the event-loop thread. Preview tabs each carry
