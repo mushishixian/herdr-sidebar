@@ -30,8 +30,9 @@ use ratatui::widgets::Paragraph;
 use regex::Regex;
 
 use crate::content_search::{
-    CONTENT_SEARCH_MATCH_LIMIT, ContentHit, SearchOptions, collect_content_hits, compile_pattern,
-    content_line_match_ranges, highlighted_search_context,
+    CONTENT_SEARCH_MATCH_LIMIT, ContentHit, ReplaceReport, SearchOptions, Target,
+    apply_replacements, collect_content_hits, compile_pattern, content_line_match_ranges,
+    first_match_target, highlighted_search_context,
 };
 use crate::file_popup;
 use crate::file_search::truncate_path_tail;
@@ -54,9 +55,23 @@ const CHIPS_WIDTH: u16 = CHIP_WIDTH * 3;
 
 // ── Action side: request Herdr to spawn popup pane ──────────────────────
 
+/// Environment variable that starts the popup in replace mode.
+pub const REPLACE_MODE_ENV: &str = "HERDR_SIDEBAR_SEARCH_MODE";
+const REPLACE_MODE_VALUE: &str = "replace";
+
 /// Request Herdr to open the content search popup over the focused pane.
 pub fn open() -> io::Result<()> {
     file_popup::request_popup_pane("search-popup", "90%", "85%")
+}
+
+/// Request the same popup in replace mode ("Replace in files").
+pub fn open_replace() -> io::Result<()> {
+    file_popup::request_popup_pane_with_env(
+        "search-popup",
+        "90%",
+        "85%",
+        &[(REPLACE_MODE_ENV, REPLACE_MODE_VALUE)],
+    )
 }
 
 // ── Popup TUI process side ──────────────────────────────────────────────
@@ -77,6 +92,8 @@ pub fn run() -> io::Result<()> {
     let theme = icons::IconTheme::resolve(None, state.icons);
 
     let mut app = App::new(root, caller_pane_id, theme);
+    app.replace_mode = std::env::var(REPLACE_MODE_ENV).is_ok_and(|mode| mode == REPLACE_MODE_VALUE);
+    app.replace_open = app.replace_mode;
 
     crossterm::style::force_color_output(true);
     let mut terminal = ratatui::init();
@@ -262,6 +279,9 @@ struct PreviewCode {
     hit_ranges: Vec<(usize, usize)>,
     /// Line count of the whole file, for the gutter width.
     total_lines: usize,
+    /// Replace mode only: the hit line as old text struck through, each
+    /// match followed by the replacement. Replaces the highlighted hit line.
+    hit_replaced: Option<Vec<Span<'static>>>,
 }
 
 fn build_preview(
@@ -271,6 +291,7 @@ fn build_preview(
     query: &str,
     options: SearchOptions,
     pattern: Option<&Regex>,
+    replacement: Option<&str>,
 ) -> Preview {
     let lines = match text {
         FileText::Text(lines) => lines,
@@ -288,13 +309,228 @@ fn build_preview(
     let window = &lines[start..end];
     let highlighted =
         crate::syntax::highlight_lines(name, lines.first().map(String::as_str), window);
+    let hit_ranges = content_line_match_ranges(&lines[hit0], query, options, pattern);
+    let hit_replaced = replacement.map(|replacement| {
+        replaced_spans(&lines[hit0], &hit_ranges, replacement, Style::default())
+    });
     Preview::Code(PreviewCode {
         first_line: start + 1,
         lines: highlighted,
         hit_index: hit0 - start,
-        hit_ranges: content_line_match_ranges(&lines[hit0], query, options, pattern),
+        hit_ranges,
         total_lines: lines.len(),
+        hit_replaced,
     })
+}
+
+// ── Replace mode: pure helpers ──────────────────────────────────────────
+
+/// The old text of each match struck through, each followed by the
+/// replacement. Text between matches keeps `base`. The colors are the diff
+/// marks, so they read on both the dark and the light theme.
+fn replaced_spans(
+    text: &str,
+    ranges: &[(usize, usize)],
+    replacement: &str,
+    base: Style,
+) -> Vec<Span<'static>> {
+    let old_style = base
+        .fg(palette().diff_del_mark)
+        .add_modifier(Modifier::CROSSED_OUT);
+    let new_style = base
+        .fg(palette().diff_add_mark)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    for &(start, end) in ranges {
+        if start < cursor || end > text.len() || start > end {
+            continue;
+        }
+        if start > cursor {
+            spans.push(Span::styled(text[cursor..start].to_string(), base));
+        }
+        spans.push(Span::styled(text[start..end].to_string(), old_style));
+        if !replacement.is_empty() {
+            spans.push(Span::styled(replacement.to_string(), new_style));
+        }
+        cursor = end;
+    }
+    if cursor < text.len() {
+        spans.push(Span::styled(text[cursor..].to_string(), base));
+    }
+    spans
+}
+
+/// [`replaced_spans`] for a list row's context, cut to `max_width` cells with
+/// an ellipsis, like [`highlighted_search_context`].
+fn replaced_context_spans(
+    context: &str,
+    matches: &[(usize, usize)],
+    replacement: &str,
+    max_width: usize,
+) -> Vec<Span<'static>> {
+    let spans = replaced_spans(context, matches, replacement, Style::default());
+    clip_spans(spans, max_width)
+}
+
+/// Fit `text` to `width` cells by eliding its middle and keeping the last
+/// `keep_tail` characters. Used for confirmation prompts, whose `(y/N)` must
+/// stay visible.
+fn ellipsize_middle(text: &str, width: usize, keep_tail: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= width || width <= keep_tail + 2 {
+        return truncate_to(text.to_string(), width);
+    }
+    let head_len = width - keep_tail - 1;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - keep_tail..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+/// Cut spans to `max_width` cells, ending with `…` when anything was dropped.
+fn clip_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span<'static>> {
+    let total: usize = spans.iter().map(Span::width).sum();
+    if total <= max_width {
+        return spans;
+    }
+    if max_width < 2 {
+        return Vec::new();
+    }
+    let budget = max_width - 1;
+    let mut out = Vec::new();
+    let mut used = 0;
+    for span in spans {
+        let mut kept = String::new();
+        for character in span.content.chars() {
+            let width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+            if used + width > budget {
+                break;
+            }
+            used += width;
+            kept.push(character);
+        }
+        let stopped = kept.chars().count() < span.content.chars().count();
+        if !kept.is_empty() {
+            out.push(Span::styled(kept, span.style));
+        }
+        if stopped {
+            break;
+        }
+    }
+    out.push(Span::raw("…"));
+    out
+}
+
+/// Matches in these hits, summed. A hit's matches are its occurrences.
+fn occurrences_of(hits: &[ContentHit]) -> usize {
+    hits.iter().map(|hit| hit.matches.len()).sum()
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+/// One replacement the worker thread performs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReplaceJob {
+    /// The first occurrence on one line of one file.
+    Selected { path: PathBuf, line: usize },
+    /// Every occurrence in one file. `requested` is what the list showed.
+    File { path: PathBuf, requested: usize },
+    /// Every occurrence in the project, re-searched when the job runs.
+    All,
+}
+
+impl ReplaceJob {
+    /// Occurrences the user asked to replace, for the "skipped" count.
+    /// Replace All has no known total, so it reports no skips of its own.
+    fn requested(&self) -> usize {
+        match self {
+            Self::Selected { .. } => 1,
+            Self::File { requested, .. } => *requested,
+            Self::All => 0,
+        }
+    }
+}
+
+/// Runs on a worker thread. Only an invalid query is an error; per-file
+/// problems come back inside the report.
+fn run_replace_job(
+    root: &Path,
+    job: ReplaceJob,
+    query: &str,
+    options: SearchOptions,
+    replacement: &str,
+) -> Result<ReplaceReport, String> {
+    let pattern = compile_pattern(query, options)?;
+    let files: Vec<(PathBuf, Vec<Target>)> = match job {
+        ReplaceJob::Selected { path, line } => {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            match first_match_target(&text, line, query, options, pattern.as_ref()) {
+                Some(target) => vec![(path, vec![target])],
+                None => Vec::new(),
+            }
+        }
+        ReplaceJob::File { path, .. } => vec![(path, vec![Target::All])],
+        ReplaceJob::All => {
+            let (hits, _) = collect_content_hits(root, true, query, "", "", options, usize::MAX)?;
+            let mut files: Vec<(PathBuf, Vec<Target>)> = Vec::new();
+            for hit in hits {
+                // The engine yields each file's hits contiguously.
+                if files.last().is_none_or(|(path, _)| *path != hit.path) {
+                    files.push((hit.path, vec![Target::All]));
+                }
+            }
+            files
+        }
+    };
+    apply_replacements(root, &files, query, options, replacement)
+}
+
+/// What the worker sends back for one replacement.
+struct ReplaceMessage {
+    requested: usize,
+    result: Result<ReplaceReport, String>,
+}
+
+/// A replacement waiting for the user's `y`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Pending {
+    All {
+        occurrences: usize,
+        files: usize,
+        capped: bool,
+    },
+    File {
+        path: PathBuf,
+        label: String,
+        occurrences: usize,
+    },
+}
+
+/// Which input receives typing in replace mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Focus {
+    Query,
+    Replacement,
+}
+
+/// The two buttons on the Replace row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplaceButton {
+    /// Replace the selected item (same as Ctrl+R).
+    Selected,
+    /// Replace every match (same as Alt+Enter).
+    All,
+}
+
+/// How the status row is styled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusKind {
+    Plain,
+    Error,
+    Prompt,
 }
 
 /// Results of the newest search, plus what the preview needs to re-match.
@@ -354,15 +590,38 @@ struct App {
     file_cache: Option<(PathBuf, Arc<FileText>)>,
     /// What the preview currently shows: (path, hit line, results generation).
     preview_key: Option<(PathBuf, usize, u64)>,
+    /// The replacement the preview was last built with (replace mode).
+    preview_replacement: Option<String>,
     preview: Option<Preview>,
     preview_offset: usize,
     preview_recenter: bool,
     done: bool,
+    /// Replace mode (`Ctrl+Alt+E`): the Replace row and its keys exist.
+    replace_mode: bool,
+    /// The Replace row is shown. Replace mode starts with it open.
+    replace_open: bool,
+    focus: Focus,
+    replacement: String,
+    /// Byte offset of the caret in `replacement`, on a char boundary.
+    replacement_cursor: usize,
+    /// A replacement that needs `y` before it runs.
+    pending: Option<Pending>,
+    /// A worker is replacing files; new replacements wait for it.
+    replacing: bool,
+    /// The last successful replacement's summary, until the query changes.
+    notice: Option<String>,
+    replace_tx: mpsc::Sender<ReplaceMessage>,
+    replace_rx: mpsc::Receiver<ReplaceMessage>,
+    chevron_zone: Rect,
+    query_field: Rect,
+    replace_field: Rect,
+    replace_zones: Vec<(Rect, ReplaceButton)>,
 }
 
 impl App {
     fn new(root: PathBuf, caller_pane_id: Option<String>, theme: IconTheme) -> Self {
         let (tx, rx) = mpsc::channel();
+        let (replace_tx, replace_rx) = mpsc::channel();
         Self {
             root,
             caller_pane_id,
@@ -386,16 +645,31 @@ impl App {
             last_click: None,
             file_cache: None,
             preview_key: None,
+            preview_replacement: None,
             preview: None,
             preview_offset: 0,
             preview_recenter: false,
             done: false,
+            replace_mode: false,
+            replace_open: false,
+            focus: Focus::Query,
+            replacement: String::new(),
+            replacement_cursor: 0,
+            pending: None,
+            replacing: false,
+            notice: None,
+            replace_tx,
+            replace_rx,
+            chevron_zone: Rect::default(),
+            query_field: Rect::default(),
+            replace_field: Rect::default(),
+            replace_zones: Vec::new(),
         }
     }
 
     /// Something is pending that needs the loop to wake up soon.
     fn busy(&self) -> bool {
-        self.in_flight || self.dirty_since.is_some()
+        self.in_flight || self.replacing || self.dirty_since.is_some()
     }
 
     /// Collect finished searches and start a debounced one. Returns true when
@@ -407,6 +681,10 @@ impl App {
                 self.apply(message);
                 changed = true;
             }
+        }
+        while let Ok(message) = self.replace_rx.try_recv() {
+            self.finish_replace(message);
+            changed = true;
         }
         if self
             .dirty_since
@@ -504,6 +782,194 @@ impl App {
     /// Any edit to the query or the options: search again after the debounce.
     fn mark_edited(&mut self) {
         self.dirty_since = Some(Instant::now());
+        self.notice = None;
+    }
+
+    /// Typing goes to the Replacement input only while it has focus and its
+    /// row is shown. Editing it never starts a search.
+    fn editing_replacement(&self) -> bool {
+        self.replace_mode && self.replace_open && self.focus == Focus::Replacement
+    }
+
+    /// The text and caret of the input that receives typing.
+    fn field_mut(&mut self) -> (&mut String, &mut usize) {
+        if self.editing_replacement() {
+            (&mut self.replacement, &mut self.replacement_cursor)
+        } else {
+            (&mut self.query, &mut self.cursor)
+        }
+    }
+
+    /// Called after an edit to the focused field: only the query searches.
+    fn after_field_edit(&mut self) {
+        if !self.editing_replacement() {
+            self.mark_edited();
+        }
+    }
+
+    fn toggle_replace_row(&mut self) {
+        self.replace_open = !self.replace_open;
+        if !self.replace_open {
+            self.focus = Focus::Query;
+            self.pending = None;
+        }
+    }
+
+    fn toggle_focus(&mut self) {
+        if self.replace_mode && self.replace_open {
+            self.focus = match self.focus {
+                Focus::Query => Focus::Replacement,
+                Focus::Replacement => Focus::Query,
+            };
+        }
+    }
+
+    /// Replace actions need the Replace row open, a query, and no replacement
+    /// already running. Otherwise they do nothing.
+    fn replace_ready(&self) -> bool {
+        self.replace_mode && self.replace_open && !self.replacing && !self.query.is_empty()
+    }
+
+    /// Whether the Replace buttons do anything right now.
+    fn can_replace(&self) -> bool {
+        !self.replacing && self.results.as_ref().is_some_and(|r| !r.hits.is_empty())
+    }
+
+    /// Ctrl+R: a match row replaces its first occurrence now; a file header
+    /// asks first and then replaces every occurrence in that file.
+    fn request_replace_selected(&mut self) {
+        if !self.replace_ready() {
+            return;
+        }
+        let Some(results) = &self.results else {
+            return;
+        };
+        let Some(&row) = results.rows.get(self.selected) else {
+            return;
+        };
+        match row {
+            Row::Match { hit } => {
+                let Some(hit) = results.hits.get(hit) else {
+                    return;
+                };
+                let job = ReplaceJob::Selected {
+                    path: hit.path.clone(),
+                    line: hit.line,
+                };
+                self.start_replace(job);
+            }
+            Row::Header { group } => {
+                let Some(group) = results.groups.get(group) else {
+                    return;
+                };
+                let occurrences =
+                    occurrences_of(&results.hits[group.first_hit..group.first_hit + group.count]);
+                self.pending = Some(Pending::File {
+                    path: group.path.clone(),
+                    label: group.label.clone(),
+                    occurrences,
+                });
+            }
+        }
+    }
+
+    /// Alt+Enter: every occurrence in the project, after a `y`.
+    fn request_replace_all(&mut self) {
+        if !self.replace_ready() {
+            return;
+        }
+        let Some(results) = &self.results else {
+            return;
+        };
+        if results.hits.is_empty() {
+            return;
+        }
+        self.pending = Some(Pending::All {
+            occurrences: occurrences_of(&results.hits),
+            files: results.groups.len(),
+            capped: results.truncated,
+        });
+    }
+
+    /// Run a confirmed replacement on a worker thread.
+    fn start_replace(&mut self, job: ReplaceJob) {
+        let requested = job.requested();
+        self.replacing = true;
+        self.error = None;
+        self.notice = None;
+        let root = self.root.clone();
+        let query = self.query.clone();
+        let options = self.options;
+        let replacement = self.replacement.clone();
+        let tx = self.replace_tx.clone();
+        std::thread::spawn(move || {
+            let result = run_replace_job(&root, job, &query, options, &replacement);
+            let _ = tx.send(ReplaceMessage { requested, result });
+        });
+    }
+
+    /// Show the outcome, toast it, and search again so the list matches disk.
+    fn finish_replace(&mut self, message: ReplaceMessage) {
+        self.replacing = false;
+        match message.result {
+            Ok(report) => {
+                let missing = message.requested.saturating_sub(report.replacements);
+                let skipped = report.skipped.len() + missing;
+                let mut text = format!(
+                    "Replaced {} occurrence{} in {} file{}",
+                    report.replacements,
+                    plural(report.replacements),
+                    report.files_changed,
+                    plural(report.files_changed),
+                );
+                if skipped > 0 {
+                    text.push_str(&format!(", {skipped} skipped"));
+                }
+                // Tests run inside live herdr sessions too; a toast from them
+                // would land in the user's real session.
+                if !cfg!(test) {
+                    crate::git_action::notify("Replace in files", &text);
+                }
+                self.notice = Some(text);
+                self.error = None;
+                // Open buffers and previews hold the old text.
+                self.file_cache = None;
+                self.preview_key = None;
+                self.start_search();
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    /// The replacement the preview should show, or `None` outside replace
+    /// mode (or while the Replace row is hidden).
+    fn replacement_preview(&self) -> Option<String> {
+        (self.replace_mode && self.replace_open).then(|| self.replacement.clone())
+    }
+
+    fn pending_prompt(&self, pending: &Pending) -> String {
+        match pending {
+            Pending::All {
+                occurrences,
+                files,
+                capped,
+            } => {
+                let plus = if *capped { "+" } else { "" };
+                format!(
+                    "Replace {occurrences}{plus} occurrence{} in {files}{plus} file{} with \"{}\"? (y/N)",
+                    plural(*occurrences),
+                    plural(*files),
+                    self.replacement,
+                )
+            }
+            Pending::File {
+                label, occurrences, ..
+            } => format!(
+                "Replace {occurrences} occurrence{} in {label} with \"{}\"? (y/N)",
+                plural(*occurrences),
+                self.replacement,
+            ),
+        }
     }
 
     fn toggle(&mut self, toggle: Toggle) {
@@ -516,59 +982,95 @@ impl App {
     }
 
     fn insert_char(&mut self, character: char) {
-        self.query.insert(self.cursor, character);
-        self.cursor += character.len_utf8();
-        self.mark_edited();
+        let (text, cursor) = self.field_mut();
+        text.insert(*cursor, character);
+        *cursor += character.len_utf8();
+        self.after_field_edit();
     }
 
     fn delete_before_cursor(&mut self) {
-        if let Some((index, _)) = self.query[..self.cursor].char_indices().next_back() {
-            self.query.remove(index);
-            self.cursor = index;
-            self.mark_edited();
+        let (text, cursor) = self.field_mut();
+        if let Some((index, _)) = text[..*cursor].char_indices().next_back() {
+            text.remove(index);
+            *cursor = index;
+            self.after_field_edit();
         }
     }
 
     fn delete_at_cursor(&mut self) {
-        if self.cursor < self.query.len() {
-            self.query.remove(self.cursor);
-            self.mark_edited();
+        let (text, cursor) = self.field_mut();
+        if *cursor < text.len() {
+            text.remove(*cursor);
+            self.after_field_edit();
         }
     }
 
     fn cursor_left(&mut self) {
-        if let Some((index, _)) = self.query[..self.cursor].char_indices().next_back() {
-            self.cursor = index;
+        let (text, cursor) = self.field_mut();
+        if let Some((index, _)) = text[..*cursor].char_indices().next_back() {
+            *cursor = index;
         }
     }
 
     fn cursor_right(&mut self) {
-        if let Some(character) = self.query[self.cursor..].chars().next() {
-            self.cursor += character.len_utf8();
+        let (text, cursor) = self.field_mut();
+        if let Some(character) = text[*cursor..].chars().next() {
+            *cursor += character.len_utf8();
         }
+    }
+
+    fn clear_field(&mut self) {
+        let (text, cursor) = self.field_mut();
+        text.clear();
+        *cursor = 0;
+        self.after_field_edit();
     }
 
     fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // A pending replacement takes exactly one key: `y` confirms, anything
+        // else (Esc included) cancels. The key is consumed either way.
+        if let Some(pending) = self.pending.take() {
+            let confirmed = matches!(key.code, KeyCode::Char('y' | 'Y')) && !ctrl && !alt;
+            if confirmed {
+                match pending {
+                    Pending::All { .. } => self.start_replace(ReplaceJob::All),
+                    Pending::File {
+                        path, occurrences, ..
+                    } => self.start_replace(ReplaceJob::File {
+                        path,
+                        requested: occurrences,
+                    }),
+                }
+            }
+            return;
+        }
         let page = self.page() as isize;
         match key.code {
             KeyCode::Esc => self.done = true,
+            KeyCode::Enter if alt && self.replace_mode => self.request_replace_all(),
             KeyCode::Enter => self.activate(),
+            KeyCode::Tab | KeyCode::BackTab if self.replace_mode => self.toggle_focus(),
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
             KeyCode::PageUp => self.move_selection(-page),
             KeyCode::PageDown => self.move_selection(page),
             KeyCode::Left => self.cursor_left(),
             KeyCode::Right => self.cursor_right(),
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => self.cursor = self.query.len(),
+            KeyCode::Home => {
+                let (_, cursor) = self.field_mut();
+                *cursor = 0;
+            }
+            KeyCode::End => {
+                let (text, cursor) = self.field_mut();
+                *cursor = text.len();
+            }
             KeyCode::Backspace => self.delete_before_cursor(),
             KeyCode::Delete => self.delete_at_cursor(),
-            KeyCode::Char('u') if ctrl && !alt => {
-                self.query.clear();
-                self.cursor = 0;
-                self.mark_edited();
+            KeyCode::Char('u') if ctrl && !alt => self.clear_field(),
+            KeyCode::Char('r') if ctrl && !alt && self.replace_mode => {
+                self.request_replace_selected();
             }
             // Alt+C / Alt+W / Alt+R are the VS Code toggles; other Alt chords
             // do nothing.
@@ -609,6 +1111,32 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // Any click answers a pending replacement with "no".
+                self.pending = None;
+                if self.replace_mode && contains(self.chevron_zone, column, row) {
+                    self.toggle_replace_row();
+                    return;
+                }
+                if self.replace_mode && self.replace_open {
+                    if let Some(&(_, button)) = self
+                        .replace_zones
+                        .iter()
+                        .find(|(zone, _)| contains(*zone, column, row))
+                    {
+                        match button {
+                            ReplaceButton::Selected => self.request_replace_selected(),
+                            ReplaceButton::All => self.request_replace_all(),
+                        }
+                        return;
+                    }
+                    if contains(self.replace_field, column, row) {
+                        self.focus = Focus::Replacement;
+                        return;
+                    }
+                }
+                if self.replace_mode && contains(self.query_field, column, row) {
+                    self.focus = Focus::Query;
+                }
                 if let Some(&(_, toggle)) = self
                     .toggle_zones
                     .iter()
@@ -702,7 +1230,8 @@ impl App {
             return;
         };
         let key = (hit.path.clone(), hit.line, results.generation);
-        if self.preview_key.as_ref() == Some(&key) {
+        let replacement = self.replacement_preview();
+        if self.preview_key.as_ref() == Some(&key) && self.preview_replacement == replacement {
             return;
         }
         let name = hit
@@ -731,17 +1260,28 @@ impl App {
             &query,
             options,
             pattern.as_ref(),
+            replacement.as_deref(),
         ));
+        self.preview_replacement = replacement;
         self.preview_key = Some(key);
         self.preview_recenter = true;
     }
 
-    fn status(&self) -> (String, bool) {
+    fn status(&self) -> (String, StatusKind) {
         if let Some(error) = &self.error {
-            return (error.clone(), true);
+            return (error.clone(), StatusKind::Error);
+        }
+        if let Some(pending) = &self.pending {
+            return (self.pending_prompt(pending), StatusKind::Prompt);
+        }
+        if self.replacing {
+            return ("replacing…".into(), StatusKind::Plain);
+        }
+        if let Some(notice) = &self.notice {
+            return (notice.clone(), StatusKind::Plain);
         }
         if self.query.is_empty() {
-            return ("type to search file contents".into(), false);
+            return ("type to search file contents".into(), StatusKind::Plain);
         }
         let searching = self.busy();
         let text = match &self.results {
@@ -763,7 +1303,15 @@ impl App {
                 text
             }
         };
-        (text, false)
+        (text, StatusKind::Plain)
+    }
+
+    fn footer_hint(&self) -> &'static str {
+        if self.replace_mode {
+            " ↑↓ move · tab field · ctrl+r replace · alt+enter all · ⏎ open · esc close"
+        } else {
+            " ↑↓ move · pgup/pgdn · ⏎ open · alt+c/w/r options · esc cancel"
+        }
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -780,8 +1328,12 @@ impl App {
         };
         let accent = Style::default().fg(palette().accent);
         let dim = Style::default().add_modifier(Modifier::DIM);
-        let list_y = area.y + 4;
-        let list_height = area.height.saturating_sub(5);
+        // The Replace row adds one line under the query; everything below it
+        // moves down by that much.
+        let replace_row = self.replace_mode && self.replace_open;
+        let extra = u16::from(replace_row);
+        let list_y = area.y + 4 + extra;
+        let list_height = area.height.saturating_sub(5 + extra);
         self.list_area = Rect::new(area.x, list_y, left_width, list_height);
 
         // Row 0: title and the searched root.
@@ -790,7 +1342,11 @@ impl App {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
-        let title = " Search in files";
+        let title = if self.replace_mode {
+            " Replace in files"
+        } else {
+            " Search in files"
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(title, accent.add_modifier(Modifier::BOLD)),
@@ -805,28 +1361,61 @@ impl App {
             Rect::new(area.x, area.y, left_width, 1),
         );
 
-        // Row 1: query input with the three toggle chips at its right end.
-        self.draw_input(frame, area.x, area.y + 1, left_width, accent, dim);
-
-        // Row 2: status (or error).
-        let (status, is_error) = self.status();
-        let status_style = if is_error {
-            Style::default().fg(palette().deleted)
+        // Row 1: query input with the three toggle chips at its right end. In
+        // replace mode a disclosure chevron sits left of it.
+        if self.replace_mode {
+            let chevron = if self.replace_open { "▾ " } else { "▸ " };
+            frame.render_widget(
+                Paragraph::new(Span::styled(chevron, accent)),
+                Rect::new(area.x, area.y + 1, 2, 1),
+            );
+            self.chevron_zone = Rect::new(area.x, area.y + 1, 2, 1);
+            self.query_field = Rect::new(area.x + 2, area.y + 1, left_width.saturating_sub(2), 1);
+            self.draw_input(
+                frame,
+                area.x + 2,
+                area.y + 1,
+                left_width.saturating_sub(2),
+                accent,
+                dim,
+            );
         } else {
-            dim
+            self.chevron_zone = Rect::default();
+            self.query_field = Rect::new(area.x, area.y + 1, left_width, 1);
+            self.draw_input(frame, area.x, area.y + 1, left_width, accent, dim);
+        }
+
+        // Row 2 (replace mode, when open): the Replace input and its buttons.
+        if replace_row {
+            self.draw_replace_row(frame, area.x, area.y + 2, left_width, accent);
+        } else {
+            self.replace_field = Rect::default();
+            self.replace_zones.clear();
+        }
+
+        // Status (or error, confirmation, notice): one line under the inputs.
+        let (status, kind) = self.status();
+        let status_style = match kind {
+            StatusKind::Error => Style::default().fg(palette().deleted),
+            StatusKind::Prompt => accent.add_modifier(Modifier::BOLD),
+            StatusKind::Plain => dim,
+        };
+        // A confirmation keeps its tail (`? (y/N)`) visible when it is too long.
+        let status_text = match kind {
+            StatusKind::Prompt => {
+                ellipsize_middle(&format!(" {status}"), usize::from(left_width), 8)
+            }
+            _ => truncate_to(format!(" {status}"), usize::from(left_width)),
         };
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                truncate_to(format!(" {status}"), usize::from(left_width)),
-                status_style,
-            )),
-            Rect::new(area.x, area.y + 2, left_width, 1),
+            Paragraph::new(Span::styled(status_text, status_style)),
+            Rect::new(area.x, area.y + 2 + extra, left_width, 1),
         );
 
-        // Row 3: divider.
+        // Divider.
         frame.render_widget(
             Paragraph::new(Span::styled("─".repeat(usize::from(left_width)), dim)),
-            Rect::new(area.x, area.y + 3, left_width, 1),
+            Rect::new(area.x, area.y + 3 + extra, left_width, 1),
         );
 
         self.draw_list(frame, left_width, list_height);
@@ -839,10 +1428,7 @@ impl App {
         let footer = Rect::new(area.x, area.y + area.height - 1, width, 1);
         frame.render_widget(
             Paragraph::new(Span::styled(
-                truncate_to(
-                    " ↑↓ move · pgup/pgdn · ⏎ open · alt+c/w/r options · esc cancel".to_string(),
-                    usize::from(width),
-                ),
+                truncate_to(self.footer_hint().to_string(), usize::from(width)),
                 dim,
             )),
             footer,
@@ -862,19 +1448,16 @@ impl App {
         let chips_x = x + left_width.saturating_sub(CHIPS_WIDTH + 1);
         let room = usize::from(left_width.saturating_sub(CHIPS_WIDTH + 2))
             .saturating_sub(prompt.len() + 1);
-        let before = input_tail(&self.query[..self.cursor], room);
-        let used = before.chars().count();
-        let after = truncate_to(
-            self.query[self.cursor..].to_string(),
-            room.saturating_sub(used),
-        );
+        let caret = !self.editing_replacement();
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(prompt, accent),
-                Span::raw(before),
-                Span::styled("█", accent),
-                Span::raw(after),
-            ])),
+            Paragraph::new(input_line(
+                prompt,
+                &self.query,
+                self.cursor,
+                room,
+                accent,
+                caret,
+            )),
             Rect::new(x, y, left_width.saturating_sub(CHIPS_WIDTH + 1), 1),
         );
 
@@ -902,9 +1485,70 @@ impl App {
         }
     }
 
+    /// The Replace row: a labelled input, then the Replace and All buttons at
+    /// its right end.
+    fn draw_replace_row(
+        &mut self,
+        frame: &mut Frame,
+        x: u16,
+        y: u16,
+        left_width: u16,
+        accent: Style,
+    ) {
+        let prompt = "  Replace › ";
+        let prompt_cells = prompt.chars().count();
+        let replace_label = " Replace ";
+        let all_label = " All ";
+        let buttons_width = (replace_label.chars().count() + 1 + all_label.chars().count()) as u16;
+        // One cell of margin on the right, like the query's chips.
+        let buttons_x = x + left_width.saturating_sub(buttons_width + 1);
+        let field_width = buttons_x.saturating_sub(x + 1);
+        self.replace_field = Rect::new(x, y, field_width, 1);
+        let room = usize::from(field_width).saturating_sub(prompt_cells + 1);
+        let caret = self.editing_replacement();
+        frame.render_widget(
+            Paragraph::new(input_line(
+                prompt,
+                &self.replacement,
+                self.replacement_cursor,
+                room,
+                accent,
+                caret,
+            )),
+            Rect::new(x, y, field_width, 1),
+        );
+
+        let enabled = self.can_replace();
+        let (button_fg, button_bg) = if enabled {
+            (palette().button_fg, palette().button_bg)
+        } else {
+            (palette().muted_button_fg, palette().muted_button_bg)
+        };
+        let style = Style::default().fg(button_fg).bg(button_bg);
+        let replace_width = replace_label.chars().count() as u16;
+        let all_width = all_label.chars().count() as u16;
+        let all_x = buttons_x + replace_width + 1;
+        frame.render_widget(
+            Paragraph::new(Span::styled(replace_label, style)),
+            Rect::new(buttons_x, y, replace_width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(all_label, style)),
+            Rect::new(all_x, y, all_width, 1),
+        );
+        self.replace_zones = vec![
+            (
+                Rect::new(buttons_x, y, replace_width, 1),
+                ReplaceButton::Selected,
+            ),
+            (Rect::new(all_x, y, all_width, 1), ReplaceButton::All),
+        ];
+    }
+
     fn draw_list(&mut self, frame: &mut Frame, left_width: u16, list_height: u16) {
         let visible = usize::from(list_height);
         let total = self.rows_len();
+        let replacement = self.replacement_preview();
         if self.snap && visible > 0 {
             if self.selected < self.scroll {
                 self.scroll = self.selected;
@@ -930,7 +1574,12 @@ impl App {
                         let group = &results.groups[group];
                         header_line(group, self.theme, width)
                     }
-                    Row::Match { hit } => match_line(&results.hits[hit], width),
+                    Row::Match { hit } => match &replacement {
+                        Some(replacement) => {
+                            replace_match_line(&results.hits[hit], replacement, width)
+                        }
+                        None => match_line(&results.hits[hit], width),
+                    },
                 };
                 lines.push(if row_index == self.selected {
                     line.style(selection_style(true))
@@ -1017,13 +1666,18 @@ impl App {
                         let number = code.first_line + index;
                         let is_hit = index == code.hit_index;
                         let gutter = format!("{number:>gutter_width$} ");
-                        code_line(
-                            gutter,
-                            line.spans.clone(),
-                            is_hit.then_some(code.hit_ranges.as_slice()),
-                            usize::from(width),
-                            dim,
-                        )
+                        match (is_hit, &code.hit_replaced) {
+                            (true, Some(replaced)) => {
+                                band_line(gutter, replaced.clone(), usize::from(width), dim)
+                            }
+                            _ => code_line(
+                                gutter,
+                                line.spans.clone(),
+                                is_hit.then_some(code.hit_ranges.as_slice()),
+                                usize::from(width),
+                                dim,
+                            ),
+                        }
                     })
                     .collect();
                 frame.render_widget(Paragraph::new(lines), self.preview_area);
@@ -1067,6 +1721,60 @@ fn header_line(group: &Group, theme: IconTheme, width: usize) -> Line<'static> {
         ),
         Span::styled(count, Style::default().dim()),
     ])
+}
+
+/// One input line: prompt, the text around the caret, and the caret when this
+/// input has focus. Long text scrolls to keep the caret visible.
+fn input_line(
+    prompt: &str,
+    text: &str,
+    cursor: usize,
+    room: usize,
+    accent: Style,
+    caret: bool,
+) -> Line<'static> {
+    let before = input_tail(&text[..cursor], room);
+    let used = before.chars().count();
+    let after = truncate_to(text[cursor..].to_string(), room.saturating_sub(used));
+    let mut spans = vec![Span::styled(prompt.to_string(), accent), Span::raw(before)];
+    if caret {
+        spans.push(Span::styled("█", accent));
+    }
+    spans.push(Span::raw(after));
+    Line::from(spans)
+}
+
+/// A replace-mode match row: the same `  <line>: ` prefix, then each match
+/// struck through and followed by its replacement.
+fn replace_match_line(hit: &ContentHit, replacement: &str, width: usize) -> Line<'static> {
+    let prefix = format!("   {}: ", hit.line);
+    let context_width = width.saturating_sub(prefix.len());
+    let mut spans = vec![Span::styled(
+        prefix,
+        Style::default().fg(palette().accent_focus),
+    )];
+    spans.extend(replaced_context_spans(
+        &hit.context,
+        &hit.matches,
+        replacement,
+        context_width,
+    ));
+    Line::from(spans)
+}
+
+/// A preview line with the hit's band, for pre-styled spans (the replace-mode
+/// hit line). Same gutter and padding as [`code_line`].
+fn band_line(gutter: String, spans: Vec<Span<'static>>, width: usize, dim: Style) -> Line<'static> {
+    let band = Style::default().bg(palette().hover_bg);
+    let mut out = vec![Span::styled(gutter, dim.patch(band))];
+    for span in spans {
+        out.push(Span::styled(span.content, span.style.patch(band)));
+    }
+    let used: usize = out.iter().map(|span| span.width()).sum();
+    if used < width {
+        out.push(Span::styled(" ".repeat(width - used), band));
+    }
+    Line::from(out)
 }
 
 /// A match row: `  <line>: <context>` with the matched text emphasized, the
@@ -1428,6 +2136,7 @@ mod tests {
             "needle",
             SearchOptions::default(),
             None,
+            None,
         );
         let Preview::Code(code) = preview else {
             panic!("expected a code preview");
@@ -1448,6 +2157,322 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert!(hits.iter().all(|hit| hit.label == "src/needle.rs"));
         assert_eq!(hits[0].line, 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod replace_tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    /// A temp project with `src/needle.rs` holding one match on line 2.
+    fn project(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-replace-popup-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/needle.rs"),
+            "use crate::prelude;\nfn needle_body() {}\n// tail\n",
+        )
+        .unwrap();
+        root
+    }
+
+    /// A replace-mode app over `root` with the query searched and the results
+    /// in place. `replacement` is the text to type into the Replace input.
+    fn replace_app(root: &Path, replacement: &str) -> App {
+        let mut app = App::new(root.to_path_buf(), None, IconTheme::Emoji);
+        app.replace_mode = true;
+        app.replace_open = true;
+        app.query = "needle".into();
+        app.cursor = app.query.len();
+        app.replacement = replacement.into();
+        app.replacement_cursor = app.replacement.len();
+        let (hits, _) =
+            collect_content_hits(root, false, "needle", "", "", SearchOptions::default(), 20)
+                .unwrap();
+        app.set_results_for_test(hits, false);
+        app
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    fn drawn(app: &mut App, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        let area = buffer.area;
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    /// Wait for the replace worker and let `tick` apply its result.
+    fn wait_for_replace(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.replacing && Instant::now() < deadline {
+            app.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.tick();
+        assert!(!app.replacing, "replacement did not finish");
+    }
+
+    #[test]
+    fn replace_match_line_strikes_old_and_adds_new() {
+        let hit = ContentHit {
+            path: PathBuf::from("/r/a.rs"),
+            label: "a.rs".into(),
+            line: 2,
+            context: "fn needle_body() {}".into(),
+            matches: vec![(3, 9)],
+        };
+        let line = replace_match_line(&hit, "pin", 80);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "   2: fn needlepin_body() {}");
+        let struck: Vec<&str> = line
+            .spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::CROSSED_OUT))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(struck, vec!["needle"]);
+        assert!(
+            line.spans
+                .iter()
+                .any(|s| s.content == "pin" && s.style.fg == Some(palette().diff_add_mark))
+        );
+    }
+
+    #[test]
+    fn clipped_replacement_row_ends_with_an_ellipsis() {
+        let spans = clip_spans(vec![Span::raw("abcdef")], 4);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "abc…");
+        assert_eq!(clip_spans(vec![Span::raw("abc")], 4).len(), 1);
+    }
+
+    #[test]
+    fn draw_shows_replace_row_buttons_and_old_new_match() {
+        let root = project("draw");
+        let mut app = replace_app(&root, "pin");
+        app.selected = 1;
+        let buffer = drawn(&mut app, 120, 30);
+        let text = buffer_text(&buffer);
+        assert!(text.contains("Replace in files"), "title");
+        assert!(text.contains("Replace ›"), "Replace input row");
+        assert!(text.contains(" Replace "), "Replace button");
+        assert!(text.contains(" All "), "All button");
+        assert!(text.contains("pin"), "replacement is drawn");
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "n" && cell.modifier.contains(Modifier::CROSSED_OUT)),
+            "old text is struck through"
+        );
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "p" && cell.fg == palette().diff_add_mark),
+            "replacement uses the diff add color"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replace_row_hidden_keeps_the_search_layout() {
+        let root = project("hidden");
+        let mut app = replace_app(&root, "pin");
+        app.replace_open = false;
+        app.selected = 1;
+        let text = buffer_text(&drawn(&mut app, 120, 30));
+        assert!(text.contains("▸"), "collapsed chevron");
+        assert!(
+            !text.contains("Replace ›"),
+            "no Replace input when collapsed"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn confirmation_prompt_renders_in_the_status_line() {
+        let root = project("prompt");
+        let mut app = replace_app(&root, "pin");
+        app.selected = 0; // the file header
+        app.key(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        let text = buffer_text(&drawn(&mut app, 200, 30));
+        assert!(
+            text.contains(r#"Replace 1 occurrence in src/needle.rs with "pin"? (y/N)"#),
+            "file prompt: {text}"
+        );
+        let narrow = buffer_text(&drawn(&mut app, 120, 30));
+        assert!(
+            narrow.contains("Replace 1 occurrence in src/needle.rs") && narrow.contains("(y/N)"),
+            "a narrow pane keeps the head and the (y/N) tail: {narrow}"
+        );
+        app.key(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.done, "Esc cancels the prompt instead of closing");
+        assert!(app.pending.is_none());
+
+        app.key(key(KeyCode::Enter, KeyModifiers::ALT));
+        let text = buffer_text(&drawn(&mut app, 200, 30));
+        assert!(
+            text.contains(r#"Replace 1 occurrence in 1 file with "pin"? (y/N)"#),
+            "all prompt: {text}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tab_moves_focus_only_while_the_replace_row_is_open() {
+        let root = project("focus");
+        let mut app = replace_app(&root, "");
+        assert_eq!(app.focus, Focus::Query);
+        app.key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Replacement);
+        app.key(key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.focus, Focus::Query);
+
+        app.replace_open = false;
+        app.key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Query, "Tab does nothing while collapsed");
+
+        let mut search = App::new(root.clone(), None, IconTheme::Emoji);
+        search.key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            search.focus,
+            Focus::Query,
+            "search mode has no Replace input"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typing_in_the_replacement_does_not_search_again() {
+        let root = project("typing");
+        let mut app = replace_app(&root, "");
+        app.key(key(KeyCode::Tab, KeyModifiers::NONE));
+        let generation = app.generation;
+        app.key(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.key(key(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(app.replacement, "xy");
+        assert_eq!(app.query, "needle", "query untouched");
+        assert_eq!(app.generation, generation, "no new search generation");
+        assert!(app.dirty_since.is_none(), "no debounced search scheduled");
+
+        app.key(key(KeyCode::Tab, KeyModifiers::NONE));
+        app.key(key(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(app.query, "needlez");
+        assert!(app.dirty_since.is_some(), "query edits do search");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn y_confirms_and_any_other_key_cancels() {
+        let root = project("confirm");
+        let mut app = replace_app(&root, "pin");
+        app.selected = 0;
+        app.key(key(KeyCode::Enter, KeyModifiers::ALT));
+        assert!(matches!(app.pending, Some(Pending::All { .. })));
+        app.key(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.pending.is_none(), "any other key cancels");
+        assert!(!app.replacing);
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/needle.rs")).unwrap(),
+            "use crate::prelude;\nfn needle_body() {}\n// tail\n",
+            "a cancelled prompt writes nothing"
+        );
+
+        let generation = app.generation;
+        app.key(key(KeyCode::Enter, KeyModifiers::ALT));
+        app.key(key(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert!(app.pending.is_none());
+        wait_for_replace(&mut app);
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/needle.rs")).unwrap(),
+            "use crate::prelude;\nfn pin_body() {}\n// tail\n"
+        );
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Replaced 1 occurrence in 1 file")
+        );
+        assert!(
+            app.generation > generation,
+            "a fresh search starts after the replace"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ctrl_r_on_a_match_replaces_without_confirmation() {
+        let root = project("selected");
+        let mut app = replace_app(&root, "pin");
+        app.selected = 1; // the match row
+        app.key(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(app.pending.is_none(), "single occurrence needs no prompt");
+        wait_for_replace(&mut app);
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/needle.rs")).unwrap(),
+            "use crate::prelude;\nfn pin_body() {}\n// tail\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replace_actions_need_the_row_open_and_a_query() {
+        let root = project("guards");
+        let mut app = replace_app(&root, "pin");
+        app.replace_open = false;
+        app.selected = 1;
+        app.key(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        app.key(key(KeyCode::Enter, KeyModifiers::ALT));
+        assert!(app.pending.is_none() && !app.replacing);
+
+        app.replace_open = true;
+        app.query.clear();
+        app.key(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(app.pending.is_none() && !app.replacing);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_mode_ignores_replace_keys() {
+        let root = project("search-mode");
+        let mut app = App::new(root.clone(), None, IconTheme::Emoji);
+        app.query = "needle".into();
+        app.cursor = app.query.len();
+        app.set_results_for_test(
+            collect_content_hits(&root, false, "needle", "", "", SearchOptions::default(), 20)
+                .unwrap()
+                .0,
+            false,
+        );
+        app.selected = 1;
+        app.key(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        app.key(key(KeyCode::Enter, KeyModifiers::ALT));
+        assert!(app.pending.is_none() && !app.replacing);
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/needle.rs")).unwrap(),
+            "use crate::prelude;\nfn needle_body() {}\n// tail\n"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

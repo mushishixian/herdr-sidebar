@@ -3550,7 +3550,12 @@ impl App {
             .unwrap_or(entry.path.as_str())
             .to_string();
         let file = root.join(&entry.path);
-        match actions::open_in_editor_inline_env(root, &file, &[(OPEN_DIFF_ENV, "1")]) {
+        let env: &[(&str, &str)] = if editor_live_diff(entry.letter) {
+            &[(OPEN_DIFF_ENV, "1")]
+        } else {
+            &[]
+        };
+        match actions::open_in_editor_inline_env(root, &file, env) {
             Ok(()) => self.flash = Some((format!("opened diff in editor: {name}"), false)),
             Err(error) => {
                 self.flash = Some((format!("custom editor failed: {error}"), true));
@@ -6036,6 +6041,14 @@ fn diff_opens_in_editor(
     on_click && inline && editor_configured && letter != 'D' && exists
 }
 
+/// Whether the editor is asked for a live diff vs HEAD (`OPEN_DIFF_ENV`). A
+/// conflicted file (`!`) must open as the plain working-tree file: the live
+/// diff overlays would paint over the conflict markers that the editor's
+/// inline merge resolver needs to show.
+fn editor_live_diff(letter: char) -> bool {
+    letter != '!'
+}
+
 /// Stage everything the repository has (nested-repo safe), then ask OpenCommit
 /// for a message describing the staged changes. Runs on a worker thread.
 fn ai_commit_outcome(git: &Git) -> AiOutcome {
@@ -6076,6 +6089,17 @@ mod tests {
         assert!(!diff_opens_in_editor(true, true, true, 'M', false));
         // A deletion, on either side, keeps the viewer.
         assert!(!diff_opens_in_editor(true, true, true, 'D', true));
+    }
+
+    #[test]
+    fn conflicted_file_opens_in_editor_without_live_diff() {
+        // Conflicts (`!`) still route to the editor...
+        assert!(diff_opens_in_editor(true, true, true, '!', true));
+        // ...but must not request the live diff, which would fight the
+        // inline conflict resolver. Ordinary changes still do.
+        assert!(!editor_live_diff('!'));
+        assert!(editor_live_diff('M'));
+        assert!(editor_live_diff('U'));
     }
 
     #[test]

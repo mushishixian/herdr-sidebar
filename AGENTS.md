@@ -719,6 +719,11 @@ HACKING.md — budget time for that before promising a patched build.
   instead of the preview pane. `HERDR_SIDEBAR_OPEN_DIFF=1` is the contract with the editor: open the
   file and show its diff against HEAD. Launch failure flashes the error and falls back to the viewer.
   Context menu "Open Diff Preview" always uses `open_diff_viewer`; drawer refs keep the viewer.
+  **Conflicted files (`!`) never send `HERDR_SIDEBAR_OPEN_DIFF`** (`editor_live_diff`): they still
+  open in the editor, but without the live-diff request. Fresh's live diff overlays would paint over
+  the `<<<<<<<` / `=======` / `>>>>>>>` markers that the editor's inline conflict resolver
+  (`selection_share.ts`, "Inline merge conflicts") needs to show, so the two views would fight.
+  Ordinary changes still send it. Covered by `conflicted_file_opens_in_editor_without_live_diff`.
 - **Title-bar action buttons** (`ui.rs` `TitleAction`/`title_action_spans`): VS Code-style
   hover buttons at the header's top-right (Explorer: New File / New Folder / Refresh /
   Collapse All; SCM: Refresh / Collapse All), left of the standalone ⚙. Terminals emit NO
@@ -1468,7 +1473,7 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   `HERDR_PANE_ID`/`HERDR_TAB_ID`/`HERDR_WORKSPACE_ID` (from `pane.list`); without them the dotfiles
   `fresh-open` (which only uses editors in the current workspace) failed with "no current herdr tab".
 
-### Search popup (Ctrl+Alt+F)
+### Search / replace popup (Ctrl+Alt+F / Ctrl+Alt+E)
 
 - Entry points: `--search-popup` (pane `[[panes]] id = "search-popup"`, placement `popup`, 90%x85%,
   `src/search_popup.rs::run`) and `--search-popup-open` (action `search-popup`, plus the Windows twin
@@ -1504,6 +1509,44 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   does the same). Up/Down and PgUp/PgDn move over headers and matches alike; Enter or a double-click
   opens (a header opens its first match). Esc cancels. The wheel scrolls the list view, or the
   preview when the pointer is over it.
+
+- Replace (Ctrl+Alt+E): `--replace-popup-open` (action `replace-popup`, Windows twin
+  `replace-popup-windows` through `herdr-sidebar-ensure.exe`) opens the SAME `search-popup` pane with
+  `HERDR_SIDEBAR_SEARCH_MODE=replace` in its env (`search_popup::REPLACE_MODE_ENV`, sent by
+  `file_popup::request_popup_pane_with_env`, which `request_popup_pane` also uses). The title reads
+  "Replace in files". A chevron left of the query shows or hides the Replace row, and Tab/Shift+Tab move
+  focus between the two inputs (Tab only while the row is open). Search mode (Ctrl+Alt+F) has no Replace
+  row and renders as before.
+- Replace matching is the engine's own: `content_search::replace_in_text` uses `compile_pattern` and
+  `content_line_match_ranges`, line by line. Regex mode expands captures through `Captures::expand`
+  (`$1`, `${name}`, `$$`); literal mode inserts the replacement verbatim. Line endings (`\n` / `\r\n`), a
+  UTF-8 BOM and a missing final newline are untouched: only matched bytes change.
+  `Target::One` (one occurrence) replaces only when its line still has a match at exactly that byte range;
+  otherwise it counts zero. Several `One` targets on one file apply bottom-up so offsets stay valid.
+- `content_search::apply_replacements` confines writes to the project root: paths are canonicalized (so
+  symlinks are followed) and must start with the canonical root. Binary, over-1-MiB and non-UTF-8 files are
+  skipped with a reason. A file is written only when it changes, atomically: a temp file in the same
+  directory, the original permissions copied, then a rename over the original. A failure leaves the
+  original untouched, reports the file as skipped, and moves on.
+- Keys in replace mode: **Ctrl+R** replaces the selected item. On a match row it replaces that line's first
+  occurrence with no prompt (a line with several matches shows all of them struck through, so the rest
+  remain until the next Ctrl+R). On a file header it asks, then replaces every occurrence in that file.
+  **Alt+Enter** (and the All button) is Replace All: it always asks, then re-searches the whole project
+  with no result cap, so files beyond the displayed 1000 are replaced too. Replace actions need the row
+  open and a non-empty query. Enter still opens the selected match. Esc cancels a pending prompt before
+  it closes the popup.
+- Confirmation: only `y`/`Y` confirms. Any other key, Esc, or a mouse click cancels, and the key is
+  consumed. The prompt reads `Replace N occurrences in M files with "x"? (y/N)` in the status line
+  (`+` when the list is capped). When the line is too narrow, its middle is elided and the `(y/N)` tail
+  stays visible. Typing in the Replace input never starts a search, while editing the query does.
+- After a replacement runs on a worker (one at a time; `replacing` blocks new ones), the status line and a
+  toast (`git_action::notify`, skipped under `cfg(test)`) show `Replaced N occurrence(s) in M file(s)`,
+  plus `, K skipped` when files were skipped or requested occurrences did not change. The popup then
+  re-searches so the list matches disk, and drops its cached file text and preview.
+- Why not Ctrl+Alt+H: without the kitty protocol it arrives as Alt+Backspace. The host key is
+  `ctrl+alt+e` in the dotfiles `config.toml`.
+- Open editor buffers (Fresh) do not get a notification. They see the change on disk as an external
+  change through their own reload or conflict handling.
 
 ## Herdr workspace
 

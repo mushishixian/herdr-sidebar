@@ -122,6 +122,20 @@ description = "Popup: search file contents in the current workspace/repo with a 
 command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--search-popup-open"]
 
 [[actions]]
+id = "replace-popup"
+platforms = ["linux", "macos"]
+title = "Replace in files (popup)"
+description = "Popup: search file contents and replace matches across the current workspace/repo, with a live preview."
+command = ["./target/release/herdr-sidebar", "--replace-popup-open"]
+
+[[actions]]
+id = "replace-popup-windows"
+platforms = ["windows"]
+title = "Replace in files (popup)"
+description = "Popup: search file contents and replace matches across the current workspace/repo, with a live preview."
+command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--replace-popup-open"]
+
+[[actions]]
 id = "git-pull"
 platforms = ["linux", "macos"]
 title = "Git Pull"

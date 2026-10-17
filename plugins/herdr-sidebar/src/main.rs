@@ -76,6 +76,9 @@ fn main() -> std::io::Result<()> {
         Some("--search-popup-open") => {
             return herdr_sidebar::search_popup::open();
         }
+        Some("--replace-popup-open") => {
+            return herdr_sidebar::search_popup::open_replace();
+        }
         Some("--git-action") => {
             let op = std::env::args().nth(2).unwrap_or_default();
             return herdr_sidebar::git_action::run(&op);
@@ -210,7 +213,7 @@ fn main() -> std::io::Result<()> {
         Some(other) => {
             eprintln!("herdr-sidebar: unknown argument `{other}`");
             eprintln!(
-                "usage: herdr-sidebar [--view explorer|git|--preview [ctl]|--run-custom-editor|--git-popup[-open] switch|rename|merge|history|--file-popup[-open]|--search-popup[-open]|--ensure|--toggle|--toggle-git|--show-explorer|--show-search|--show-git|--quick-open|--launch-decision [git]|--focused-pane|--pane-has-token <id>|--open-plan|--focused-tab|--auto-open|--focus-on-open|--dock-right]"
+                "usage: herdr-sidebar [--view explorer|git|--preview [ctl]|--run-custom-editor|--git-popup[-open] switch|rename|merge|history|--file-popup[-open]|--search-popup[-open]|--replace-popup-open|--ensure|--toggle|--toggle-git|--show-explorer|--show-search|--show-git|--quick-open|--launch-decision [git]|--focused-pane|--pane-has-token <id>|--open-plan|--focused-tab|--auto-open|--focus-on-open|--dock-right]"
             );
             std::process::exit(2);
         }

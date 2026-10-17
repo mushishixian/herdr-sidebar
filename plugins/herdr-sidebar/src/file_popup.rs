@@ -41,10 +41,27 @@ pub fn open() -> io::Result<()> {
 /// over the focused pane. Shared by every session-modal search popup: the caller
 /// pane and its cwd travel in the spawn env so the popup can act on them.
 pub fn request_popup_pane(entrypoint: &str, width: &str, height: &str) -> io::Result<()> {
+    request_popup_pane_with_env(entrypoint, width, height, &[])
+}
+
+/// [`request_popup_pane`] plus `extra_env` variables for the popup process
+/// (the search popup's replace mode travels this way).
+pub fn request_popup_pane_with_env(
+    entrypoint: &str,
+    width: &str,
+    height: &str,
+    extra_env: &[(&str, &str)],
+) -> io::Result<()> {
     let mut env = crate::state::spawn_env();
     let caller_pane_id = focused_pane_id();
     let caller_cwd = focused_cwd();
     if let Some(env) = env.as_object_mut() {
+        for (key, value) in extra_env {
+            env.insert(
+                (*key).to_string(),
+                serde_json::Value::String((*value).to_string()),
+            );
+        }
         if let Some(cwd) = &caller_cwd {
             env.insert(
                 crate::state::SPAWN_CWD_ENV.to_string(),

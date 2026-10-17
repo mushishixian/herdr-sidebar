@@ -118,7 +118,7 @@ fi
 # ── 5. Verify (report only; never aborts) ──────────────────────────────
 step "verify"
 actions=$(herdr plugin action list 2>/dev/null || true)
-for a in git-commit-ai git-pull git-push file-search git-switch-branch; do
+for a in git-commit-ai git-pull git-push file-search search-popup replace-popup git-switch-branch restart-fresh; do
   if grep -qE "\"action_id\": *\"$a\"" <<<"$actions"; then
     ok "herdr action $a"
   else
@@ -135,13 +135,41 @@ for p in selection_share.ts git_line_history.ts; do
 done
 
 fresh_cfg=$(fresh --cmd config show 2>/dev/null || true)
-for k in selection_send_to_agent git_line_history; do
+for k in selection_send_to_agent git_line_history recent_tab conflict_accept_current; do
   if grep -q "$k" <<<"$fresh_cfg"; then
     ok "fresh config mentions $k"
   else
     bad "fresh config does not mention $k"
   fi
 done
+
+fresh_link=$HOME/.config/fresh/config.json
+if [ -L "$fresh_link" ] && [ "$(readlink "$fresh_link")" = "$DOTFILES/config/fresh/config.json" ]; then
+  ok "fresh config.json is the dotfiles symlink"
+else
+  bad "fresh config.json is not a symlink to $DOTFILES/config/fresh/config.json (Fresh's settings screen replaced it; merge and rerun)"
+fi
+
+if command -v lazygit >/dev/null 2>&1; then
+  ok "lazygit present (ctrl+b alt+g)"
+else
+  bad "lazygit missing (sudo apt install lazygit)"
+fi
+
+if [ "$with_oco" = 1 ]; then
+  if command -v node >/dev/null 2>&1; then
+    ok "node present (oco's hook mode needs it)"
+  else
+    bad "node missing (oco's hook mode needs it; sudo apt install nodejs)"
+  fi
+  # Read only the provider line; the API key is never printed.
+  provider=$(sed -n 's/^OCO_AI_PROVIDER=//p' "$HOME/.opencommit" 2>/dev/null | tail -n1 || true)
+  if [ -n "$provider" ] && [ "$provider" != undefined ]; then
+    ok "oco has an AI provider configured"
+  else
+    bad "oco has no AI provider (run oco setup)"
+  fi
+fi
 
 if herdr server reload-config >/dev/null 2>&1; then
   ok "reloaded the running herdr server"
@@ -152,12 +180,11 @@ fi
 # ── 6. Next steps ──────────────────────────────────────────────────────
 step "next steps"
 [ "$with_oco" = 1 ] && info "1. oco setup   (once: choose the AI provider and key for the AI commit)"
-info "2. Restart Fresh daemons so plugins and keys load (save first):"
-info "     fresh --cmd daemon list"
-info "     fresh --cmd daemon kill <name>"
-info "   then run fresh-ide in the Fresh pane"
-info "3. Windows Terminal binds Ctrl+Shift+A to 'Select all' by default: remove that"
-info "   binding, or the AI-commit key never reaches herdr."
+info "2. Restart Fresh so plugins and keys load (graceful: unsaved buffers come back):"
+info "     $DOTFILES/herdr-plugins/ide/bin/fresh-restart --all"
+info "3. Windows Terminal binds Ctrl+Shift+A to 'Select all' and Ctrl+Tab to 'next tab' by"
+info "   default (Pebrel too): remove both, or the AI-commit and recent-tab keys never reach"
+info "   herdr and Fresh."
 info "4. Start: herdr, then in a project pane press ctrl+b i for the IDE layout."
 info "   Full docs: $REPO/docs/herdr-ide.md"
 [ -d "$HOME/.dotfiles-backup" ] && info "5. Replaced files were backed up under ~/.dotfiles-backup/"

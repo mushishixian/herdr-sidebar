@@ -63,9 +63,10 @@ What it does, in order:
 Afterwards, once:
 
 - `oco setup`: choose the AI provider and key for the AI-commit key.
-- Restart running Fresh daemons so new plugins/keys load (see *Updating*).
-- Windows Terminal: remove its default **Ctrl+Shift+A → Select all**
-  binding (Settings → Actions), or the AI-commit chord never reaches herdr.
+- Restart running Fresh so new plugins/keys load: `~/code/dotfiles/herdr-plugins/ide/bin/fresh-restart --all`
+  (see *Updating*).
+- Windows Terminal (and Pebrel): remove its default **Ctrl+Shift+A → Select all** and **Ctrl+Tab → next tab**
+  bindings (Settings → Actions), or the AI-commit and recent-tab chords never reach herdr and Fresh.
 - Start `herdr`, open a project pane, press `ctrl+b i` for the IDE layout.
 
 ## Keys
@@ -82,6 +83,7 @@ Afterwards, once:
 | `ctrl+b d` | Source Control view |
 | `ctrl+q` | File-search popup (fuzzy find, opens in Fresh/preview) |
 | `ctrl+alt+f` | Search in files popup (file contents, live preview; opens at the matching line) |
+| `ctrl+alt+e` | Replace in files popup (the search popup with a Replace row: Ctrl+R replaces the selected item, Alt+Enter replaces all, after a y/N prompt) |
 | `ctrl+alt+c` | Git: switch branch (popup; type a new name to create) |
 | `ctrl+alt+r` | Git: rename current branch (popup) |
 | `ctrl+alt+x` | Git: merge a branch into the current one (popup) |
@@ -100,6 +102,11 @@ searches file contents: a query box with Match Case, Whole Word and Regex toggle
 (Alt+C / Alt+W / Alt+R) on the left, grouped results, and a syntax-highlighted
 preview of the selected match on the right. Enter opens the match at its line in
 Fresh. Narrow terminals drop the preview and keep the list.
+**Ctrl+Alt+E** is the same popup in replace mode: a chevron opens a Replace row
+under the query, and Tab moves between the two inputs. Ctrl+R replaces the selected
+match (or, on a file header, every match in that file after a `y` confirmation);
+Alt+Enter replaces every match in the project after a `y`. Open editor buffers see
+the change on disk as an external change.
 
 **Shortcut toasts:** every custom shortcut (herdr and Fresh) shows a small
 toast with its name and key, e.g. "Switch branch / Ctrl+Alt+C", as a reminder.
@@ -118,11 +125,34 @@ dotfiles-ide uses `tip` in `lib.sh`; the two `popup` keys run
 | `ctrl+alt+l` | Copy as reference: `path:12-20` + fenced code block |
 | `ctrl+alt+a` | Paste that reference into this tab's Agent pane (not submitted) and focus it |
 | `ctrl+tab` | Jump to the previously used open tab (again = back); never opens files |
+| `alt+c` | Merge conflict: accept **current** (the block at the cursor, or the next one) |
+| `alt+i` | Merge conflict: accept **incoming** |
+| `alt+m` | Merge conflict: accept **both** (current, then incoming) |
+| `alt+d` | Merge conflict: next conflict (past the last: next conflicted file) |
+| `alt+shift+d` | Merge conflict: previous conflict (wraps to the last) |
 
 The first four are also in Fresh's **Selection** menu, and all five in the
 command palette (`ctrl+p`). Ctrl+Tab is bound with `"when": "normal"` (editing
 only). Windows Terminal binds Ctrl+Tab to its own "next tab" by default:
 unbind it there (see *Gotchas*). Shift+Tab is Fresh's normal un-indent.
+
+The conflict keys are free in Fresh's default keymap: Alt+1/2/3 are bookmarks,
+Alt+N/P find-selection, and Alt+Shift+N/P sidebar sections, so they were not
+reused. In a file without conflicts the conflict keys only show "No merge
+conflicts in this file".
+
+**Resolving merge conflicts.** Two resolvers exist. The inline one (this
+config, `plugins/selection_share.ts`, "Inline merge conflicts") works in the
+normal buffer like VS Code: each block is tinted (current green, incoming blue,
+diff3 base grey), an action line sits above each `<<<<<<<`, and the keys above
+accept a side. Accepting moves to the next unresolved conflict. When the file
+is clean it is saved, and the next conflicted file from `git diff
+--diff-filter=U` opens at its first conflict. Stage files in Source Control
+and commit when none remain. Fresh's built-in **Merge: Start Resolution**
+(`merge_conflict.ts`) is the alternative: a three-panel view (ours, theirs,
+editable result). Both coexist; the inline resolver never clears the built-in
+one's decorations. A conflicted file opened from Source Control skips the Live
+Diff (see AGENTS.md, *SCM changed-file routing*).
 
 ### Sidebar
 
@@ -193,7 +223,11 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on
 | e437091 | **herdr's pane items in the sidebar menu** | Rename pane, Split right/down, Zoom, Use herdr right-click menu, Close pane, through the socket API, since the sidebar's plain right-click hides herdr's menu. |
 | 01dea4e | **Line-history popup** | Entrypoint `git-line-history` (`--git-popup history`), range from `HERDR_SIDEBAR_HISTORY_FILE` / `HERDR_SIDEBAR_HISTORY_LINES`; opened by the Fresh plugin below. |
 | 60dd2a3 | **File-search popup** | Action `file-search` (`--file-popup-open`) → popup `--file-popup`: fuzzy file list (skips `.git`, honours `.gitignore`), opens the pick in the caller's tab. |
-| *uncommitted* | **Git pull / push / AI commit** | `src/git_action.rs`, actions `git-pull`, `git-push`, `git-commit-ai` (`--git-pull/--git-push/--git-commit`). Pull/push take a per-repo OS file lock; AI commit writes a request for the tab's Source Control sidebar (`src/ai_commit.rs`) that generates the message and commits. Results are herdr toasts (`notification.show`). Git runs with `GIT_TERMINAL_PROMPT=0` and null stdin so a credential prompt fails instead of hanging. |
+| ea18341 | **Git pull / push (+ first AI commit), shortcut toasts** | `src/git_action.rs`, `src/shortcut_tip.rs`; actions `git-pull`, `git-push`, `git-commit-ai` (`--git-pull/--git-push/--git-commit`). Pull/push take a per-repo OS file lock; results are herdr toasts (`notification.show`); toasts carry the bound key, and only for plugin actions (`HERDR_PLUGIN_ACTION_ID`). Git runs with `GIT_TERMINAL_PROMPT=0` and null stdin so a credential prompt fails instead of hanging. |
+| 2a64708 | **AI commit through Source Control** | `src/ai_commit.rs`: `ctrl+shift+a` writes a per-tab request; that tab's Source Control sidebar stages everything, gets the OpenCommit message (prepare-commit-msg hook mode), fills Message, and commits through the ✓ Commit path. |
+| aedfbd6 | **Popup → editor caller context; AI-commit button animation** | Popups belong to no tab, so the inline editor is started with the CALLER pane's `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`. The ✓ Commit button shows a braille spinner with "AI generating…" / "Committing…" and a sweeping highlight band while an AI commit runs, and blocks a second commit. |
+| 2c02d3e | **Search popup + line-aware open** | `src/search_popup.rs`; the engine moved to lib `src/content_search.rs` (shared with the sidebar Search view); preview highlighted with `syntax::highlight_lines`; `actions::open_in_editor_inline_at` (`{line}` placeholder, or `file:line` for `fresh` / `fresh-open`). |
+| *uncommitted* | **Replace popup + conflict routing** | Replace mode of the search popup (`HERDR_SIDEBAR_SEARCH_MODE=replace`, action `replace-popup`; `content_search::replace_in_text` / `apply_replacements`: engine-identical matching, `$1` expansion in regex mode, line endings / BOM / permissions kept, atomic write, root-confined). Conflicted (`!`) files open in the editor without Live Diff (`editor_live_diff`). |
 
 **AI commit** (`ctrl+shift+a`): the action does not commit. It writes a per-tab
 request (`src/ai_commit.rs`, under the sidebar's private runtime dir) for the focused
@@ -210,9 +244,31 @@ and never commits. It runs with `OCO_GITPUSH=false`, `NO_COLOR=1`, null stdin, a
 timeout. An unconfigured oco reports `ERR_TTY_INIT_FAILED` (shown as "run `oco setup`").
 On failure the changes stay staged and the message box is left alone.
 
+While it runs, the ✓ Commit button shows a braille spinner with "AI generating…" (then "Committing…")
+and a sweeping highlight band. Clicking ✓ Commit during that just says "AI commit in progress…".
+
 Sidebar defaults seeded by the installer (`dotfiles/herdr-sidebar/state.json`):
 VS Code colours, git footer, auto-open, follow the neighbour pane's folder,
 preview in a pane (a git-change diff opens beside the sidebar inside the IDE tab, so the Agent column stays visible; Esc/q closes it), editor on click, editor inline.
+
+### Search / replace popups
+
+- Entry points: `--search-popup-open` (action `search-popup`, `ctrl+alt+f`) and `--replace-popup-open`
+  (action `replace-popup`, `ctrl+alt+e`). Both open the pane `--search-popup` (placement `popup`, 90%×85%,
+  `src/search_popup.rs`); replace mode is `HERDR_SIDEBAR_SEARCH_MODE=replace`. Windows twins go through
+  `herdr-sidebar-ensure.exe`.
+- The query runs on a worker after a 300 ms debounce; each search has a generation counter and older
+  results are dropped. The engine cannot cancel, so a superseded scan runs to completion.
+- The preview window hits ±300 lines and is highlighted with `syntax::highlight_lines`, which returns one
+  line per input line. (The old join-and-check code dropped ALL colors whenever the window ended on a blank
+  line.)
+- Enter opens the match at its line in THIS workspace's Fresh (`fresh-open` with `file:line`).
+- Replace safety: Alt+Enter (replace all) and Ctrl+R on a file header ask `y/N` first. A single replace
+  re-verifies that its line still matches at that byte range. Writes are atomic (temp file, rename), keep
+  permissions, CRLF and BOM, and never leave the project root (symlinks are canonicalized).
+- The sidebar's own Search view still has an inert Replace field; replacement lives only in the popup.
+- Popup panes belong to no tab, so both popups (and Ctrl+Q, since `aedfbd6`) hand the editor
+  the caller pane's `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`.
 
 ### Fresh plugins (`dotfiles/config/fresh/plugins`)
 
@@ -225,6 +281,15 @@ preview in a pane (a git-change diff opens beside the sidebar inside the IDE tab
   path is relative to Fresh's cwd (the project root). Send-to-agent spawns
   `$DOTFILES_IDE_BIN/fresh-to-agent` (default
   `~/code/dotfiles/herdr-plugins/ide/bin`) and caps text at 200 000 chars.
+- **`recent_tab`** (`ctrl+tab`, `when: normal`): switches to the previously used open file tab; again goes
+  back. It never opens files.
+- **Live diff on request**: polls `$XDG_STATE_HOME/fresh-ide/live-diff-request-<FRESH_IDE_DAEMON>` every
+  400 ms. A request at most 15 s old runs `live_diff_vs_head` on the file it names. `fresh-open` writes
+  these (sidebar clicks on git changes).
+- **Inline merge conflicts** (namespace `inline-conflict`): scans on buffer activate, open, revert and
+  modify, debounced 150 ms. Accepting a side is a deleteRange + insertText, then the cursor auto-jumps to
+  the next unresolved block. When a file is clean it is saved, and the next file from
+  `git diff --diff-filter=U` opens at its first conflict.
 
 ## Updating
 
@@ -236,8 +301,8 @@ preview in a pane (a git-change diff opens beside the sidebar inside the IDE tab
 herdr server reload-config
 
 # Fresh config or plugin edits: daemons load them only at start
-fresh --cmd daemon list
-fresh --cmd daemon kill ide-xxxxxxxxxx      # save first; then run fresh-ide in the Fresh pane
+~/code/dotfiles/herdr-plugins/ide/bin/fresh-restart --all   # graceful; unsaved buffers come back (hot exit)
+# by hand, if fresh-restart is unavailable: fresh --cmd daemon list; fresh --cmd daemon kill <name>; then fresh-ide in that pane
 
 # keep the dotfiles patch set in sync with this branch (commit first)
 rm ~/code/dotfiles/herdr-sidebar/*.patch
@@ -247,11 +312,13 @@ git format-patch "$(git merge-base origin/main HEAD)" -o ~/code/dotfiles/herdr-s
 ~/code/dotfiles/herdr-sidebar/build.sh --update
 ```
 
-The dotfiles patch set currently stops at 01dea4e: the file-search popup and
-the git pull/push/AI-commit work are only in this checkout. A new machine
-that runs `build.sh` without this repo gets the older feature set until the
-patches are re-exported (above). `docs/install-herdr-ide.sh` avoids that by
-building this checkout directly.
+`fresh-restart` with no argument restarts only this tab's Fresh (it is also the dotfiles-ide action
+`restart-fresh`).
+
+The dotfiles patch set still stops at 01dea4e (its latest patch is 0006 line-history). Not in it yet:
+the file-search popup, git pull / push / AI commit, the search and replace popups, and conflict routing.
+A new machine that runs `build.sh` without this repo gets the older feature set until the patches are
+re-exported (above). `docs/install-herdr-ide.sh` avoids that by building this checkout directly.
 
 ## Gotchas (verified)
 
@@ -259,7 +326,9 @@ building this checkout directly.
   the dotfiles symlink into a plain copy; later dotfiles edits then silently do
   nothing. Check `ls -la ~/.config/fresh`, merge the copy's changes into
   dotfiles, rerun the installer (it backs up and re-links). New Fresh plugins
-  also need their own symlink: rerun the installer.
+  also need their own symlink: rerun the installer. It recurs every time the settings screen saves
+  (seen again: `smooth_scroll`, `highlight_current_column` and `rainbow_indentation` lived only in the
+  copy), so edit settings in the dotfiles file instead.
 - **herdr's right-click pane menu cannot be extended by plugins.** Its items are
   hard-coded (`src/client/shell/context_menu.rs`); the manifest `contexts` field
   is accepted but unused for menus. Hence the Fresh keys + Selection menu.
@@ -279,6 +348,10 @@ building this checkout directly.
 - **Windows Terminal swallows some chords**: Ctrl+Tab (next tab), Ctrl+Shift+A (select all),
   Ctrl+Shift+C/V (copy/paste); that is why the git keys use Ctrl+Alt.
   Terminals send Ctrl+H as Backspace, so line history is on `ctrl+alt+o`, not `ctrl+alt+h`.
+- **Ctrl+Alt+H is Alt+Backspace** in terminals without the kitty protocol, so replace is on Ctrl+Alt+E.
+- **herdr popup panes belong to no tab**: a process started from a popup has no usable `HERDR_TAB_ID` /
+  `HERDR_WORKSPACE_ID`, so it must be handed the caller pane's ids. Ctrl+Q once failed with "no current
+  herdr tab" until it was.
 - **`npm install -g` needs `--prefix ~/.local`**: the global prefix is root-owned.
 - **Running sidebars keep the old binary** until redeployed
   (`herdr plugin action invoke herdr-sidebar.redeploy`).
@@ -295,6 +368,11 @@ building this checkout directly.
 | "No Agent pane in this tab" | the tab has no pane labelled `Agent`; run `ctrl+b i` |
 | Sidebar lacks a new feature | `herdr plugin list --json` → `plugin_root` must be this checkout; rebuild + redeploy |
 | Actions missing in `herdr plugin action list` | manifest error: `herdr plugin log list --plugin herdr-sidebar` |
+| Conflict colors/keys missing | the file must contain `<<<<<<<` markers; `ls -la ~/.config/fresh/config.json` must be a symlink; `fresh --cmd config show \| grep conflict_`; restart Fresh with `fresh-restart` |
+| `ctrl+alt+f` / `ctrl+alt+e` does nothing | `herdr plugin action list \| grep -E 'search-popup\|replace-popup'`; `herdr server reload-config` |
+| A file opens in another workspace's Fresh | fixed: `fresh-open` only uses this workspace's editor; check the Fresh pane's `fresh_daemon` token with `herdr pane list` |
+| `ctrl+shift+a` message never appears in the box | the tab needs a sidebar (its Source Control view takes the request); the request expires after 30 s; `oco setup` |
+| `ctrl+b alt+g` (lazygit) does nothing | `command -v lazygit` (it is in `packages.txt`: rerun the installer without `--no-packages`, or `sudo apt install lazygit`) |
 
 More internals (herdr behaviour, heartbeat liveness, preview tabs, release
 flow) are in the repo's `AGENTS.md`.
