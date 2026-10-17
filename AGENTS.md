@@ -68,12 +68,24 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   and null stdin to fail fast instead of hanging on credential prompts. Rate-limit toast notifications
   via `notification.show` (1-2s interval) to keep Herdr's UI smooth, and guard operations with
   repository-scoped `File::try_lock()` to avoid Git index lock collisions from rapid keystrokes.
-- AI commit (`--git-commit`, action `git-commit-ai`): `git add -A`, then OpenCommit `oco --yes`
-  writes the commit. `--yes` only skips the message confirmation — after committing, oco still
-  PROMPTS to push unless `OCO_GITPUSH=false` is in its env. An unconfigured oco (no AI provider)
-  starts its setup wizard and, with null stdin, crashes with `ERR_TTY_INIT_FAILED` (verified,
-  oco 3.3.11); `summarize_oco_failure` maps that to "run `oco setup`". On Windows npm installs
-  `oco.cmd`, which `Command::new("oco")` cannot resolve, so it goes through `cmd /C` (untested live).
+- AI commit (`--git-commit`, action `git-commit-ai`, `src/ai_commit.rs`): the action never commits.
+  It writes a per-tab request file (`<rundir>/ai_commit/tab-<tab>.req`, root + unix stamp, claimed by
+  rename, 30 s freshness) and activates that tab's Source Control view (`ensure::Mode::Activate`).
+  The SCM TUI polls its tab's request every 300 ms, runs `stage_under(root)` plus `has_staged`
+  on a worker, and generates the message WITHOUT committing via OpenCommit's prepare-commit-msg
+  hook mode: oco treats itself as the hook when `argv[1]` equals `<hooks path>/prepare-commit-msg`,
+  and writes the message to the file it is given. The hooks path comes from
+  `GIT_CONFIG_COUNT=1 / core.hooksPath` in the child env. The hook MUST be a symlink to the real
+  `cli.cjs` (oco loads `tiktoken_bg.wasm` from its own directory); a copy breaks. The message fills
+  the Message box and `commit_repo` (the ✓ path) commits it about 0.9 s later. oco's own commit
+  path is not used. Pitfall: `oco --yes` without the hook mode commits and then PROMPTS to push
+  unless `OCO_GITPUSH=false`. An unconfigured oco (no AI provider) starts its setup wizard, and with
+  null stdin it crashes with `ERR_TTY_INIT_FAILED` (verified, oco 3.3.11); `summarize_oco_failure`
+  maps that to "run `oco setup`". On Windows npm installs `oco.cmd`; the hook path resolves
+  `<prefix>/node_modules/opencommit/out/cli.cjs` next to it (untested live) and symlink creation
+  needs developer mode. Verified headless: `ai_commit::generate` on a staged scratch repo returned
+  a message and left HEAD unchanged (`cargo test -- --ignored e2e_generate` with
+  `HS_AI_COMMIT_E2E_REPO`).
 
 ### Reference implementations (installed locally, read these before designing)
 

@@ -47,6 +47,10 @@ const REPO_HEADER_ACTIONS: &str = " ⇅  ✓ ";
 /// How long two clicks on the same row still count as a double click (to pin
 /// a diff/show tab), matching the file explorer.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(450);
+/// How long an AI-generated message stays in the Message box before it is committed.
+const AI_COMMIT_REVIEW: std::time::Duration = std::time::Duration::from_millis(900);
+/// How often this sidebar checks its tab's AI commit request file.
+const AI_REQUEST_POLL: std::time::Duration = std::time::Duration::from_millis(300);
 
 fn sync_is_primary(status: &Status) -> bool {
     status.staged.is_empty()
@@ -77,6 +81,15 @@ enum Focus {
     Message,
     Commit,
     List,
+}
+
+/// What the `git-commit-ai` worker produced for one repository.
+enum AiOutcome {
+    /// OpenCommit's message for the staged changes.
+    Message(String),
+    /// Nothing was staged after `git add -A` semantics: no changes at all.
+    NothingToCommit,
+    Failed(String),
 }
 
 /// The Git-Graph-style drawers below the Changes section.
@@ -949,6 +962,15 @@ pub struct App {
     suggesting: Option<Receiver<String>>,
     /// Pending Sync Changes run, polled from tick().
     syncing: Option<(usize, Receiver<Result<String, String>>)>,
+    /// AI commit claimed from this tab's request file: the repo index and the
+    /// worker's outcome (see [`herdr_sidebar::ai_commit`]).
+    ai_commit: Option<(usize, std::sync::mpsc::Receiver<AiOutcome>)>,
+    /// A generated message waiting to be committed once it has been visible.
+    ai_commit_due: Option<(usize, std::time::Instant)>,
+    /// Last time this sidebar looked for an AI commit request (throttle).
+    ai_commit_checked: Option<std::time::Instant>,
+    /// The tab this sidebar lives in; AI commit requests are keyed by it.
+    my_tab: Option<String>,
     overlay: Option<Overlay>,
     hovered: Option<usize>,
     body: BodyGeom,
@@ -1074,6 +1096,20 @@ impl App {
             }
         }
 
+        // Sidebar panes inherit HERDR_TAB_ID; otherwise look our tab up once.
+        let my_tab = std::env::var("HERDR_TAB_ID")
+            .ok()
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                let pane_id = std::env::var("HERDR_PANE_ID")
+                    .ok()
+                    .filter(|p| !p.is_empty())?;
+                let list =
+                    herdr_sidebar::ipc::call_text("pane.list", serde_json::json!({})).ok()?;
+                let tab = herdr_sidebar::launch::tab_of(&list, &pane_id);
+                (!tab.is_empty()).then_some(tab)
+            });
+
         let mut app = Self {
             repos,
             discover_err,
@@ -1090,6 +1126,10 @@ impl App {
             flash: None,
             suggesting: None,
             syncing: None,
+            ai_commit: None,
+            ai_commit_due: None,
+            ai_commit_checked: None,
+            my_tab,
             overlay: None,
             hovered: None,
             body: BodyGeom::default(),
@@ -1294,6 +1334,7 @@ impl App {
             || self.picking.is_some()
             || self.suggesting.is_some()
             || self.syncing.is_some()
+            || self.is_ai_commit_busy()
             || commit_draft_present(self.repos.iter().map(|repo| repo.message.as_slice()))
         {
             return;
@@ -1343,6 +1384,7 @@ impl App {
                 ctl.resize_preferred(self.last_width, shared.sidebar_width, shared.dock_right);
             }
         }
+        self.poll_ai_commit();
         if let Some(rx) = &self.suggesting {
             match rx.try_recv() {
                 Ok(message) => {
@@ -1394,6 +1436,12 @@ impl App {
 
     pub fn is_syncing(&self) -> bool {
         self.syncing.is_some()
+    }
+
+    /// AI commit is generating, or its message is waiting to be committed; the
+    /// event loop polls faster while this holds.
+    pub fn is_ai_commit_busy(&self) -> bool {
+        self.ai_commit.is_some() || self.ai_commit_due.is_some()
     }
 
     pub fn on_resize(&mut self, width: u16) {
@@ -4021,6 +4069,129 @@ impl App {
         self.syncing = Some((index, rx));
     }
 
+    /// Claim a fresh AI commit request for this tab, collect the worker, and
+    /// commit the message once it has been visible for [`AI_COMMIT_REVIEW`].
+    fn poll_ai_commit(&mut self) {
+        if self.ai_commit.is_none() && self.ai_commit_due.is_none() {
+            self.take_ai_request();
+        }
+        if let Some((index, rx)) = &self.ai_commit {
+            let index = *index;
+            let received = match rx.try_recv() {
+                Ok(outcome) => Some(outcome),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(AiOutcome::Failed(
+                    "generation stopped unexpectedly".to_string(),
+                )),
+            };
+            if let Some(outcome) = received {
+                self.ai_commit = None;
+                self.finish_ai_commit(index, outcome);
+            }
+        }
+        if let Some((index, due)) = self.ai_commit_due
+            && std::time::Instant::now() >= due
+        {
+            self.ai_commit_due = None;
+            self.commit_ai_message(index);
+        }
+    }
+
+    fn take_ai_request(&mut self) {
+        let Some(tab) = self.my_tab.clone() else {
+            return;
+        };
+        // A sidebar opened for this request discovers its repositories on a
+        // later tick; leave the request for then instead of rejecting it.
+        if self.repos.is_empty() {
+            return;
+        }
+        if self
+            .ai_commit_checked
+            .is_some_and(|at| at.elapsed() < AI_REQUEST_POLL)
+        {
+            return;
+        }
+        self.ai_commit_checked = Some(std::time::Instant::now());
+        let Some(root) = herdr_sidebar::ai_commit::take_request(&tab) else {
+            return;
+        };
+        let Some(index) = self
+            .repos
+            .iter()
+            .position(|repo| same_path(repo.git.root(), &root))
+        else {
+            let text = format!("AI commit: {} is not shown in this sidebar", root.display());
+            herdr_sidebar::git_action::notify("AI Commit Failed", &text);
+            self.flash = Some((text, true));
+            return;
+        };
+        self.active = index;
+        let git = self.repos[index].git.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(ai_commit_outcome(&git));
+        });
+        self.ai_commit = Some((index, rx));
+        self.flash = Some((
+            "✧ AI commit: generating message with OpenCommit…".into(),
+            false,
+        ));
+    }
+
+    /// Put a generated message in the Message box, or report why there is none.
+    fn finish_ai_commit(&mut self, index: usize, outcome: AiOutcome) {
+        let name = self
+            .repos
+            .get(index)
+            .map(|repo| repo.name.clone())
+            .unwrap_or_default();
+        match outcome {
+            AiOutcome::Message(message) => {
+                // The commit below needs the staged list to be current.
+                self.refresh();
+                if let Some(repo) = self.repos.get_mut(index) {
+                    repo.message = message.chars().collect();
+                    repo.cursor = repo.message.len();
+                }
+                self.active = index;
+                self.focus = Focus::Message;
+                self.flash = Some(("✧ AI message ready — committing…".into(), false));
+                self.ai_commit_due = Some((index, std::time::Instant::now() + AI_COMMIT_REVIEW));
+            }
+            AiOutcome::NothingToCommit => {
+                self.flash = Some(("AI commit: nothing to commit".into(), false));
+                herdr_sidebar::git_action::notify(
+                    &format!("AI Commit [{name}]"),
+                    "Nothing to commit.",
+                );
+            }
+            AiOutcome::Failed(error) => {
+                herdr_sidebar::git_action::notify(&format!("AI Commit Failed [{name}]"), &error);
+                self.flash = Some((format!("AI commit: {error}"), true));
+            }
+        }
+    }
+
+    /// Commit through the same path as ✓ Commit, then toast the result.
+    fn commit_ai_message(&mut self, index: usize) {
+        let name = self
+            .repos
+            .get(index)
+            .map(|repo| repo.name.clone())
+            .unwrap_or_default();
+        self.commit_repo(index);
+        match &self.flash {
+            Some((error, true)) => {
+                herdr_sidebar::git_action::notify(&format!("AI Commit Failed [{name}]"), error)
+            }
+            Some((summary, false)) => {
+                herdr_sidebar::git_action::notify(&format!("AI Commit [{name}]"), summary)
+            }
+            None => {}
+        }
+    }
+
     fn commit(&mut self) {
         self.commit_repo(self.active);
     }
@@ -4522,7 +4693,7 @@ impl App {
         // The suggest button lives at the right end of the input line — a
         // monochrome OUTLINE of the ✨ sparkles shape (MDI "creation" in the
         // material theme) in the normal foreground, never the colored emoji.
-        let sparkle_glyph = if self.suggesting.is_some() {
+        let sparkle_glyph = if self.suggesting.is_some() || self.ai_commit.is_some() {
             "…"
         } else {
             sparkle_icon(self.theme)
@@ -5681,6 +5852,31 @@ fn diff_opens_in_editor(
     exists: bool,
 ) -> bool {
     on_click && inline && editor_configured && letter != 'D' && exists
+}
+
+/// Stage everything the repository has (nested-repo safe), then ask OpenCommit
+/// for a message describing the staged changes. Runs on a worker thread.
+fn ai_commit_outcome(git: &Git) -> AiOutcome {
+    if let Err(error) = git.stage_under(git.root()) {
+        return AiOutcome::Failed(error);
+    }
+    match git.has_staged() {
+        Ok(true) => {}
+        Ok(false) => return AiOutcome::NothingToCommit,
+        Err(error) => return AiOutcome::Failed(error),
+    }
+    match herdr_sidebar::ai_commit::generate(git.root()) {
+        Ok(message) => AiOutcome::Message(message),
+        Err(error) => AiOutcome::Failed(error),
+    }
+}
+
+/// Equal after canonicalizing when both exist, else compared as given.
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 #[cfg(test)]

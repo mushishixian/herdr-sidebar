@@ -2,15 +2,16 @@
 //!
 //! Invoked as plugin actions (e.g. `ctrl+alt+p` -> `git-pull`, `ctrl+alt+k` -> `git-push`,
 //! `git-commit-ai` -> `commit`). Resolves the focused pane's repository and performs git
-//! pull/push, or stages everything and commits with an OpenCommit-generated message, with
-//! live toast notifications:
+//! pull/push. AI Commit does not commit here: it hands the repository to the tab's Source
+//! Control sidebar (see [`crate::ai_commit`]), which generates the message into its Message
+//! box and commits it. Live toast notifications:
 //! 1. Initial notification when started (branch name & repo).
 //! 2. Live progress notification updates (throttled) as git reports progress.
 //! 3. Completion notification with human-readable summary or error.
 
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -18,9 +19,6 @@ use std::time::{Duration, Instant};
 
 use crate::git::Git;
 use crate::shortcut_tip;
-
-/// How long OpenCommit may run before it is killed and the commit reported as failed.
-const OCO_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub fn run(op: &str) -> io::Result<()> {
     if op != "pull" && op != "push" && op != "commit" {
@@ -67,6 +65,10 @@ pub fn run(op: &str) -> io::Result<()> {
     };
 
     let repo_name = git.name();
+    if op == "commit" {
+        request_ai_commit(&git, &repo_name, &tip);
+        return Ok(());
+    }
     let branch = git.current_branch().unwrap_or_else(|| "HEAD".to_string());
 
     // Single-flight lock per repository to prevent concurrent conflicting operations
@@ -90,12 +92,6 @@ pub fn run(op: &str) -> io::Result<()> {
             &format!("{op_label} [{repo_name}]{tip}"),
             "Another git operation is already running for this repository.",
         );
-        return Ok(());
-    }
-
-    if op == "commit" {
-        run_commit(&git, &repo_name, &tip);
-        drop(lock_file);
         return Ok(());
     }
 
@@ -211,168 +207,43 @@ pub fn run(op: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// A git command rooted at `root` with prompts disabled and stdin closed.
-fn git_cmd(root: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(root)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
-
-    cmd
-}
-
-/// Drain a child pipe on its own thread so the child can never block on a full pipe.
-fn drain<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = reader.read_to_end(&mut buf);
-        buf
-    })
-}
-
-/// `git add -A`, then OpenCommit writes the commit. Runs under the caller's repo lock.
-fn run_commit(git: &Git, repo_name: &str, tip: &str) {
+/// Hand the repository to this tab's Source Control sidebar: it stages, asks
+/// OpenCommit for a message, fills the Message box and commits. Nothing is
+/// committed by this process.
+fn request_ai_commit(git: &Git, repo_name: &str, tip: &str) {
     let title = format!("AI Commit [{repo_name}]");
     let fail_title = format!("AI Commit Failed [{repo_name}]");
-    let root = git.root();
-
-    notify(&format!("{title}{tip}"), "Staging all changes…");
-    match git_cmd(root).args(["add", "-A"]).output() {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => {
-            let error = summarize_error(&lossy(&out.stderr), &lossy(&out.stdout));
-            notify(&fail_title, &error);
-            return;
-        }
-        Err(e) => {
-            notify(&fail_title, &e.to_string());
-            return;
-        }
-    }
-
-    // `git diff --cached --quiet`: 0 = nothing staged, 1 = staged changes, anything else = error.
-    match git_cmd(root).args(["diff", "--cached", "--quiet"]).output() {
-        Ok(out) if out.status.success() => {
-            notify(&title, "Nothing to commit.");
-            return;
-        }
-        Ok(out) if out.status.code() == Some(1) => {}
-        Ok(out) => {
-            let error = summarize_error(&lossy(&out.stderr), &lossy(&out.stdout));
-            notify(&fail_title, &error);
-            return;
-        }
-        Err(e) => {
-            notify(&fail_title, &e.to_string());
-            return;
-        }
-    }
-
-    notify(&title, "Generating commit message with OpenCommit…");
-
-    #[cfg(windows)]
-    let mut cmd = {
-        // npm installs `oco.cmd`, which Command::new("oco") cannot find on Windows.
-        let mut c = Command::new("cmd");
-        c.args(["/C", "oco", "--yes"]);
-        c
-    };
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut c = Command::new("oco");
-        c.arg("--yes");
-        c
-    };
-
-    cmd.current_dir(root)
-        .env("OCO_GITPUSH", "false")
-        .env("NO_COLOR", "1")
-        .env("FORCE_COLOR", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            notify(
-                &fail_title,
-                "OpenCommit (oco) not found on PATH. Install it with: npm install -g opencommit",
-            );
-            return;
-        }
-        Err(e) => {
-            notify(&fail_title, &e.to_string());
-            return;
-        }
-    };
-
-    let stdout_handle = child.stdout.take().map(drain);
-    let stderr_handle = child.stderr.take().map(drain);
-
-    let deadline = Instant::now() + OCO_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    // The pipe readers are detached on purpose: a grandchild may still hold them.
-                    notify(
-                        &fail_title,
-                        "OpenCommit timed out after 120s. Changes are left staged.",
-                    );
-                    return;
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => {
-                notify(&fail_title, &e.to_string());
-                return;
-            }
-        }
-    };
-
-    let stdout = stdout_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-
-    if status.success() {
-        let subject = git_cmd(root)
-            .args(["log", "-1", "--format=%s"])
-            .output()
-            .map(|out| lossy(&out.stdout).trim().to_string())
-            .unwrap_or_default();
+    let Some(tab) = target_tab() else {
         notify(
-            &format!("AI Commit Succeeded [{repo_name}]"),
-            &format!("Committed: {subject}"),
+            &format!("{fail_title}{tip}"),
+            "Could not find this pane's tab.",
         );
-    } else {
-        notify(&fail_title, &summarize_oco_failure(&lossy(&stdout), &lossy(&stderr)));
+        return;
+    };
+    if let Err(e) = crate::ai_commit::write_request(&tab, git.root()) {
+        notify(&format!("{fail_title}{tip}"), &e.to_string());
+        return;
     }
+    let target = crate::ensure::Mode::Activate(crate::ensure::Target::SourceControl);
+    if let Err(e) = crate::ensure::run(target) {
+        notify(&format!("{fail_title}{tip}"), &e.to_string());
+        return;
+    }
+    notify(
+        &format!("{title}{tip}"),
+        "Generating the message in Source Control…",
+    );
 }
 
-fn lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+/// The tab the commit belongs to: the action's own tab, else the focused pane's.
+fn target_tab() -> Option<String> {
+    if let Some(tab) = std::env::var("HERDR_TAB_ID").ok().filter(|t| !t.is_empty()) {
+        return Some(tab);
+    }
+    let list = crate::ipc::call_text("pane.list", serde_json::json!({})).ok()?;
+    let pane = crate::launch::server_focused_pane_id(&list);
+    let tab = crate::launch::tab_of(&list, &pane);
+    (!tab.is_empty()).then_some(tab)
 }
 
 /// Remove CSI (`ESC [ … final`) and OSC (`ESC ] … BEL` or `ESC ] … ESC \`) sequences.
@@ -474,7 +345,7 @@ fn focused_cwd() -> Option<PathBuf> {
     cwd.or_else(|| std::env::current_dir().ok())
 }
 
-fn notify(title: &str, body: &str) {
+pub fn notify(title: &str, body: &str) {
     let _ = crate::ipc::call_text(
         "notification.show",
         serde_json::json!({ "title": title, "body": body }),

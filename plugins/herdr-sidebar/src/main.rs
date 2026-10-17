@@ -605,7 +605,7 @@ fn run_scm(
     loop {
         terminal.draw(|frame| app.draw(frame))?;
         let mut timeout = REFRESH_EVERY.saturating_sub(last_tick.elapsed());
-        if app.is_syncing() {
+        if app.is_syncing() || app.is_ai_commit_busy() {
             timeout = timeout.min(ANIMATION_FRAME);
         }
         if app.has_transient_popup() {

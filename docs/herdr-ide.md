@@ -86,7 +86,7 @@ Afterwards, once:
 | `ctrl+alt+x` | Git: merge a branch into the current one (popup) |
 | `ctrl+alt+p` | Git: pull (background, progress toasts) |
 | `ctrl+alt+k` | Git: push (background, progress toasts) |
-| `ctrl+shift+a` | Git: `add -A` + commit with an OpenCommit message |
+| `ctrl+shift+a` | Git: stage all + OpenCommit message into Source Control, then commit |
 | `ctrl+b alt+g` | lazygit popup |
 | `ctrl+b t` | Scratch terminal popup |
 | `ctrl+b ?` | Every herdr binding |
@@ -185,14 +185,22 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on
 | e437091 | **herdr's pane items in the sidebar menu** | Rename pane, Split right/down, Zoom, Use herdr right-click menu, Close pane, through the socket API, since the sidebar's plain right-click hides herdr's menu. |
 | 01dea4e | **Line-history popup** | Entrypoint `git-line-history` (`--git-popup history`), range from `HERDR_SIDEBAR_HISTORY_FILE` / `HERDR_SIDEBAR_HISTORY_LINES`; opened by the Fresh plugin below. |
 | 60dd2a3 | **File-search popup** | Action `file-search` (`--file-popup-open`) → popup `--file-popup`: fuzzy file list (skips `.git`, honours `.gitignore`), opens the pick in the caller's tab. |
-| *uncommitted* | **Git pull / push / AI commit** | `src/git_action.rs`, actions `git-pull`, `git-push`, `git-commit-ai` (`--git-pull/--git-push/--git-commit`). A per-repo OS file lock prevents overlapping runs; progress and results are herdr toasts (`notification.show`). Git runs with `GIT_TERMINAL_PROMPT=0` and null stdin so a credential prompt fails instead of hanging. |
+| *uncommitted* | **Git pull / push / AI commit** | `src/git_action.rs`, actions `git-pull`, `git-push`, `git-commit-ai` (`--git-pull/--git-push/--git-commit`). Pull/push take a per-repo OS file lock; AI commit writes a request for the tab's Source Control sidebar (`src/ai_commit.rs`) that generates the message and commits. Results are herdr toasts (`notification.show`). Git runs with `GIT_TERMINAL_PROMPT=0` and null stdin so a credential prompt fails instead of hanging. |
 
-**AI commit** (`ctrl+shift+a`): `git add -A` → nothing staged? toast
-"Nothing to commit" → `oco --yes` in the repo root with `OCO_GITPUSH=false`
-(otherwise oco asks to push after committing), `NO_COLOR=1`, null stdin, a 120 s
-timeout → toast `Committed: <subject>`. An unconfigured oco starts its setup
-wizard and crashes without a TTY (`ERR_TTY_INIT_FAILED`); that is reported as
-"run `oco setup`". On any failure the changes stay staged.
+**AI commit** (`ctrl+shift+a`): the action does not commit. It writes a per-tab
+request (`src/ai_commit.rs`, under the sidebar's private runtime dir) for the focused
+pane's repo and activates that tab's Source Control view. The Source Control sidebar
+then stages everything (`stage_under`, nested-repo safe), asks OpenCommit for a message
+and puts it in the Message box, then commits through the same path as the ✓ Commit
+button about 0.9 s later. Nothing staged → toast "Nothing to commit".
+
+The message comes from oco's `prepare-commit-msg` hook mode: a private temp dir holds a
+`hooks/prepare-commit-msg` SYMLINK to oco's `cli.cjs` (it must be a symlink, since oco
+loads `tiktoken_bg.wasm` next to itself), and `GIT_CONFIG_COUNT`/`core.hooksPath` points
+git there. oco treats itself as the hook, writes the message into the file it is given
+and never commits. It runs with `OCO_GITPUSH=false`, `NO_COLOR=1`, null stdin, and a 120 s
+timeout. An unconfigured oco reports `ERR_TTY_INIT_FAILED` (shown as "run `oco setup`").
+On failure the changes stay staged and the message box is left alone.
 
 Sidebar defaults seeded by the installer (`dotfiles/herdr-sidebar/state.json`):
 VS Code colours, git footer, auto-open, follow the neighbour pane's folder,

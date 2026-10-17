@@ -4,6 +4,7 @@
 //! sidecar (`herdr-sidebar-ensure`).
 
 pub mod actions;
+pub mod ai_commit;
 pub mod ansi;
 pub mod branch_ui;
 pub mod diffview;

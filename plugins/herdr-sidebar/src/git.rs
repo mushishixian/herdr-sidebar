@@ -220,6 +220,13 @@ impl Git {
         Ok(out.lines().next().unwrap_or("committed").to_string())
     }
 
+    /// Whether anything is in the index. Used before an AI commit so an empty
+    /// index reports "nothing to commit" instead of asking OpenCommit.
+    pub fn has_staged(&self) -> Result<bool, String> {
+        let out = run_in(&self.root, &["diff", "--cached", "--name-only"])?;
+        Ok(!out.trim().is_empty())
+    }
+
     /// Throw away a file's working-tree changes: untracked files are deleted,
     /// tracked ones restored from HEAD (the caller confirms first).
     pub fn discard(&self, entry: &FileEntry) -> Result<(), String> {
