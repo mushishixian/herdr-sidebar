@@ -471,12 +471,12 @@ fn open_file_in_workspace(
             panes_arr
                 .iter()
                 .find(|p| p.get("focused") == Some(&serde_json::Value::Bool(true)))
-                .and_then(|p| p.get("id")?.as_str().map(String::from))
+                .and_then(|p| p.get("pane_id")?.as_str().map(String::from))
                 .or_else(|| {
                     panes_arr
                         .iter()
                         .find(|p| p.get("placement") != Some(&serde_json::json!("popup")))
-                        .and_then(|p| p.get("id")?.as_str().map(String::from))
+                        .and_then(|p| p.get("pane_id")?.as_str().map(String::from))
                 })
         });
 
@@ -486,7 +486,18 @@ fn open_file_in_workspace(
 
     if state.custom_editor_on_click {
         if state.custom_editor_inline {
-            crate::actions::open_in_editor_inline(root, file).map_err(|e| e.to_string())
+            // The popup pane belongs to no tab, so the editor must be given the
+            // CALLER pane's tab/workspace or it cannot find the current tab.
+            let tab = crate::launch::tab_of(&panes_str, &pane_id);
+            let ws = crate::launch::workspace_of(&panes_str, &pane_id);
+            let mut env = vec![("HERDR_PANE_ID", pane_id.as_str())];
+            if !tab.is_empty() {
+                env.push(("HERDR_TAB_ID", tab.as_str()));
+            }
+            if !ws.is_empty() {
+                env.push(("HERDR_WORKSPACE_ID", ws.as_str()));
+            }
+            crate::actions::open_in_editor_inline_env(root, file, &env).map_err(|e| e.to_string())
         } else {
             crate::actions::open_in_editor_tab(&pane_id, root, file).map_err(|e| e.to_string())
         }

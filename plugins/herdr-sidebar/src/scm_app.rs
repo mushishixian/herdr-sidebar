@@ -76,6 +76,122 @@ fn sync_label_for_status(status: &Status, syncing: bool) -> Option<String> {
     Some(format!("⟳ Sync Changes {}", counts.join(" ")))
 }
 
+/// Braille spinner frames for the AI commit button.
+const AI_SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// One animation step of the AI commit button (matches the event loop's frame).
+const AI_FRAME_MS: u128 = 120;
+/// Width of the shimmer band, in cells.
+const SHIMMER_BAND: usize = 6;
+/// Cells the shimmer band advances per animation step.
+const SHIMMER_STEP: usize = 2;
+
+/// Which half of the AI commit a repo's button is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AiPhase {
+    /// OpenCommit is writing the message.
+    Generating,
+    /// The message is in the box and the commit fires shortly.
+    Committing,
+}
+
+/// Animation frame index since the AI commit started.
+fn ai_frame(elapsed: std::time::Duration) -> usize {
+    (elapsed.as_millis() / AI_FRAME_MS) as usize
+}
+
+/// The AI button's label, with the spinner frame for `elapsed`.
+fn ai_button_label(phase: AiPhase, elapsed: std::time::Duration) -> String {
+    let frame = AI_SPINNER[ai_frame(elapsed) % AI_SPINNER.len()];
+    match phase {
+        AiPhase::Generating => format!("{frame} AI generating…"),
+        AiPhase::Committing => format!("{frame} Committing…"),
+    }
+}
+
+/// The text a Commit button shows: the AI label while an AI commit runs for
+/// its repo (it overrides Sync Changes), otherwise the sync or commit label.
+fn button_label(
+    status: &Status,
+    syncing: bool,
+    ai: Option<(AiPhase, std::time::Duration)>,
+) -> String {
+    if let Some((phase, elapsed)) = ai {
+        return ai_button_label(phase, elapsed);
+    }
+    if sync_is_primary(status) {
+        sync_label_for_status(status, syncing).unwrap_or_else(|| "⟳ Sync Changes".to_string())
+    } else {
+        "✓ Commit".to_string()
+    }
+}
+
+/// `width` cells of `label` (centered, truncated like the static button) with
+/// a [`SHIMMER_BAND`]-cell highlight sweeping left to right. The band cells
+/// take `band_bg`; every other cell keeps `base`'s background, and the label
+/// keeps `base`'s foreground everywhere.
+fn shimmer_spans(
+    label: &str,
+    width: usize,
+    elapsed: std::time::Duration,
+    base: Style,
+    band_bg: Color,
+) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthChar;
+
+    if width == 0 {
+        return Vec::new();
+    }
+    let label = truncate_to(label.to_string(), width);
+    let label_width = Span::raw(label.as_str()).width();
+    let left = width.saturating_sub(label_width) / 2;
+    let period = width + SHIMMER_BAND;
+    let band_start = (SHIMMER_STEP * ai_frame(elapsed)) % period;
+
+    // One entry per glyph: its text and first cell. Zero-width characters
+    // join the glyph before them.
+    let mut glyphs: Vec<(String, usize)> = Vec::new();
+    let mut cell = 0usize;
+    for _ in 0..left {
+        glyphs.push((" ".to_string(), cell));
+        cell += 1;
+    }
+    for c in label.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if cw == 0 {
+            if let Some(last) = glyphs.last_mut() {
+                last.0.push(c);
+            }
+            continue;
+        }
+        glyphs.push((c.to_string(), cell));
+        cell += cw;
+    }
+    while cell < width {
+        glyphs.push((" ".to_string(), cell));
+        cell += 1;
+    }
+
+    let band_style = base.bg(band_bg);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run: Option<(String, bool)> = None;
+    for (text, start) in glyphs {
+        let in_band = start >= band_start && start < band_start + SHIMMER_BAND;
+        match run.as_mut() {
+            Some((buf, band)) if *band == in_band => buf.push_str(&text),
+            _ => {
+                if let Some((buf, band)) = run.take() {
+                    spans.push(Span::styled(buf, if band { band_style } else { base }));
+                }
+                run = Some((text, in_band));
+            }
+        }
+    }
+    if let Some((buf, band)) = run {
+        spans.push(Span::styled(buf, if band { band_style } else { base }));
+    }
+    spans
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Focus {
     Message,
@@ -969,6 +1085,8 @@ pub struct App {
     ai_commit_due: Option<(usize, std::time::Instant)>,
     /// Last time this sidebar looked for an AI commit request (throttle).
     ai_commit_checked: Option<std::time::Instant>,
+    /// When the claimed AI commit started; drives the button animation.
+    ai_commit_started: Option<std::time::Instant>,
     /// The tab this sidebar lives in; AI commit requests are keyed by it.
     my_tab: Option<String>,
     overlay: Option<Overlay>,
@@ -1129,6 +1247,7 @@ impl App {
             ai_commit: None,
             ai_commit_due: None,
             ai_commit_checked: None,
+            ai_commit_started: None,
             my_tab,
             overlay: None,
             hovered: None,
@@ -2064,7 +2183,9 @@ impl App {
                 }
                 Row::Commit(r) => {
                     if line <= 2 && x > 0 && x < self.last_width.saturating_sub(1) {
-                        if self
+                        if self.ai_commit_busy_for(r) {
+                            // Already committing; the flash says so.
+                        } else if self
                             .repos
                             .get(r)
                             .is_some_and(|repo| sync_is_primary(&repo.status))
@@ -4095,6 +4216,39 @@ impl App {
             self.ai_commit_due = None;
             self.commit_ai_message(index);
         }
+        if !self.is_ai_commit_busy() {
+            self.ai_commit_started = None;
+        }
+    }
+
+    /// The AI commit phase running for repo `index`, with its elapsed time.
+    fn ai_state(&self, index: usize) -> Option<(AiPhase, std::time::Duration)> {
+        let phase = if self.ai_commit.as_ref().is_some_and(|(r, _)| *r == index) {
+            AiPhase::Generating
+        } else if self
+            .ai_commit_due
+            .as_ref()
+            .is_some_and(|(r, _)| *r == index)
+        {
+            AiPhase::Committing
+        } else {
+            return None;
+        };
+        let elapsed = self
+            .ai_commit_started
+            .map(|at| at.elapsed())
+            .unwrap_or_default();
+        Some((phase, elapsed))
+    }
+
+    /// True, with a flash, while repo `index`'s AI commit is still running:
+    /// its button must not start a second commit.
+    fn ai_commit_busy_for(&mut self, index: usize) -> bool {
+        if self.ai_state(index).is_none() {
+            return false;
+        }
+        self.flash = Some(("AI commit in progress…".into(), false));
+        true
     }
 
     fn take_ai_request(&mut self) {
@@ -4133,6 +4287,7 @@ impl App {
             let _ = tx.send(ai_commit_outcome(&git));
         });
         self.ai_commit = Some((index, rx));
+        self.ai_commit_started = Some(std::time::Instant::now());
         self.flash = Some((
             "✧ AI commit: generating message with OpenCommit…".into(),
             false,
@@ -4197,6 +4352,9 @@ impl App {
     }
 
     fn run_primary_action(&mut self) {
+        if self.ai_commit_busy_for(self.active) {
+            return;
+        }
         if self
             .active_repo()
             .is_some_and(|repo| sync_is_primary(&repo.status))
@@ -4208,6 +4366,9 @@ impl App {
     }
 
     fn commit_repo(&mut self, index: usize) {
+        if self.ai_commit_busy_for(index) {
+            return;
+        }
         let Some(repo) = self.repos.get_mut(index) else {
             return;
         };
@@ -4758,14 +4919,14 @@ impl App {
         } else {
             area
         };
-        let label = if self
-            .active_repo()
-            .is_some_and(|repo| sync_is_primary(&repo.status))
-        {
-            self.sync_label()
-                .unwrap_or_else(|| "⟳ Sync Changes".to_string())
-        } else {
-            "✓ Commit".to_string()
+        let ai = self.ai_state(self.active);
+        let syncing = self
+            .syncing
+            .as_ref()
+            .is_some_and(|(repo, _)| *repo == self.active);
+        let label = match self.active_repo() {
+            Some(repo) => button_label(&repo.status, syncing, ai),
+            None => "✓ Commit".to_string(),
         };
         draw_activity_caps(
             frame,
@@ -4774,7 +4935,19 @@ impl App {
             area.y + area.height.saturating_sub(1),
             bg,
         );
-        frame.render_widget(Paragraph::new(label).centered().style(style), inner);
+        match ai {
+            Some((_, elapsed)) => {
+                let spans = shimmer_spans(
+                    &label,
+                    inner.width as usize,
+                    elapsed,
+                    style,
+                    palette().button_focus_bg,
+                );
+                frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+            }
+            None => frame.render_widget(Paragraph::new(label).centered().style(style), inner),
+        }
         self.zones.button = Rect::new(inner.x, area.y, inner.width, area.height);
     }
 
@@ -4853,6 +5026,7 @@ impl App {
                     Row::Commit(r) => commit_button_item(
                         &self.repos[r].status,
                         syncing_repo == Some(r),
+                        self.ai_state(r),
                         r == active,
                         r == active && self.focus == Focus::Commit,
                         width,
@@ -5503,6 +5677,7 @@ fn message_box_item(
 fn commit_button_item(
     status: &Status,
     syncing: bool,
+    ai: Option<(AiPhase, std::time::Duration)>,
     active: bool,
     focused: bool,
     width: usize,
@@ -5512,36 +5687,43 @@ fn commit_button_item(
         (true, false) => (palette().button_bg, palette().button_fg),
         (false, _) => (palette().muted_button_bg, palette().muted_button_fg),
     };
-    let label = if sync_is_primary(status) {
-        sync_label_for_status(status, syncing).unwrap_or_else(|| "⟳ Sync Changes".to_string())
-    } else {
-        "✓ Commit".to_string()
-    };
+    let label = button_label(status, syncing, ai);
     let button_width = width.saturating_sub(2);
     let body_width = button_width;
-    let label = truncate_to(label, body_width);
-    let label_width = Span::raw(label.as_str()).width();
-    let left_pad = body_width.saturating_sub(label_width) / 2;
-    let right_pad = body_width.saturating_sub(left_pad + label_width);
     let mut style = Style::default().bg(bg).fg(fg);
     if focused {
         style = style.add_modifier(Modifier::BOLD);
     }
+    let body: Vec<Span<'static>> = match ai {
+        Some((_, elapsed)) => shimmer_spans(
+            &label,
+            body_width,
+            elapsed,
+            style,
+            palette().button_focus_bg,
+        ),
+        None => {
+            let label = truncate_to(label, body_width);
+            let label_width = Span::raw(label.as_str()).width();
+            let left_pad = body_width.saturating_sub(label_width) / 2;
+            let right_pad = body_width.saturating_sub(left_pad + label_width);
+            vec![Span::styled(
+                format!("{}{label}{}", " ".repeat(left_pad), " ".repeat(right_pad)),
+                style,
+            )]
+        }
+    };
     let cap_style = Style::default().fg(bg);
+    let mut middle = vec![Span::raw(" ")];
+    middle.extend(body);
+    middle.push(Span::raw(" "));
     ListItem::new(vec![
         Line::from(vec![
             Span::raw(" "),
             Span::styled("▄".repeat(button_width), cap_style),
             Span::raw(" "),
         ]),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                format!("{}{label}{}", " ".repeat(left_pad), " ".repeat(right_pad)),
-                style,
-            ),
-            Span::raw(" "),
-        ]),
+        Line::from(middle),
         Line::from(vec![
             Span::raw(" "),
             Span::styled("▀".repeat(button_width), cap_style),
@@ -6447,5 +6629,139 @@ mod tests {
 
         let action_left = dir_hover_action_at(10, 40, true, 3);
         assert_eq!(action_left, None);
+    }
+}
+
+#[cfg(test)]
+mod ai_commit_button_tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::widgets::Widget;
+    use std::time::Duration;
+
+    const BASE_BG: Color = Color::Rgb(1, 1, 1);
+    const BAND_BG: Color = Color::Rgb(2, 2, 2);
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// Per-cell background, expanding each span by its display width.
+    fn cell_bgs(spans: &[Span<'static>]) -> Vec<Option<Color>> {
+        let mut out = Vec::new();
+        for span in spans {
+            for c in span.content.chars() {
+                let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                for _ in 0..w {
+                    out.push(span.style.bg);
+                }
+            }
+        }
+        out
+    }
+
+    fn band_cells(spans: &[Span<'static>]) -> Vec<usize> {
+        cell_bgs(spans)
+            .iter()
+            .enumerate()
+            .filter(|(_, bg)| **bg == Some(BAND_BG))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn shimmer_spans_always_fill_exactly_width_cells() {
+        let labels = [
+            "",
+            "✓ Commit",
+            "⠋ AI generating…",
+            "漢字テスト",
+            "a very long label indeed",
+        ];
+        for width in [0usize, 1, 2, 5, 6, 7, 10, 30] {
+            for label in labels {
+                for elapsed in [0u64, 120, 500, 9_999] {
+                    let spans = shimmer_spans(
+                        label,
+                        width,
+                        ms(elapsed),
+                        Style::default().bg(BASE_BG),
+                        BAND_BG,
+                    );
+                    let total: usize = spans.iter().map(|s| s.width()).sum();
+                    assert_eq!(total, width, "label {label:?} width {width} at {elapsed}ms");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shimmer_band_starts_at_cell_zero_and_advances_two_cells_per_frame() {
+        let base = Style::default().bg(BASE_BG);
+        let at = |elapsed| band_cells(&shimmer_spans("", 10, ms(elapsed), base, BAND_BG));
+        // Band of 6 cells, clipped to the 10-cell button.
+        assert_eq!(at(0), (0..6).collect::<Vec<_>>());
+        assert_eq!(at(119), (0..6).collect::<Vec<_>>());
+        assert_eq!(at(120), (2..8).collect::<Vec<_>>());
+        assert_eq!(at(240), (4..10).collect::<Vec<_>>());
+        // period = width + band = 16: after 8 frames the band wraps to cell 0.
+        assert_eq!(at(960), (0..6).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn shimmer_keeps_label_foreground_and_centers_it() {
+        let fg = Color::Rgb(9, 9, 9);
+        let base = Style::default().bg(BASE_BG).fg(fg);
+        let spans = shimmer_spans("ab", 10, ms(0), base, BAND_BG);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "    ab    ");
+        assert!(spans.iter().all(|s| s.style.fg == Some(fg)));
+    }
+
+    #[test]
+    fn spinner_frame_index_cycles_every_ten_steps() {
+        let frame = |elapsed| ai_button_label(AiPhase::Generating, ms(elapsed));
+        assert!(frame(0).starts_with("⠋ AI generating"));
+        assert!(frame(120).starts_with("⠙ AI generating"));
+        assert!(frame(1_080).starts_with("⠏ AI generating"));
+        assert!(frame(1_200).starts_with("⠋ AI generating"));
+        assert_eq!(ai_button_label(AiPhase::Committing, ms(0)), "⠋ Committing…");
+    }
+
+    #[test]
+    fn ai_label_overrides_sync_label() {
+        let ahead = Status {
+            ahead: 43,
+            has_upstream: true,
+            ..Status::default()
+        };
+        assert!(sync_is_primary(&ahead));
+        let ai = Some((AiPhase::Generating, ms(0)));
+        assert_eq!(button_label(&ahead, false, ai), "⠋ AI generating…");
+        assert_eq!(button_label(&ahead, false, None), "⟳ Sync Changes 43↑");
+        assert_eq!(button_label(&Status::default(), false, None), "✓ Commit");
+    }
+
+    #[test]
+    fn commit_button_row_shows_ai_label_when_sync_is_primary() {
+        let ahead = Status {
+            ahead: 3,
+            has_upstream: true,
+            ..Status::default()
+        };
+        let area = Rect::new(0, 0, 30, 3);
+        let mut buf = Buffer::empty(area);
+        let item = commit_button_item(
+            &ahead,
+            false,
+            Some((AiPhase::Committing, ms(240))),
+            true,
+            false,
+            30,
+        );
+        List::new(vec![item]).render(area, &mut buf);
+        let row: String = (0..30).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(row.contains("⠹ Committing…"), "row was {row:?}");
+        assert!(!row.contains("Sync"), "row was {row:?}");
     }
 }

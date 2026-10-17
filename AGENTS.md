@@ -1463,6 +1463,10 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   File collection runs asynchronously on a background worker with `collect_quick_files` (skips `.git`,
   respects `.gitignore`). Selecting a file opens it in the caller's workspace/tab via `viewer::open_in_pane`
   (or configured custom editor) and exits, closing the popup. Both `Esc` and `Ctrl+Q` cancel.
+- A popup pane belongs to NO tab, so a process it starts inherits no usable `HERDR_TAB_ID` /
+  `HERDR_WORKSPACE_ID`. The inline custom editor is therefore started with the CALLER pane's
+  `HERDR_PANE_ID`/`HERDR_TAB_ID`/`HERDR_WORKSPACE_ID` (from `pane.list`); without them the dotfiles
+  `fresh-open` (which only uses editors in the current workspace) failed with "no current herdr tab".
 
 ## Herdr workspace
 
