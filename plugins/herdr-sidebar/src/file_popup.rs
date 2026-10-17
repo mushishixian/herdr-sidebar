@@ -34,6 +34,13 @@ use crate::ui::{input_tail, keep_visible_scroll, palette, selection_style, trunc
 
 /// Request Herdr to open the file search popup for the focused pane's directory.
 pub fn open() -> io::Result<()> {
+    request_popup_pane("file-search", "70%", "60%")
+}
+
+/// Ask Herdr to spawn the popup pane `entrypoint` (a manifest `[[panes]]` id)
+/// over the focused pane. Shared by every session-modal search popup: the caller
+/// pane and its cwd travel in the spawn env so the popup can act on them.
+pub fn request_popup_pane(entrypoint: &str, width: &str, height: &str) -> io::Result<()> {
     let mut env = crate::state::spawn_env();
     let caller_pane_id = focused_pane_id();
     let caller_cwd = focused_cwd();
@@ -55,10 +62,10 @@ pub fn open() -> io::Result<()> {
         "plugin.pane.open",
         serde_json::json!({
             "plugin_id": "herdr-sidebar",
-            "entrypoint": "file-search",
+            "entrypoint": entrypoint,
             "placement": "popup",
-            "width": "70%",
-            "height": "60%",
+            "width": width,
+            "height": height,
             "env": env,
         }),
     )
@@ -313,7 +320,7 @@ impl App {
         let path = file.path.clone();
         let root = self.root.clone();
         let caller = self.caller_pane_id.clone();
-        match open_file_in_workspace(caller.as_deref(), &root, &path) {
+        match open_file_in_workspace(caller.as_deref(), &root, &path, None) {
             Ok(()) => {
                 self.done = true;
             }
@@ -452,10 +459,14 @@ impl App {
     }
 }
 
-fn open_file_in_workspace(
+/// Open `file` in the caller's workspace: the custom editor when opted in,
+/// otherwise the preview pane. `line` (1-based) positions the view on a search
+/// hit; the custom editor tab mode cannot address a line and ignores it.
+pub fn open_file_in_workspace(
     caller_pane_id: Option<&str>,
     root: &Path,
     file: &Path,
+    line: Option<usize>,
 ) -> Result<(), String> {
     let state = crate::state::load_state();
     let panes_str = crate::ipc::call_text("pane.list", serde_json::json!({}))
@@ -497,13 +508,20 @@ fn open_file_in_workspace(
             if !ws.is_empty() {
                 env.push(("HERDR_WORKSPACE_ID", ws.as_str()));
             }
-            crate::actions::open_in_editor_inline_env(root, file, &env).map_err(|e| e.to_string())
+            match line {
+                Some(line) => crate::actions::open_in_editor_inline_at(root, file, line, &env),
+                None => crate::actions::open_in_editor_inline_env(root, file, &env),
+            }
+            .map_err(|e| e.to_string())
         } else {
             crate::actions::open_in_editor_tab(&pane_id, root, file).map_err(|e| e.to_string())
         }
     } else {
         let doc_key = crate::viewer::doc_key_for_file(file);
-        let payload = crate::viewer::file_request(file);
+        let payload = match line {
+            Some(line) => crate::viewer::file_request_at(file, line),
+            None => crate::viewer::file_request(file),
+        };
         crate::viewer::open_in_pane(&pane_id, root, &doc_key, &payload).map(|_| ())
     }
 }

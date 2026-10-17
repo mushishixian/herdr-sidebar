@@ -30,6 +30,12 @@ fn main() {
             }
             return;
         }
+        Some("--search-popup-open") => {
+            // Windows twin of the Unix action: the popup request itself is
+            // GUI-subsystem safe (no console is spawned).
+            let _ = herdr_sidebar::search_popup::open();
+            return;
+        }
         Some("--git-pull") => {
             if let Err(error) = herdr_sidebar::git_action::run("pull") {
                 eprintln!("{error}");

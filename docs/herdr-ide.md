@@ -81,6 +81,7 @@ Afterwards, once:
 | `ctrl+b /` | Search in files |
 | `ctrl+b d` | Source Control view |
 | `ctrl+q` | File-search popup (fuzzy find, opens in Fresh/preview) |
+| `ctrl+alt+f` | Search in files popup (file contents, live preview; opens at the matching line) |
 | `ctrl+alt+c` | Git: switch branch (popup; type a new name to create) |
 | `ctrl+alt+r` | Git: rename current branch (popup) |
 | `ctrl+alt+x` | Git: merge a branch into the current one (popup) |
@@ -92,6 +93,13 @@ Afterwards, once:
 | `ctrl+b ?` | Every herdr binding |
 
 Git keys act on the repository of the **focused pane's** current directory.
+
+Two popups search from the focused pane's project. **Ctrl+Q** is quick open: a
+fuzzy file list, and Enter opens the pick in Fresh or the preview. **Ctrl+Alt+F**
+searches file contents: a query box with Match Case, Whole Word and Regex toggles
+(Alt+C / Alt+W / Alt+R) on the left, grouped results, and a syntax-highlighted
+preview of the selected match on the right. Enter opens the match at its line in
+Fresh. Narrow terminals drop the preview and keep the list.
 
 **Shortcut toasts:** every custom shortcut (herdr and Fresh) shows a small
 toast with its name and key, e.g. "Switch branch / Ctrl+Alt+C", as a reminder.

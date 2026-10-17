@@ -1468,6 +1468,43 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   `HERDR_PANE_ID`/`HERDR_TAB_ID`/`HERDR_WORKSPACE_ID` (from `pane.list`); without them the dotfiles
   `fresh-open` (which only uses editors in the current workspace) failed with "no current herdr tab".
 
+### Search popup (Ctrl+Alt+F)
+
+- Entry points: `--search-popup` (pane `[[panes]] id = "search-popup"`, placement `popup`, 90%x85%,
+  `src/search_popup.rs::run`) and `--search-popup-open` (action `search-popup`, plus the Windows twin
+  `search-popup-windows` that goes through `herdr-sidebar-ensure.exe`). The host key is
+  `ctrl+alt+f` in the dotfiles `config.toml` (it started as Ctrl+Shift+F, which Windows Terminal and
+  similar hosts keep for Find; Ctrl+Alt+letter passes through, like the git chords). Both the open request and the pane
+  spawn share `file_popup::request_popup_pane`, so the caller-pane env travels the same way as Ctrl+Q.
+- Engine: `src/content_search.rs` (LIB), moved out of `explorer_app.rs` so the Explorer Search view
+  and the popup run ONE implementation (`SearchOptions`, `collect_content_hits`, `compile_pattern`,
+  `content_line_match_ranges`, `highlighted_search_context`). Do not copy it back into a view.
+- The query runs on a worker thread after a 300 ms settle (`DEBOUNCE`). Every search gets a generation;
+  results from an older generation are dropped in `tick`. An old worker keeps running to completion
+  (the engine has no cancel flag), so the cost of a superseded query is bounded by one scan.
+- Hidden files: the popup searches with hidden files shown, matching the Explorer's default
+  (`Tree::show_hidden` starts `true`). That flag is NOT persisted in `state.json`; there is no saved
+  setting to follow. `.git` and `.gitignore`d paths are always skipped by the engine.
+- Preview: reads at most 1 MiB (`PREVIEW_MAX_BYTES`); a binary or invalid-UTF-8 file shows a message
+  instead. The highlighted window is hit ±300 lines (`preview_window`), highlighted through
+  `syntax::highlight_lines` (the grammar state at the window start is approximate). It returns
+  exactly one line per input line: the earlier `highlight(window.join("\n"))` + length check lost a
+  line whenever the window ENDED on a blank line (LinesWithEndings drops it), and the mismatch threw
+  away ALL colors. Grammar detection gets the FILE's first line, so extensionless shebang scripts
+  stay colored when the window starts mid-file. The last
+  file read is cached, so moving between matches in one file does not re-read it. The hit line gets
+  `palette().hover_bg` plus the Search view's match accent, and the view scrolls to center the hit.
+  Below 90 columns the preview is hidden and the list alone is drawn.
+- Opening a match: `file_popup::open_file_in_workspace(caller, root, file, Some(line))`. Inline
+  custom editor: `actions::open_in_editor_inline_at`, with the line in the argv via `{line}`, or as
+  `<file>:<line>` for a `fresh`/`fresh-open` program, or the plain file otherwise. Custom editor TAB
+  mode ignores the line; with no custom editor the preview pane opens via `viewer::file_request_at`.
+- Keys: typing edits the query (caret with Left/Right/Home/End, Backspace/Delete, Ctrl+U clears).
+  Alt+C / Alt+W / Alt+R toggle Match Case / Whole Word / Regex (clicking the `Aa`/`ab`/`.*` chips
+  does the same). Up/Down and PgUp/PgDn move over headers and matches alike; Enter or a double-click
+  opens (a header opens its first match). Esc cancels. The wheel scrolls the list view, or the
+  preview when the pointer is over it.
+
 ## Herdr workspace
 
 `herdr-layout.yaml` at the repo root describes the workspace (Coordinator tab running claude,

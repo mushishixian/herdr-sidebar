@@ -92,12 +92,34 @@ placement = "popup"
 command = ["./target/release/herdr-sidebar", "--file-popup"]
 platforms = ["linux", "macos"]
 
+# Content search (Ctrl+Alt+F): a session-modal popup with a live preview.
+[[panes]]
+id = "search-popup"
+title = "Search in files"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--search-popup"]
+platforms = ["linux", "macos"]
+
 [[actions]]
 id = "file-search"
 platforms = ["linux", "macos"]
 title = "Quick Open (Popup)"
 description = "Popup: quickly search and open files in current workspace/repo."
 command = ["./target/release/herdr-sidebar", "--file-popup-open"]
+
+[[actions]]
+id = "search-popup"
+platforms = ["linux", "macos"]
+title = "Search in files (popup)"
+description = "Popup: search file contents in the current workspace/repo with a live preview."
+command = ["./target/release/herdr-sidebar", "--search-popup-open"]
+
+[[actions]]
+id = "search-popup-windows"
+platforms = ["windows"]
+title = "Search in files (popup)"
+description = "Popup: search file contents in the current workspace/repo with a live preview."
+command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--search-popup-open"]
 
 [[actions]]
 id = "git-pull"
@@ -131,14 +153,14 @@ command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--git-push"]
 id = "git-commit-ai"
 platforms = ["linux", "macos"]
 title = "Git: AI Commit"
-description = "Stage all changes (git add -A) and commit with an OpenCommit-generated message."
+description = "Open Source Control, stage all changes, put an OpenCommit message in the Message box and commit it."
 command = ["./target/release/herdr-sidebar", "--git-commit"]
 
 [[actions]]
 id = "git-commit-ai-windows"
 platforms = ["windows"]
 title = "Git: AI Commit"
-description = "Stage all changes (git add -A) and commit with an OpenCommit-generated message."
+description = "Open Source Control, stage all changes, put an OpenCommit message in the Message box and commit it."
 command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--git-commit"]
 
 [[actions]]

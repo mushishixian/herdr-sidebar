@@ -688,25 +688,60 @@ pub fn configured_editor() -> Option<String> {
 }
 
 fn editor_argv(command: &str, file: &Path) -> io::Result<Vec<String>> {
-    let mut argv = split_editor_command(command)?;
+    let argv = split_editor_command(command)?;
     if argv.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "editor command is empty",
         ));
     }
-    let file = file.display().to_string();
+    Ok(fill_editor_argv(argv, &file.display().to_string(), None))
+}
+
+/// [`editor_argv`] for a search hit: the editor is opened at `line` (1-based).
+/// Three shapes, in order: a `{line}` placeholder in any argument is
+/// substituted; a `fresh` / `fresh-open` program gets `<file>:<line>` as its
+/// file argument (Fresh's own `path:line` syntax); anything else gets the plain
+/// file, since there is no portable way to address a line.
+fn editor_argv_at(command: &str, file: &Path, line: usize) -> io::Result<Vec<String>> {
+    let argv = split_editor_command(command)?;
+    if argv.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "editor command is empty",
+        ));
+    }
+    let plain = file.display().to_string();
+    if argv.iter().any(|arg| arg.contains("{line}")) {
+        return Ok(fill_editor_argv(argv, &plain, Some(line)));
+    }
+    let program = Path::new(&argv[0])
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if matches!(program, "fresh" | "fresh-open") {
+        return Ok(fill_editor_argv(argv, &format!("{plain}:{line}"), None));
+    }
+    Ok(fill_editor_argv(argv, &plain, None))
+}
+
+/// Substitute `{file}` (and `{line}` when given) in every argument. A command
+/// with no `{file}` placeholder gets the file appended, as before.
+fn fill_editor_argv(mut argv: Vec<String>, file: &str, line: Option<usize>) -> Vec<String> {
     let mut replaced = false;
     for arg in &mut argv {
+        if let Some(line) = line {
+            *arg = arg.replace("{line}", &line.to_string());
+        }
         if arg.contains("{file}") {
-            *arg = arg.replace("{file}", &file);
+            *arg = arg.replace("{file}", file);
             replaced = true;
         }
     }
     if !replaced {
-        argv.push(file);
+        argv.push(file.to_string());
     }
-    Ok(argv)
+    argv
 }
 
 fn split_editor_command(command: &str) -> io::Result<Vec<String>> {
@@ -825,6 +860,26 @@ pub fn open_in_editor_inline(root: &Path, file: &Path) -> io::Result<()> {
 /// process. Source Control uses `HERDR_SIDEBAR_OPEN_DIFF=1` to ask the editor
 /// to show the file's diff against HEAD.
 pub fn open_in_editor_inline_env(root: &Path, file: &Path, env: &[(&str, &str)]) -> io::Result<()> {
+    spawn_inline_editor(root, file, None, env)
+}
+
+/// [`open_in_editor_inline_env`] positioned at `line` (1-based). See
+/// [`editor_argv_at`] for how the configured command receives the line.
+pub fn open_in_editor_inline_at(
+    root: &Path,
+    file: &Path,
+    line: usize,
+    env: &[(&str, &str)],
+) -> io::Result<()> {
+    spawn_inline_editor(root, file, Some(line), env)
+}
+
+fn spawn_inline_editor(
+    root: &Path,
+    file: &Path,
+    line: Option<usize>,
+    env: &[(&str, &str)],
+) -> io::Result<()> {
     let command = configured_editor().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -836,7 +891,11 @@ pub fn open_in_editor_inline_env(root: &Path, file: &Path, env: &[(&str, &str)])
     } else {
         root.join(file)
     };
-    let mut child = inline_editor_command(&command, root, &editor_file, env)?.spawn()?;
+    let argv = match line {
+        Some(line) => editor_argv_at(&command, &editor_file, line)?,
+        None => editor_argv(&command, &editor_file)?,
+    };
+    let mut child = inline_command_from_argv(argv, root, env).spawn()?;
     // Reap it in the background so finished editors don't linger as zombies.
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -844,16 +903,15 @@ pub fn open_in_editor_inline_env(root: &Path, file: &Path, env: &[(&str, &str)])
     Ok(())
 }
 
-/// The inline editor process, unspawned: argv from the configured command,
-/// cwd at the repo root, null stdio, its own process group on Unix, and the
-/// extra `env` pairs applied on top of the inherited environment.
-fn inline_editor_command(
-    command: &str,
+/// The inline editor process, unspawned: argv already resolved from the
+/// configured command, cwd at the repo root, null stdio, its own process group
+/// on Unix, and the extra `env` pairs applied on top of the inherited
+/// environment. `argv` is never empty (`editor_argv` rejects that).
+fn inline_command_from_argv(
+    argv: Vec<String>,
     root: &Path,
-    editor_file: &Path,
     env: &[(&str, &str)],
-) -> io::Result<std::process::Command> {
-    let argv = editor_argv(command, editor_file)?;
+) -> std::process::Command {
     let mut child = std::process::Command::new(&argv[0]);
     child
         .args(&argv[1..])
@@ -868,7 +926,7 @@ fn inline_editor_command(
         // Its own process group: a Ctrl+C in the sidebar never reaches it.
         child.process_group(0);
     }
-    Ok(child)
+    child
 }
 
 pub fn open_in_editor_tab(my_pane_id: &str, root: &Path, file: &Path) -> io::Result<()> {
@@ -1106,13 +1164,11 @@ mod tests {
     fn inline_editor_command_applies_extra_env_and_repo_cwd() {
         let root = Path::new("/repo");
         let file = Path::new("/repo/src/main.rs");
-        let cmd = inline_editor_command(
-            "fresh --wait",
+        let cmd = inline_command_from_argv(
+            editor_argv("fresh --wait", file).expect("argv"),
             root,
-            file,
             &[("HERDR_SIDEBAR_OPEN_DIFF", "1")],
-        )
-        .expect("builds");
+        );
         let envs: Vec<_> = cmd
             .get_envs()
             .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
@@ -1302,6 +1358,31 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("exited with"), "{error}");
+    }
+
+    #[test]
+    fn line_aware_editor_argv_has_three_shapes() {
+        let file = Path::new("/repo/src/main.rs");
+        // 1. An explicit {line} placeholder wins and is substituted.
+        assert_eq!(
+            editor_argv_at("code --goto {file}:{line}", file, 12).unwrap(),
+            vec!["code", "--goto", "/repo/src/main.rs:12"]
+        );
+        // 2. Fresh (by basename) gets path:line as its file argument.
+        assert_eq!(
+            editor_argv_at("/home/u/bin/fresh-open {file}", file, 7).unwrap(),
+            vec!["/home/u/bin/fresh-open", "/repo/src/main.rs:7"]
+        );
+        assert_eq!(
+            editor_argv_at("fresh --wait", file, 7).unwrap(),
+            vec!["fresh", "--wait", "/repo/src/main.rs:7"]
+        );
+        // 3. Anything else gets the plain file; the line is dropped.
+        assert_eq!(
+            editor_argv_at("nvim -f", file, 7).unwrap(),
+            vec!["nvim", "-f", "/repo/src/main.rs"]
+        );
+        assert!(editor_argv_at("   ", file, 7).is_err());
     }
 
     #[test]
