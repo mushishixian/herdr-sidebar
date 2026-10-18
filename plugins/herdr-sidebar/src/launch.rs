@@ -755,6 +755,73 @@ pub fn workspace_label(workspace_list_json: &str, workspace_id: &str) -> String 
         .unwrap_or_default()
 }
 
+/// Label the plugin gives a workspace's generated first tab.
+pub const FIRST_TAB_LABEL: &str = "main";
+
+/// The tab fields the first-tab rename cares about, shared by `tab.get` and
+/// `tab.list` replies.
+#[derive(Deserialize)]
+struct Tab {
+    tab_id: Option<String>,
+    workspace_id: Option<String>,
+    label: Option<String>,
+    number: Option<u64>,
+}
+
+/// The tab id of herdr's *untouched* first tab, else `None`.
+///
+/// herdr labels a workspace's initial tab with its position ("1") and the tab
+/// bar renders that label. Both halves matter: a number above 1 belongs to a
+/// later tab, and a label that differs from the number was chosen by someone
+/// (a human, or this plugin's preview suffix), so it is left alone.
+fn generated_first_tab(tab: &Tab) -> Option<String> {
+    let tab_id = tab.tab_id.as_deref().filter(|id| !id.is_empty())?;
+    let number = tab.number?;
+    let label = tab.label.as_deref()?;
+    (number == 1 && label == number.to_string()).then(|| tab_id.to_string())
+}
+
+/// `(tab_id, label)` to rename for herdr's generated first tab, else `None`.
+pub fn first_tab_rename(tab_info_json: &str) -> Option<(String, &'static str)> {
+    #[derive(Deserialize)]
+    struct Msg {
+        result: Res,
+    }
+    #[derive(Deserialize)]
+    struct Res {
+        tab: Option<Tab>,
+    }
+    let msg = serde_json::from_str::<Msg>(strip_bom(tab_info_json)).ok()?;
+    Some((generated_first_tab(&msg.result.tab?)?, FIRST_TAB_LABEL))
+}
+
+/// The tab id of `workspace_id`'s generated first tab from a `tab.list` reply
+/// (`{"result":{"tabs":[..]}}`), else `None`.
+///
+/// `workspace_created` payloads name a workspace but not a tab, so the target
+/// has to be found in the workspace's tab list instead of guessed from the
+/// globally focused tab.
+pub fn generated_first_tab_in(tab_list_json: &str, workspace_id: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Msg {
+        result: Res,
+    }
+    #[derive(Deserialize)]
+    struct Res {
+        #[serde(default)]
+        tabs: Vec<Tab>,
+    }
+    if workspace_id.is_empty() {
+        return None;
+    }
+    let msg = serde_json::from_str::<Msg>(strip_bom(tab_list_json)).ok()?;
+    msg.result
+        .tabs
+        .iter()
+        .filter(|tab| tab.workspace_id.as_deref() == Some(workspace_id))
+        .find_map(generated_first_tab)
+}
+
 /// The focused pane's tab id from a `pane list` JSON (flag-safe, else empty).
 pub fn focused_tab(pane_list_json: &str) -> String {
     let Ok(msg) = serde_json::from_str::<PaneListMsg>(strip_bom(pane_list_json)) else {
@@ -1597,6 +1664,101 @@ mod tests {
         assert_eq!(workspace_label(json, "wQ"), "");
         assert_eq!(workspace_label(json, ""), "");
         assert_eq!(workspace_label("garbage", "wG"), "");
+    }
+
+    /// herdr labels a new workspace's first tab with its position, and only that
+    /// generated label is ours to replace.
+    #[test]
+    fn first_tab_renames_the_generated_label_only() {
+        assert_eq!(
+            first_tab_rename(
+                r#"{"id":"cli:tab:get","result":{"tab":{"agent_status":"idle","focused":true,"label":"1","number":1,"tab_id":"wD:t1","workspace_id":"wD"},"type":"tab_info"}}"#
+            ),
+            Some(("wD:t1".to_string(), FIRST_TAB_LABEL))
+        );
+        // A later tab keeps its own number, even though its label matches it.
+        assert_eq!(
+            first_tab_rename(r#"{"result":{"tab":{"label":"2","number":2,"tab_id":"wD:t2"}}}"#),
+            None
+        );
+        // A human's name, and our own rename, are never overwritten.
+        assert_eq!(
+            first_tab_rename(
+                r#"{"result":{"tab":{"label":"tremor","number":1,"tab_id":"wD:t1"}}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            first_tab_rename(r#"{"result":{"tab":{"label":"main","number":1,"tab_id":"wD:t1"}}}"#),
+            None
+        );
+    }
+
+    /// A missing field or an unparsable reply means "nothing to rename": the
+    /// hook must never guess at a tab id.
+    #[test]
+    fn first_tab_rename_degrades_quietly() {
+        for hostile in [
+            r#"{"result":{"tab":{"label":"1","number":1}}}"#,
+            r#"{"result":{"tab":{"number":1,"tab_id":"wD:t1"}}}"#,
+            r#"{"result":{"tab":{"label":"1","tab_id":"wD:t1"}}}"#,
+            r#"{"result":{"tab":{"label":"1","number":1,"tab_id":""}}}"#,
+            r#"{"result":{}}"#,
+            r#"{"result":{"tab":{"label":"1","number":"1","tab_id":"wD:t1"}}}"#,
+            r#"{"result":null}"#,
+            "null",
+            r#"{"error":{"code":"x","message":"y"}}"#,
+            "garbage",
+        ] {
+            assert_eq!(first_tab_rename(hostile), None, "{hostile}");
+        }
+    }
+
+    /// `workspace_created` names a workspace but no tab, so the generated first
+    /// tab is found in that workspace's tab list — never borrowed from another
+    /// workspace or from a tab somebody already named.
+    #[test]
+    fn generated_first_tab_in_picks_only_the_untouched_first_tab() {
+        let list = r#"{"result":{"tabs":[
+            {"label":"9","number":9,"tab_id":"wX:t9","workspace_id":"wX"},
+            {"label":"1","number":1,"tab_id":"wD:t1","workspace_id":"wD"},
+            {"label":"2","number":2,"tab_id":"wD:t2","workspace_id":"wD"}
+        ]}}"#;
+        assert_eq!(
+            generated_first_tab_in(list, "wD"),
+            Some("wD:t1".to_string())
+        );
+
+        // A human's name on the first tab is theirs to keep.
+        assert_eq!(
+            generated_first_tab_in(
+                r#"{"result":{"tabs":[{"label":"tremor","number":1,"tab_id":"wD:t1","workspace_id":"wD"}]}}"#,
+                "wD"
+            ),
+            None
+        );
+        // Only the first tab, never a later numbered one.
+        assert_eq!(
+            generated_first_tab_in(
+                r#"{"result":{"tabs":[{"label":"1","number":1,"tab_id":"wD:t1","workspace_id":"wD"}]}}"#,
+                "wE"
+            ),
+            None,
+            "another workspace's tabs are not ours to rename"
+        );
+        assert_eq!(
+            generated_first_tab_in(
+                r#"{"result":{"tabs":[{"label":"2","number":2,"tab_id":"wD:t2","workspace_id":"wD"}]}}"#,
+                "wD"
+            ),
+            None
+        );
+
+        // No workspace to look in, and replies we do not understand.
+        for hostile in ["", r#"{"result":{"tabs":[]}}"#, "garbage", "null"] {
+            assert_eq!(generated_first_tab_in(hostile, "wD"), None, "{hostile}");
+        }
+        assert_eq!(generated_first_tab_in(list, ""), None);
     }
 
     fn pane_list(panes: &str) -> String {

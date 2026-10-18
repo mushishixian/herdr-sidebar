@@ -407,17 +407,26 @@ pub fn run(mode: Mode) -> std::io::Result<()> {
         Mode::Toggle(view) => view,
         Mode::Activate(target) => target.pane_view(state.merged),
     };
-    // Auto-open off (⚙ Settings): hooks leave closed tabs alone; the user's
-    // explicit toggle still works.
-    if !explicit && !state.auto_open {
-        return Ok(());
-    }
     let event_json = std::env::var("HERDR_PLUGIN_EVENT_JSON").unwrap_or_default();
     let creation_event = !explicit
         && matches!(
             launch::event_kind(&event_json).as_str(),
             "tab_created" | "workspace_created"
         );
+    // Tab naming is about the tab bar, not the sidebar, so it runs before the
+    // auto-open gate below. Creation events and explicit user actions only:
+    // focus hooks fire in bursts (and every later tab is numbered too), so
+    // probing each one would be pure noise. This MUST precede
+    // `LaunchLock::acquire`: the socket call below can block for seconds, and
+    // no launcher-lock holder may wait behind it.
+    if should_label_first_tab(explicit, &event_json) {
+        label_first_tab(explicit, &event_json);
+    }
+    // Auto-open off (⚙ Settings): hooks leave closed tabs alone; the user's
+    // explicit toggle still works.
+    if !explicit && !state.auto_open {
+        return Ok(());
+    }
     let wait_for_lock = must_wait_for_lock(explicit, &event_json);
     let Some(_lock) = LaunchLock::acquire(wait_for_lock) else {
         return Ok(());
@@ -979,6 +988,55 @@ fn must_wait_for_lock(explicit: bool, event_json: &str) -> bool {
     explicit || launch::event_kind(event_json) == "tab_created"
 }
 
+/// Whether this invocation may rename a generated first tab: explicit user
+/// actions, plus the two events that create one. Focus hooks are excluded —
+/// they fire in bursts and every later tab is numbered too.
+fn should_label_first_tab(explicit: bool, event_json: &str) -> bool {
+    explicit
+        || matches!(
+            launch::event_kind(event_json).as_str(),
+            "tab_created" | "workspace_created"
+        )
+}
+
+/// Rename herdr's generated first-tab label ("1") to `main`.
+///
+/// Called only for creation events and explicit user actions, and only from
+/// before the launcher lock is taken (see `run`). The target comes from the
+/// event payload, not `HERDR_TAB_ID`: on `workspace_created` herdr can inject
+/// the PREVIOUS workspace's focused tab, which is exactly why
+/// [`launch::event_scope_with_tab_context`] distrusts it too. A payload naming
+/// a tab is read with `tab.get`; a bare workspace id (`workspace_created`) is
+/// resolved through `tab.list`. Hooks must stay silent, so every failure — no
+/// scope at all, no socket, a reply we do not understand — is swallowed: a tab
+/// keeps its number and nothing else changes.
+fn label_first_tab(explicit: bool, event_json: &str) {
+    let scope = if explicit {
+        std::env::var("HERDR_TAB_ID").unwrap_or_default()
+    } else {
+        launch::event_scope(event_json)
+    };
+    if scope.is_empty() {
+        return;
+    }
+    let target = if scope.contains(':') {
+        ipc::call_text("tab.get", serde_json::json!({ "tab_id": scope }))
+            .ok()
+            .and_then(|info| launch::first_tab_rename(&info))
+    } else {
+        ipc::call_text("tab.list", serde_json::json!({ "workspace_id": scope }))
+            .ok()
+            .and_then(|list| launch::generated_first_tab_in(&list, &scope))
+            .map(|tab_id| (tab_id, launch::FIRST_TAB_LABEL))
+    };
+    if let Some((tab_id, label)) = target {
+        let _ = ipc::call_text(
+            "tab.rename",
+            serde_json::json!({ "tab_id": tab_id, "label": label }),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1269,6 +1327,36 @@ mod tests {
         assert!(must_wait_for_lock(false, r#"{"event":"tab.created"}"#));
         assert!(must_wait_for_lock(true, ""));
         assert!(!must_wait_for_lock(false, r#"{"event":"tab_focused"}"#));
+    }
+
+    /// Naming a tab is fixed by creation and by the user asking for it; focus
+    /// hooks fire in bursts and each later tab is numbered too.
+    #[test]
+    fn only_creation_events_and_explicit_actions_label_a_tab() {
+        for payload in [
+            "",
+            "garbage",
+            r#"{"type":"tab_created"}"#,
+            r#"{"type":"workspace_created"}"#,
+        ] {
+            assert!(should_label_first_tab(true, payload), "{payload}");
+        }
+        for payload in [
+            r#"{"type":"tab_created"}"#,
+            r#"{"type":"workspace_created"}"#,
+            r#"{"event":"tab.created"}"#,
+        ] {
+            assert!(should_label_first_tab(false, payload), "{payload}");
+        }
+        for payload in [
+            r#"{"type":"tab_focused"}"#,
+            r#"{"type":"workspace_focused"}"#,
+            r#"{"type":"pane_focused"}"#,
+            "garbage",
+            "",
+        ] {
+            assert!(!should_label_first_tab(false, payload), "{payload}");
+        }
     }
 
     #[test]
