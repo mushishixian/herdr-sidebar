@@ -873,9 +873,10 @@ enum Overlay {
     ConfirmDiscardAll {
         repo: usize,
     },
-    /// A y/N prompt guarding a destructive git command (reset, delete, drop).
+    /// A y/N dialog guarding a destructive git command (reset, delete, drop).
     ConfirmGit {
         repo: usize,
+        title: String,
         prompt: String,
         args: Vec<String>,
     },
@@ -965,6 +966,9 @@ struct ClickZones {
     sync: Rect,
     /// Branch text in the Source Control header.
     header_branch: Rect,
+    /// Yes / No buttons of the y/N confirm (zero-sized when none is open).
+    confirm_yes: Rect,
+    confirm_no: Rect,
     git_footer: FooterZones,
 }
 
@@ -2810,6 +2814,24 @@ impl App {
             Reopen(u16, u16),
             Picker(PickerAction),
         }
+        // A left-click on a y/N confirm's buttons is the same key as the
+        // keyboard: Yes is `y`, No is Esc (any other key cancels too). Clicks
+        // anywhere else do nothing.
+        if matches!(
+            self.overlay,
+            Some(Overlay::ConfirmDiscard { .. })
+                | Some(Overlay::ConfirmDiscardAll { .. })
+                | Some(Overlay::ConfirmGit { .. })
+        ) {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if hits(self.zones.confirm_yes, mouse.column, mouse.row) {
+                    self.overlay_key(KeyEvent::from(KeyCode::Char('y')));
+                } else if hits(self.zones.confirm_no, mouse.column, mouse.row) {
+                    self.overlay_key(KeyEvent::from(KeyCode::Esc));
+                }
+            }
+            return;
+        }
         let row_count = self.settings_rows().len();
         let cmd = match self.overlay.as_mut() {
             Some(Overlay::Settings {
@@ -2887,7 +2909,6 @@ impl App {
                 }
             }
             Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.mouse(mouse)),
-            // The discard confirm is keyboard-driven (y/N); clicks do nothing.
             _ => Cmd::Nothing,
         };
         match cmd {
@@ -3612,7 +3633,8 @@ impl App {
             MenuAction::Reveal => reveal(std::path::Path::new(&spec), true),
             MenuAction::RemoveWorktree => self.confirm_git(
                 repo,
-                format!("Remove worktree '{spec}'? (y/N)"),
+                "Remove worktree",
+                format!("Remove worktree '{spec}'?"),
                 vec!["worktree".into(), "remove".into(), "--".into(), spec],
             ),
             MenuAction::CopyRef => {
@@ -3646,22 +3668,26 @@ impl App {
             MenuAction::FetchRemote => self.run_git(repo, &["fetch", "--", &spec]),
             MenuAction::ResetHere => self.confirm_git(
                 repo,
-                format!("Reset current branch to {spec} (mixed)? (y/N)"),
+                "Reset branch",
+                format!("Reset current branch to {spec} (mixed)?"),
                 drawer_reset_args(&git_spec),
             ),
             MenuAction::DeleteBranch => self.confirm_git(
                 repo,
-                format!("Delete branch '{spec}'? (y/N)"),
+                "Delete branch",
+                format!("Delete branch '{spec}'?"),
                 vec!["branch".into(), "-d".into(), "--".into(), spec],
             ),
             MenuAction::StashDrop => self.confirm_git(
                 repo,
-                format!("Drop {spec}? (y/N)"),
+                "Drop stash",
+                format!("Drop {spec}?"),
                 vec!["stash".into(), "drop".into(), "--".into(), spec],
             ),
             MenuAction::DeleteTag => self.confirm_git(
                 repo,
-                format!("Delete tag '{spec}'? (y/N)"),
+                "Delete tag",
+                format!("Delete tag '{spec}'?"),
                 vec!["tag".into(), "-d".into(), "--".into(), spec],
             ),
             _ => {}
@@ -3682,8 +3708,15 @@ impl App {
         self.refresh();
     }
 
-    fn confirm_git(&mut self, repo: usize, prompt: String, args: Vec<String>) {
-        self.overlay = Some(Overlay::ConfirmGit { repo, prompt, args });
+    /// Open the y/N dialog for a git command: `title` names the action on the
+    /// border, `prompt` is the question in the body.
+    fn confirm_git(&mut self, repo: usize, title: &str, prompt: String, args: Vec<String>) {
+        self.overlay = Some(Overlay::ConfirmGit {
+            repo,
+            title: title.to_string(),
+            prompt,
+            args,
+        });
     }
 
     /// The confirmed non-forcing delete. Unmerged commits are the one refusal
@@ -3708,9 +3741,8 @@ impl App {
             }
             Err(DeleteRefused::NotMerged) => self.confirm_git(
                 repo,
-                format!(
-                    "'{branch}' is not fully merged — delete anyway and lose its commits? (y/N)"
-                ),
+                "Force delete branch",
+                format!("'{branch}' is not fully merged — delete anyway and lose its commits?"),
                 vec!["branch".into(), "-D".into(), "--".into(), branch],
             ),
         }
@@ -4942,8 +4974,35 @@ impl App {
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
             Some(Overlay::Settings { .. }) => self.draw_settings(frame),
             Some(Overlay::PaneRename { .. }) => self.draw_pane_rename(frame),
+            Some(Overlay::ConfirmDiscard { .. })
+            | Some(Overlay::ConfirmDiscardAll { .. })
+            | Some(Overlay::ConfirmGit { .. }) => self.draw_confirm(frame),
             _ => {}
         }
+    }
+
+    /// Render the y/N confirm (discard, or a git command) as a bordered dialog
+    /// over the body. `y` or a click on Yes confirms, and any other key or a
+    /// click on No cancels.
+    fn draw_confirm(&mut self, frame: &mut Frame) {
+        self.zones.confirm_yes = Rect::default();
+        self.zones.confirm_no = Rect::default();
+        let (title, message) = match self.overlay.as_ref() {
+            Some(Overlay::ConfirmDiscard { entry, .. }) => (
+                "Discard changes".to_string(),
+                format!("Discard changes to '{}'?", entry.path),
+            ),
+            Some(Overlay::ConfirmDiscardAll { .. }) => (
+                "Discard all changes".to_string(),
+                "Discard all unstaged changes?".to_string(),
+            ),
+            Some(Overlay::ConfirmGit { title, prompt, .. }) => (title.clone(), prompt.clone()),
+            _ => return,
+        };
+        let (yes, no) =
+            herdr_sidebar::ui::draw_confirm_dialog(frame, &title, &message, self.mouse_pos);
+        self.zones.confirm_yes = yes;
+        self.zones.confirm_no = no;
     }
 
     /// The pane-rename field as a bordered dialog over the body — a footer
@@ -5544,33 +5603,19 @@ impl App {
         visible
     }
 
-    /// Footer content: a flash message or confirm prompt (WRAPPED — the
-    /// one-line assumption used to clip them mid-question in narrow panes),
-    /// or the hotkey hints.
+    /// Footer content: a flash message (WRAPPED — the one-line assumption used
+    /// to clip them in narrow panes), or the hotkey hints. The y/N confirms
+    /// are dialogs over the body (see `draw_confirm`), not footer lines.
     fn footer_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let message: Option<(String, Color)> = match (&self.overlay, &self.flash) {
-            (Some(Overlay::ConfirmDiscard { entry, .. }), _) => Some((
-                format!("Discard changes to '{}'? (y/N)", entry.path),
-                palette().deleted,
-            )),
-            (Some(Overlay::ConfirmDiscardAll { .. }), _) => Some((
-                "Discard all unstaged changes? (y/N)".to_string(),
-                palette().deleted,
-            )),
-            (Some(Overlay::ConfirmGit { prompt, .. }), _) => {
-                Some((prompt.clone(), palette().deleted))
-            }
-            (_, Some((text, is_error))) => {
-                let color = if *is_error {
-                    palette().deleted
-                } else {
-                    palette().untracked
-                };
-                let prefix = if *is_error { "" } else { "✓ " };
-                Some((format!("{prefix}{text}"), color))
-            }
-            _ => None,
-        };
+        let message: Option<(String, Color)> = self.flash.as_ref().map(|(text, is_error)| {
+            let color = if *is_error {
+                palette().deleted
+            } else {
+                palette().untracked
+            };
+            let prefix = if *is_error { "" } else { "✓ " };
+            (format!("{prefix}{text}"), color)
+        });
         if let Some((msg, color)) = message {
             return wrap_footer_message(&msg, width, 4)
                 .into_iter()

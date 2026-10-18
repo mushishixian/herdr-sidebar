@@ -664,21 +664,143 @@ pub const INPUT_DIALOG_MAX_WIDTH: u16 = 60;
 /// the label on the border needs (still capped by `max` and by `area`), so a
 /// narrow pane can show what it is asking for.
 pub fn input_dialog_rect(area: Rect, title: &str, max: u16) -> Rect {
+    dialog_rect(area, dialog_width(area, title, max), 3)
+}
+
+/// Width shared by every dialog: fitted to the pane, capped at `max`, and wide
+/// enough for the border label (see `input_dialog_rect`).
+fn dialog_width(area: Rect, title: &str, max: u16) -> u16 {
     let max = max.max(1);
     let label_width = u16::try_from(Span::raw(title).width() + 4).unwrap_or(u16::MAX);
-    let width = area
-        .width
+    area.width
         .saturating_sub(2)
         .clamp(1, max)
         .max(label_width.min(max))
-        .min(area.width);
-    let height = 3.min(area.height);
+        .min(area.width)
+}
+
+/// A `width` by `height` dialog (height capped by `area`), centered
+/// horizontally and one third of the way down.
+fn dialog_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let height = height.min(area.height);
     Rect::new(
         area.x + (area.width.saturating_sub(width)) / 2,
         area.y + (area.height.saturating_sub(height)) / 3,
         width,
         height,
     )
+}
+
+/// Message rows a confirm dialog shows in a box `inner_height` rows tall: the
+/// last row is reserved for the buttons, so a message cut short by a small pane
+/// never pushes the buttons off the box.
+fn confirm_body_lines(message: &str, inner_width: u16, inner_height: u16) -> Vec<String> {
+    let mut lines = wrap_footer_message(message, inner_width, 0);
+    lines.truncate(usize::from(inner_height.saturating_sub(1)));
+    lines
+}
+
+/// Rect of a y/N confirm dialog: the input dialog's width rule, and a height of
+/// the border rows, the wrapped message and one button row (capped by `area`).
+pub fn confirm_dialog_rect(area: Rect, title: &str, message: &str) -> Rect {
+    let width = dialog_width(area, title, INPUT_DIALOG_MAX_WIDTH);
+    let inner_width = width.saturating_sub(2);
+    let body = wrap_footer_message(message, inner_width, 0).len();
+    let height = u16::try_from(body + 3).unwrap_or(u16::MAX);
+    dialog_rect(area, width, height)
+}
+
+/// The confirm buttons' layout for `dialog`: each button's rect and label, Yes
+/// first. Both `confirm_button_rects` and the drawing read it, so the clicks
+/// always land on what is drawn. The widest form is padded labels with one
+/// cell before the right border; a narrow box drops the padding, then the
+/// border gap. `None` when even `Yes No` does not fit, or the box has no
+/// button row.
+fn confirm_buttons(dialog: Rect) -> Option<[(Rect, &'static str); 2]> {
+    // (yes label, no label, cells kept clear before the right border)
+    const FORMS: [(&str, &str, u16); 3] =
+        [(" Yes ", " No ", 1), ("Yes", "No", 1), ("Yes", "No", 0)];
+    let inner_width = dialog.width.saturating_sub(2);
+    if dialog.height < 3 || inner_width == 0 {
+        return None;
+    }
+    let row = dialog.y + dialog.height - 2;
+    // One cell between the two buttons.
+    let (yes, no, margin) = FORMS.into_iter().find(|(yes, no, margin)| {
+        let fits = u16::try_from(yes.len() + no.len() + 1).unwrap_or(u16::MAX);
+        fits.saturating_add(*margin) <= inner_width
+    })?;
+    let yes_w = u16::try_from(yes.len()).unwrap_or(u16::MAX);
+    let no_w = u16::try_from(no.len()).unwrap_or(u16::MAX);
+    let right = dialog.x + 1 + inner_width;
+    let no_x = right - margin - no_w;
+    let yes_x = no_x - 1 - yes_w;
+    Some([
+        (Rect::new(yes_x, row, yes_w, 1), yes),
+        (Rect::new(no_x, row, no_w, 1), no),
+    ])
+}
+
+/// The `(yes, no)` button rects of a confirm dialog box `dialog` (the rect from
+/// `confirm_dialog_rect`): 1-row rects on its last inner row, Yes left of No.
+/// Both are zero-sized when the box cannot show them, so no click can hit an
+/// invisible button; the keyboard still answers.
+pub fn confirm_button_rects(dialog: Rect) -> (Rect, Rect) {
+    match confirm_buttons(dialog) {
+        Some([(yes, _), (no, _)]) => (yes, no),
+        None => (Rect::default(), Rect::default()),
+    }
+}
+
+/// Draw a y/N confirm (`title` on the border, the wrapped `message`, and a row
+/// of `Yes` / `No` buttons on the last row) as a box over the body. The footer
+/// used to carry these questions in red; a box keeps them in view. `hover` is
+/// the mouse cell, which highlights the button under it. Returns the `(yes, no)`
+/// button rects for click handling.
+pub fn draw_confirm_dialog(
+    frame: &mut Frame,
+    title: &str,
+    message: &str,
+    hover: Option<(u16, u16)>,
+) -> (Rect, Rect) {
+    let rect = confirm_dialog_rect(frame.area(), title, message);
+    // A block TITLE is silently clipped rather than wrapped, so trim it to the
+    // border's usable width first.
+    let label = truncate_to(title.to_string(), usize::from(rect.width.saturating_sub(4)));
+    let inner_width = rect.width.saturating_sub(2);
+    let inner_height = rect.height.saturating_sub(2);
+
+    let lines: Vec<Line> = confirm_body_lines(message, inner_width, inner_height)
+        .into_iter()
+        .map(Line::from)
+        .collect();
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(format!(" {label} "))
+                .border_style(Style::default().fg(palette().accent)),
+        ),
+        rect,
+    );
+
+    let colors = palette();
+    if let Some(buttons) = confirm_buttons(rect) {
+        for (button, text) in buttons {
+            let hovered = hover.is_some_and(|(x, y)| hits(button, x, y));
+            let style = if hovered {
+                Style::default()
+                    .bg(colors.button_focus_bg)
+                    .fg(colors.button_fg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().bg(colors.button_bg).fg(colors.button_fg)
+            };
+            frame.render_widget(Paragraph::new(Line::styled(text, style)), button);
+        }
+    }
+    confirm_button_rects(rect)
 }
 
 /// Draw a one-line input dialog (`title` on the border, `input`'s TAIL so the
@@ -803,6 +925,93 @@ mod tests {
             assert!(encloses(area, rect), "{rect:?} escaped {area:?}");
             assert!(rect.width <= INPUT_DIALOG_MAX_WIDTH);
         }
+    }
+
+    #[test]
+    fn confirm_dialog_fits_narrow_and_wide_panes() {
+        let message = "Delete 'a-rather-long-file-name.rs' permanently?";
+        for area in [Rect::new(0, 0, 30, 20), Rect::new(0, 0, 200, 50)] {
+            let rect = confirm_dialog_rect(area, "Delete file", message);
+            assert!(encloses(area, rect), "{rect:?} escaped {area:?}");
+            assert!(rect.width <= INPUT_DIALOG_MAX_WIDTH);
+            assert_eq!(rect.y, (area.height - rect.height) / 3, "one third down");
+        }
+        // The narrow box keeps the one-cell gutter and centers.
+        let narrow = confirm_dialog_rect(Rect::new(0, 0, 30, 20), "Delete file", message);
+        assert_eq!(narrow.width, 28);
+        assert_eq!(narrow.x, 1);
+        // A wide pane caps the width at the input dialog maximum.
+        let wide = confirm_dialog_rect(Rect::new(0, 0, 200, 50), "Delete file", message);
+        assert_eq!(wide.width, INPUT_DIALOG_MAX_WIDTH);
+        assert_eq!(wide.x, (200 - INPUT_DIALOG_MAX_WIDTH) / 2);
+    }
+
+    #[test]
+    fn confirm_dialog_grows_with_the_message_and_stays_in_the_pane() {
+        let area = Rect::new(0, 0, 30, 40);
+        let short = confirm_dialog_rect(area, "Discard changes", "Discard?");
+        // Borders + one message row + hint row.
+        assert_eq!(short.height, 4);
+        let long_message = "Reset current branch to origin/main with a mixed reset and keep the \
+                            working tree as it is, then carry on as before for ever and ever.";
+        let long = confirm_dialog_rect(area, "Discard changes", long_message);
+        assert!(long.height > short.height, "{long:?} vs {short:?}");
+        assert!(encloses(area, long));
+        // A tiny pane clamps the height and keeps the box inside.
+        let tiny = Rect::new(2, 3, 12, 3);
+        let clipped = confirm_dialog_rect(tiny, "Discard changes", long_message);
+        assert!(encloses(tiny, clipped), "{clipped:?} escaped {tiny:?}");
+        assert!(clipped.height <= tiny.height);
+    }
+
+    #[test]
+    fn confirm_body_keeps_the_button_row() {
+        // A message longer than the box loses its tail, never the button row.
+        let lines = confirm_body_lines(&"word ".repeat(40), 10, 3);
+        assert_eq!(lines.len(), 2, "inner height 3 minus the button row");
+    }
+
+    #[test]
+    fn confirm_buttons_sit_side_by_side_on_the_last_row() {
+        let message = "Delete 'a-rather-long-file-name.rs' permanently?";
+        for area in [Rect::new(0, 0, 30, 20), Rect::new(0, 0, 200, 50)] {
+            let dialog = confirm_dialog_rect(area, "Delete file", message);
+            let (yes, no) = confirm_button_rects(dialog);
+            let last_row = dialog.y + dialog.height - 2;
+            for button in [yes, no] {
+                assert_eq!(button.y, last_row, "{button:?} off the last inner row");
+                assert_eq!(button.height, 1);
+                assert!(encloses(dialog, button), "{button:?} escaped {dialog:?}");
+                // Never on the border columns.
+                assert!(button.x > dialog.x && button.x + button.width < dialog.x + dialog.width);
+            }
+            assert!(
+                yes.x + yes.width < no.x,
+                "buttons overlap or touch: {yes:?} {no:?}"
+            );
+            // Padded labels keep one cell before the right border.
+            assert_eq!(no.x + no.width, dialog.x + dialog.width - 2);
+        }
+    }
+
+    #[test]
+    fn confirm_buttons_narrow_fallbacks_stay_inside_the_box() {
+        // Inner width 10: padded labels (11 cells) no longer fit, bare ones do.
+        let dialog = Rect::new(0, 0, 12, 5);
+        let (yes, no) = confirm_button_rects(dialog);
+        assert_eq!((yes.width, no.width), (3, 2), "bare labels");
+        assert!(yes.x < no.x && encloses(dialog, yes) && encloses(dialog, no));
+        // Inner width 6: no border gap is left, the bare pair sits flush.
+        let flush = Rect::new(0, 0, 8, 5);
+        let (yes, no) = confirm_button_rects(flush);
+        assert_eq!(no.x + no.width, flush.x + flush.width - 1);
+        assert!(yes.x + yes.width < no.x && encloses(flush, no));
+        // Inner width 5: even `YesNo` does not fit, so nothing is drawn or hit.
+        let (yes, no) = confirm_button_rects(Rect::new(0, 0, 7, 5));
+        assert_eq!((yes, no), (Rect::default(), Rect::default()));
+        // No button row at all in a box two rows tall.
+        let (yes, no) = confirm_button_rects(Rect::new(0, 0, 40, 2));
+        assert_eq!((yes, no), (Rect::default(), Rect::default()));
     }
 
     /// Perceived brightness on a 0..1 scale, the measure `darken_for_light`

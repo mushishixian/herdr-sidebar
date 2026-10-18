@@ -818,6 +818,16 @@ HACKING.md — budget time for that before promising a patched build.
   user-rejected as too easy to miss while typing. So the footer no longer reserves a row for
   them (`footer_height` has no prompt branch) — if you add another text prompt, draw it with
   the same helper instead of reviving that branch. Field/key handling is unchanged.
+  **y/N confirms are dialogs too** (`ui::draw_confirm_dialog` / `confirm_dialog_rect`, same width
+  rule and placement): Explorer `ConfirmDelete` and SCM `ConfirmDiscard` / `ConfirmDiscardAll` /
+  `ConfirmGit` (which carries its own border `title`). The message wraps inside the box, and the last
+  row is always the clickable `Yes` / `No` button pair (right-aligned, `button_bg`, `button_focus_bg`
+  on hover), so prompt strings no longer end in `(y/N)`. They were red footer text the user wanted as
+  popups like rename, with buttons to click instead of typing. `ui::confirm_button_rects` is the ONE
+  geometry shared by drawing and hit-testing; it shrinks the labels in narrow boxes and returns zero
+  rects when nothing fits, so an invisible button is never clickable. A click is routed through
+  `overlay_key` (`y` for Yes, Esc for No), so mouse and keyboard cannot drift. Keys are unchanged:
+  `y`/`Y` confirms, any other key cancels.
 - **`Confirm delete`** (`confirm_delete`, default on, Settings row right above `Change
   folder…`) gates ONLY the Explorer's Delete menu entry: off deletes immediately through the
   same `delete_path` helper the confirmed `Cmd::DeleteConfirmed` path uses, so the two cannot

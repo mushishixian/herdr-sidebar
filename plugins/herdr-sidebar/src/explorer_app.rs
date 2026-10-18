@@ -432,6 +432,9 @@ pub struct App {
     last_mouse: Option<std::time::Instant>,
     /// Last known mouse position, for the button hover highlight.
     mouse_pos: Option<(u16, u16)>,
+    /// Yes / No button rects of the delete confirm, from the last draw; `None`
+    /// when no confirm is open.
+    confirm_buttons: Option<(Rect, Rect)>,
     /// Last left-click (row index, when) for double-click detection.
     last_click: Option<(usize, std::time::Instant)>,
     /// Where the most recent preview landed, with its document key — so a
@@ -581,6 +584,7 @@ impl App {
             title_zones: Vec::new(),
             last_mouse: None,
             mouse_pos: None,
+            confirm_buttons: None,
             last_click: None,
             last_preview: None,
             last_beat: std::time::Instant::now(),
@@ -1963,6 +1967,20 @@ impl App {
     }
 
     fn overlay_mouse(&mut self, mouse: MouseEvent) {
+        // A left-click on the delete confirm's buttons is the same key as the
+        // keyboard: Yes is `y`, No is Esc (any other key cancels too). Clicks
+        // anywhere else do nothing.
+        if matches!(self.overlay, Some(Overlay::ConfirmDelete { .. })) {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                let (yes, no) = self.confirm_buttons.unwrap_or_default();
+                if hits(yes, mouse.column, mouse.row) {
+                    self.overlay_key(KeyEvent::from(KeyCode::Char('y')));
+                } else if hits(no, mouse.column, mouse.row) {
+                    self.overlay_key(KeyEvent::from(KeyCode::Esc));
+                }
+            }
+            return;
+        }
         enum Cmd {
             Nothing,
             Close,
@@ -2054,7 +2072,7 @@ impl App {
                 }
             }
             Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.mouse(mouse)),
-            // Prompts/confirms are keyboard-driven; clicks do nothing.
+            // Prompts are keyboard-driven; clicks do nothing.
             _ => Cmd::Nothing,
         };
         match cmd {
@@ -3779,6 +3797,7 @@ impl App {
             }
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
             Some(Overlay::Prompt { .. }) => self.draw_prompt(frame),
+            Some(Overlay::ConfirmDelete { .. }) => self.draw_confirm(frame),
             Some(Overlay::Settings { .. }) => self.draw_settings(frame),
             Some(Overlay::QuickOpen { .. }) => self.draw_quick_open(frame),
             _ => {}
@@ -3877,10 +3896,9 @@ impl App {
         hints
     }
 
-    /// Rows the footer needs at `width`: notices and confirms WRAP in narrow
-    /// panes (a one-line assumption used to clip "Delete '…' permanently?
-    /// (y/N)" mid-question); hints wrap as before. The name prompt is a
-    /// dialog over the body, so it asks for no footer row.
+    /// Rows the footer needs at `width`: notices WRAP in narrow panes; hints
+    /// wrap as before. The name prompt and the delete confirm are dialogs over
+    /// the body, so they ask for no footer row.
     fn footer_height(&self, width: u16) -> u16 {
         let git_footer = self.sidebar_state.show_git_footer && self.git_footer_status.is_some();
         let content = if let Some((msg, _)) = self.footer_message() {
@@ -3895,23 +3913,12 @@ impl App {
         (content + u16::from(git_footer)).max(1)
     }
 
-    /// The uniform-style footer message, if one is active: a notice, or the
-    /// delete confirm. Shared by footer_height and draw so they agree.
+    /// The uniform-style footer message, if one is active: a notice. The
+    /// delete confirm is a dialog (see `draw_confirm`). Shared by
+    /// footer_height and draw so they agree.
     fn footer_message(&self) -> Option<(String, Color)> {
-        if let Some(notice) = &self.notice {
-            return Some((notice.clone(), palette().modified));
-        }
-        if let Some(Overlay::ConfirmDelete { path, .. }) = &self.overlay {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            return Some((
-                format!("Delete '{name}' permanently? (y/N)"),
-                palette().deleted,
-            ));
-        }
-        None
+        let notice = self.notice.as_ref()?;
+        Some((notice.clone(), palette().modified))
     }
 
     /// The VS Code activity bar: view-switcher icons plus a detach button.
@@ -4076,6 +4083,31 @@ impl App {
         };
         let (title, input) = (title.as_str(), input.as_str());
         herdr_sidebar::ui::draw_input_dialog(frame, title, input);
+    }
+
+    /// Render the delete confirm as a bordered dialog over the body. The title
+    /// names what is deleted; `y` or a click on Yes confirms, and any other key
+    /// or a click on No cancels.
+    fn draw_confirm(&mut self, frame: &mut Frame) {
+        self.confirm_buttons = None;
+        let Some(Overlay::ConfirmDelete { path, is_dir }) = self.overlay.as_ref() else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let title = if *is_dir {
+            "Delete folder"
+        } else {
+            "Delete file"
+        };
+        self.confirm_buttons = Some(herdr_sidebar::ui::draw_confirm_dialog(
+            frame,
+            title,
+            &format!("Delete '{name}' permanently?"),
+            self.mouse_pos,
+        ));
     }
 
     /// Delete `path` and report the outcome: shared by the confirmed overlay
