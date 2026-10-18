@@ -139,6 +139,15 @@ new_editor_pane() { # term root ratio
 # The sidebar's "Terminal height" row also applies itself to the tab it runs in;
 # these helpers only matter when a layout is (re)built.
 SIDEBAR_STATE_FILE=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr-sidebar/state.json
+# The sidebar stamps the moment it starts (re)docking into a tab, in its own
+# runtime dir. A re-dock reaches a full-height column by moving panes through a
+# temporary tab, and herdr re-creates every split that touches at a DEFAULT
+# ratio — so a sample taken meanwhile is an artifact of the dock, not a choice
+# the user made.
+SIDEBAR_DOCK_STAMP=${SIDEBAR_STATE_FILE%/*}/dock/restore.stamp
+# How long a dock stamp suppresses size sampling: the repair itself plus the
+# focus events that trail it (the dock's own pane.focused / tab.focused).
+DOCK_SUPPRESS_SECS=20
 # Historical editor share; also the fallback inside editor_split_ratio.
 DEFAULT_EDITOR_RATIO=0.7
 # Historical Agent-column split ratio; also the fallback in agent_split_ratio.
@@ -175,8 +184,8 @@ agent_width_cols() {
   local cols
   cols=$(sidebar_state_number agent_width) || cols=''
   [ -n "$cols" ] || return 0
-  # Same bounds as the sidebar's row (40..240 columns, 8 per step).
-  if [ "$cols" -lt 40 ]; then cols=40; elif [ "$cols" -gt 240 ]; then cols=240; fi
+  # Same bounds as the sidebar's row (24..320 columns, 4 per step).
+  if [ "$cols" -lt 24 ]; then cols=24; elif [ "$cols" -gt 320 ]; then cols=320; fi
   printf '%s\n' "$cols"
 }
 
@@ -310,6 +319,25 @@ tab_fresh_daemon() {
       and (.tokens.fresh_daemon // "") != "") | .tokens.fresh_daemon) // empty'
 }
 
+# True while herdr-sidebar is (re)docking into this machine's tabs — see
+# SIDEBAR_DOCK_STAMP. A missing, empty, beyond-DOCK_SUPPRESS_SECS, or garbled
+# stamp is false: never suppress a save on a guess, and never let one live
+# marker disable saving forever. A stamp from the FUTURE is a clock change, not
+# a live dock. Pure apart from one `date` call; never fails.
+recent_dock_reorder() {
+  local stamp now
+  [ -r "$SIDEBAR_DOCK_STAMP" ] || return 1
+  read -r stamp <"$SIDEBAR_DOCK_STAMP" 2>/dev/null || return 1
+  case $stamp in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  now=$(date +%s 2>/dev/null) || return 1
+  case $now in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "$stamp" -le "$now" ] && [ $((now - stamp)) -le "$DOCK_SUPPRESS_SECS" ]
+}
+
 # Read a layout (`pane layout` reply) on stdin and print the two IDE splits as
 # {"agent": {"path": [...], "ratio": r}, "editor": {...}}, omitting any that
 # is not there. Paths are the layout ids decoded: split_1_01 -> [false,true].
@@ -348,6 +376,13 @@ saved_entry() {
 # Silent no-op when the tab has no tokened Fresh pane or nothing to record.
 save_sizes() {
   local tab=$1 panes=${2:-} fresh daemon term agent layout splits term_rows new
+  # A herdr-sidebar re-dock is in flight (or just finished): its full-height
+  # repair rebuilds this tab's splits, and herdr gives each re-created split a
+  # DEFAULT ratio. Sampling now would record that intermediate ratio as the
+  # user's own and lose the real one for good, so skip the WHOLE pass (both
+  # fields, like the empty-entry early-out below). The stamp covers the repair
+  # and the focus events it emits; the next real focus change saves again.
+  recent_dock_reorder && return 0
   [ -n "$panes" ] || panes=$("$HERDR" pane list)
   read -r fresh daemon < <(jq -r --arg tab "$tab" --arg label "$FRESH_LABEL" '
     first(.result.panes[] | select(.tab_id == $tab and .label == $label

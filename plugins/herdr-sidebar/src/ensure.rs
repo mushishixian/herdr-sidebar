@@ -747,6 +747,12 @@ fn open(
     let state = crate::state::load_state();
     let dock_right = state.dock_right;
     let layout = ipc::call_text("pane.layout", serde_json::json!({ "pane_id": fid }))?;
+    // Snapshot the tab's ratios BEFORE docking: the full-height repair below
+    // moves panes through a temporary tab, and herdr re-creates each split it
+    // touches at a DEFAULT ratio. Without the snapshot a re-dock would reset
+    // the IDE layer's remembered editor/terminal height and Agent width.
+    let ratios_before = launch::split_ratios(&layout);
+    let dock_tab = launch::tab_of(panes_json, fid);
     let plan = launch::open_plan(&layout, dock_right, state.sidebar_width);
     let mut fields = plan.split('\t');
     let target = fields
@@ -762,6 +768,8 @@ fn open(
         .next()
         .and_then(|s| s.parse::<bool>().ok())
         .unwrap_or(!dock_right);
+
+    mark_dock_restore();
 
     #[cfg(unix)]
     let new_pane = ipc::open_plugin_pane(
@@ -838,6 +846,7 @@ fn open(
         )?;
     }
     full_height_repair(&new_pane, dock_right);
+    restore_split_ratios(&dock_tab, &new_pane, &ratios_before);
 
     if focus_new {
         focus(&new_pane)?;
@@ -924,6 +933,45 @@ fn full_height_repair(pane_id: &str, dock_right: bool) {
                 "focus": false,
             }),
         );
+    }
+}
+
+/// Stamp the moment a dock starts repairing this tab's layout. The shell IDE
+/// layer reads `dock/restore.stamp` (in our private runtime dir) and skips
+/// persisting pane sizes while it is fresh: the repair re-creates splits at
+/// default ratios, and a `pane.focused` sample taken meanwhile would record
+/// those as the user's own. Best effort — a missing stamp only costs a save.
+fn mark_dock_restore() {
+    let dir = crate::rundir::dir("dock");
+    if crate::rundir::ensure_private(&dir).is_err() {
+        return;
+    }
+    let _ = std::fs::write(
+        dir.join("restore.stamp"),
+        format!("{}\n", crate::state::unix_now()),
+    );
+}
+
+/// Put back every split ratio the pre-dock snapshot had (see
+/// [`launch::restore_split_ratios`]), which is what keeps a re-dock from
+/// resetting the tab's editor/terminal height and Agent column width. Best
+/// effort: any miss leaves the layout as the repair left it.
+fn restore_split_ratios(tab: &str, new_pane: &str, before: &[launch::SplitRatio]) {
+    let Ok(layout) = ipc::call_text("pane.layout", serde_json::json!({ "pane_id": new_pane }))
+    else {
+        return;
+    };
+    for (path, ratio) in launch::restore_split_ratios(before, &layout, new_pane) {
+        let mut params = serde_json::json!({ "path": path, "ratio": ratio });
+        // The new pane is not in the pre-split `pane list`, so the tab comes
+        // from the pane the dock targeted; without one the pane form still
+        // resolves the same tab.
+        if tab.is_empty() {
+            params["pane_id"] = serde_json::Value::String(new_pane.to_string());
+        } else {
+            params["tab_id"] = serde_json::Value::String(tab.to_string());
+        }
+        let _ = ipc::call_text("layout.set_split_ratio", params);
     }
 }
 

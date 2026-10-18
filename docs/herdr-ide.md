@@ -240,7 +240,10 @@ menu, `s` Settings, `b` hide, `c` change folder, `q` quit.
   and `herdr-ide-term` reopens the terminal at the saved ratio, via
   `layout.set_split_ratio`. Splits are found by geometry; a split id such as
   `split_2_01` encodes its tree path (0 = first child). The sidebar's own
-  column is left to herdr-sidebar.
+  column is left to herdr-sidebar. A sidebar re-dock no longer resets these: the
+  sidebar restores a tab's split ratios around its own full-height repair, and
+  `ide-save-sizes` stays quiet for ~20 s afterwards (its `dock/restore.stamp`)
+  so the intermediate ratios are never recorded.
 - **Terminal height** (the `Terminal` "command line" under the editor) has a default in the
   sidebar's ⚙ Settings: the row `Terminal height`, one below `Sidebar width`. It is measured in
   ROWS (4–40, `←`/`→` in 2-row steps; `⏎` resets it to `auto`). Only the height is configurable —
@@ -253,7 +256,7 @@ menu, `s` Settings, `b` hide, `c` change folder, `q` quit.
   `~/.local/state/herdr/plugins/herdr-sidebar/state.json` (`terminal_height`); it never writes
   there.
 - **Agent width** (the rightmost `Agent` column) has the same kind of default: the ⚙ Settings row
-  `Agent width`, one below `Terminal height`. It is measured in COLUMNS (40–240, `←`/`→` in 8-column
+  `Agent width`, one below `Terminal height`. It is measured in COLUMNS (24–320, `←`/`→` in 4-column
   steps; `⏎` resets it to `auto`). Only the width is configurable — the height is whatever the tab
   is. `←`/`→` also resizes the Agent column in the tab the sidebar is in, right away; `⏎` does not
   touch the current layout. Build order (`herdr-ide`'s two sites) is: `sizes.json`'s remembered

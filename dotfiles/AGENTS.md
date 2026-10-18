@@ -25,7 +25,7 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 | An apt, npm or cargo dependency | `dotfiles/packages.txt` (apt) or the installer step (npm/cargo) in `dotfiles/install.sh` or `docs/install-herdr-ide.sh`; the *Install* section of `docs/herdr-ide.md`; a check in the verify step |
 | A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; the verify list in `docs/install-herdr-ide.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
 | A sidebar setting default | `dotfiles/herdr-sidebar/state.json`, and the *Sidebar defaults* paragraph in `docs/herdr-ide.md` (*herdr-sidebar fork*) |
-| Anything the sidebar (Rust) and the dotfiles scripts share (env vars such as `HERDR_SIDEBAR_OPEN_DIFF`, `HERDR_SIDEBAR_PREVIEW_HOSTED`, `FRESH_IDE_DAEMON`, `DOTFILES_IDE_BIN`; pane tokens such as `fresh_daemon`, `hs-preview-host`; request files such as the AI-commit request, the live-diff request and `preview-host/<pane>.req`; `editor-command.txt`; the sidebar's `state.json` read at build time for `terminal_height` and `agent_width`) | Both sides in the same change. Document the contract in the root `AGENTS.md` (Rust side) and in `docs/herdr-ide.md` |
+| Anything the sidebar (Rust) and the dotfiles scripts share (env vars such as `HERDR_SIDEBAR_OPEN_DIFF`, `HERDR_SIDEBAR_PREVIEW_HOSTED`, `FRESH_IDE_DAEMON`, `DOTFILES_IDE_BIN`; pane tokens such as `fresh_daemon`, `hs-preview-host`; request files such as the AI-commit request, the live-diff request, `preview-host/<pane>.req` and the dock-suppression stamp `<herdr-sidebar state dir>/dock/restore.stamp` that `ide-save-sizes` reads; `editor-command.txt`; the sidebar's `state.json` read at build time for `terminal_height` and `agent_width`) | Both sides in the same change. Document the contract in the root `AGENTS.md` (Rust side) and in `docs/herdr-ide.md` |
 | Pane labels `Fresh`, `Terminal`, `Agent`, or the plugin id `dotfiles-ide` | Do not rename them: scripts, state dirs and key bindings look them up. Show new display text through a metadata title (`pane report-metadata --title`) |
 | Any user-visible behaviour | `docs/herdr-ide.md`: the feature section, *Keys* and *Troubleshooting*; the fork commit table (*herdr-sidebar fork*): its `*uncommitted*` row until the user commits, then the hash |
 | Install, upgrade or migration behaviour | `docs/install-herdr-ide.sh` (and its `--help` text, the `sed -n '2,11p'` header) and `dotfiles/install.sh` (its `--help` header, `sed -n '2,14p'`); the *Install*, *Migrating* and *Updating* sections of `docs/herdr-ide.md` |
@@ -85,6 +85,14 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 - Under `set -o pipefail`, `cmd | grep -q` can fail although it matched (grep exits early, `cmd` gets
   SIGPIPE). Use `grep … >/dev/null` in conditions.
 - `pane.send_text` sends raw bytes (a newline submits an agent prompt); `pane.send_input` bracket-pastes.
+- **`ide-save-sizes` must not sample while the sidebar is re-docking.** The sidebar's
+  full-height repair rebuilds the tab's splits through a temporary tab and herdr re-creates each
+  at a DEFAULT ratio, so a `pane.focused`/`tab.focused` sample taken meanwhile would record that
+  intermediate ratio as the user's own. `lib.sh`'s `save_sizes` therefore returns early while
+  `recent_dock_reorder` sees a `dock/restore.stamp` (unix seconds, written by the sidebar just
+  before it splits) younger than `DOCK_SUPPRESS_SECS` (20 s). The sidebar restores the ratios
+  itself; this guard only stops the shell layer from persisting the intermediate state. A
+  missing or garbled stamp never suppresses a save.
 
 ## Commits
 

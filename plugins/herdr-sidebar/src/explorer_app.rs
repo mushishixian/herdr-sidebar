@@ -191,18 +191,14 @@ impl PaneCtl {
         else {
             return false;
         };
-        self.apply_split_ratio(
-            path,
-            herdr_sidebar::launch::ratio_for_rows(rows, height),
-        )
+        self.apply_split_ratio(path, herdr_sidebar::launch::ratio_for_rows(rows, height))
     }
 
     /// Columns the Agent column of this tab occupies right now — the seed for
     /// the first `←`/`→` on an "auto" Agent width.
     fn agent_cols_now(&self) -> Option<u16> {
         let layout = self.layout()?;
-        let (_, ratio, width) =
-            herdr_sidebar::launch::foreign_right_split(&layout, &self.pane_id)?;
+        let (_, ratio, width) = herdr_sidebar::launch::foreign_right_split(&layout, &self.pane_id)?;
         let cols = (1.0 - ratio) * width as f64;
         Some(cols.round().max(0.0) as u16)
     }
@@ -222,10 +218,7 @@ impl PaneCtl {
         else {
             return false;
         };
-        self.apply_split_ratio(
-            path,
-            herdr_sidebar::launch::ratio_for_cols(cols, width),
-        )
+        self.apply_split_ratio(path, herdr_sidebar::launch::ratio_for_cols(cols, width))
     }
 
     /// Set one of this tab's splits to `ratio`. False when the host refused it
@@ -2934,11 +2927,17 @@ impl App {
     /// (the IDE layer's remembered per-project ratio still wins when a layout is
     /// built); applying it here just makes the row feel immediate.
     fn adjust_terminal_height(&mut self, taller: bool) {
-        let seed = self
-            .pane_ctl
-            .as_ref()
-            .and_then(|ctl| ctl.terminal_rows_now())
-            .unwrap_or(sidebar::SEED_TERMINAL_HEIGHT);
+        // Step from the STORED value: a failed apply leaves the tab's layout
+        // alone, so re-measuring it every press would land on the same two
+        // values forever.
+        let seed = match self.sidebar_state.terminal_height {
+            Some(rows) => rows,
+            None => self
+                .pane_ctl
+                .as_ref()
+                .and_then(|ctl| ctl.terminal_rows_now())
+                .unwrap_or(sidebar::SEED_TERMINAL_HEIGHT),
+        };
         let rows = sidebar::step_terminal_height(seed, taller);
         self.sidebar_state = sidebar::update_state(|state| state.terminal_height = Some(rows));
         let applied = self
@@ -2947,7 +2946,7 @@ impl App {
             .is_some_and(|ctl| ctl.set_terminal_rows(rows));
         if !applied {
             // Keep the stored value: it still applies to tabs built later.
-            self.notice = Some("Terminal height: no pane to size in this tab".into());
+            self.notice = Some("Terminal height: this tab has no editor/terminal split".into());
         }
     }
 
@@ -2962,11 +2961,17 @@ impl App {
     /// remembered per-project ratio still wins when a layout is built); applying
     /// it here just makes the row feel immediate.
     fn adjust_agent_width(&mut self, wider: bool) {
-        let seed = self
-            .pane_ctl
-            .as_ref()
-            .and_then(|ctl| ctl.agent_cols_now())
-            .unwrap_or(sidebar::SEED_AGENT_WIDTH);
+        // Step from the STORED value: a failed apply leaves the tab's layout
+        // alone, so re-measuring it every press would land on the same two
+        // values forever.
+        let seed = match self.sidebar_state.agent_width {
+            Some(cols) => cols,
+            None => self
+                .pane_ctl
+                .as_ref()
+                .and_then(|ctl| ctl.agent_cols_now())
+                .unwrap_or(sidebar::SEED_AGENT_WIDTH),
+        };
         let cols = sidebar::step_agent_width(seed, wider);
         self.sidebar_state = sidebar::update_state(|state| state.agent_width = Some(cols));
         let applied = self
@@ -2975,7 +2980,7 @@ impl App {
             .is_some_and(|ctl| ctl.set_agent_cols(cols));
         if !applied {
             // Keep the stored value: it still applies to tabs built later.
-            self.notice = Some("Agent width: no pane to size in this tab".into());
+            self.notice = Some("Agent width: this tab has no Agent column".into());
         }
     }
 

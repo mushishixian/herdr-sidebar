@@ -72,10 +72,12 @@ pub fn step_terminal_height(rows: u16, taller: bool) -> u16 {
 
 /// Columns for the IDE layout's rightmost Agent column (the coding-agent pane
 /// beside the editor). The height is whatever the column is, so only the WIDTH
-/// is configurable.
-pub const MIN_AGENT_WIDTH: u16 = 40;
-pub const MAX_AGENT_WIDTH: u16 = 240;
-pub const AGENT_WIDTH_STEP: u16 = 8;
+/// is configurable. The range is deliberately wide and the step fine: an Agent
+/// column spans anything from a narrow sidecar to most of an ultrawide tab, so
+/// 24..320 in 4-column steps (75 stops) beats a coarse 8-column sweep.
+pub const MIN_AGENT_WIDTH: u16 = 24;
+pub const MAX_AGENT_WIDTH: u16 = 320;
+pub const AGENT_WIDTH_STEP: u16 = 4;
 
 /// Seed for the first `←`/`→` when the setting is unset AND the current tab has
 /// no Agent split to measure. It is never written by itself: an unset setting
@@ -1391,8 +1393,14 @@ mod tests {
 
     #[test]
     fn agent_width_steps_and_saturates_within_supported_bounds() {
-        assert_eq!(step_agent_width(80, true), 88);
-        assert_eq!(step_agent_width(80, false), 72);
+        assert_eq!(step_agent_width(80, true), 84);
+        assert_eq!(step_agent_width(80, false), 76);
+        // A narrow sidecar is reachable, and 4-column steps keep the row usable
+        // without hundreds of presses: 24..320 in 4s is 75 stops.
+        assert_eq!(
+            step_agent_width(MIN_AGENT_WIDTH + AGENT_WIDTH_STEP, false),
+            MIN_AGENT_WIDTH
+        );
         assert_eq!(step_agent_width(MAX_AGENT_WIDTH, true), MAX_AGENT_WIDTH);
         assert_eq!(step_agent_width(MIN_AGENT_WIDTH, false), MIN_AGENT_WIDTH);
         // Out-of-range values (hand-edited state files) are clamped first.

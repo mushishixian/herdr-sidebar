@@ -314,6 +314,22 @@ Pane geometry & CLI semantics:
   sidebar next to herdr's own); the closest approximation is a per-tab dock via event hooks.
   There is also no way to insert a pane at a tab's layout root: a full-height left column is
   only achievable by docking while the tab still has a single pane.
+- **A re-dock rebuilds the tab's splits, so the sidebar puts their ratios back itself.**
+  `ensure::full_height_repair` reaches a full-height column by bouncing the pane below the
+  sidebar through a temporary tab, and herdr re-creates every split that touches at a DEFAULT
+  ratio (observed `0.5`). That used to clobber the IDE layer's editor/terminal height AND the
+  Agent column width — and `ide-save-sizes` then persisted the clobbered values as if the user
+  had chosen them, losing the real ones for good. So `ensure::open` snapshots
+  `launch::split_ratios(&layout)` from the layout it already reads BEFORE splitting (no extra
+  IPC), and after the repair matches each split of a fresh `pane.layout` by direction + SORTED
+  contained-pane set (`launch::restore_split_ratios`) and re-applies the old ratio through
+  `layout.set_split_ratio`. Splits of the new layout whose rect contains the fresh sidebar pane
+  are never touched (its column belongs to `sidebar_width`, and in the common shape the tab's
+  root split is the Agent boundary and holds it), and a split whose pane set changed is not the
+  same split and is skipped. It also writes `<rundir>/dock/restore.stamp` (unix seconds) right
+  before the split, which the shell IDE layer reads to suppress its own size sampling for 20 s
+  (`lib.sh` `recent_dock_reorder`; the Rust side never reads `sizes.json`). Best effort
+  throughout: a miss never fails the dock.
 
 Manifest `[[events]]` hooks (undocumented in CLI help; see herdr `src/api/schema/events.rs`):
 
@@ -644,8 +660,9 @@ HACKING.md — budget time for that before promising a patched build.
     measure.
 - **Agent width** is the same row pattern one slot below Terminal height: `agent_width`
   (`Option<u16>`, `None` = "auto") is the default width in COLUMNS of the IDE layout's
-  rightmost `Agent` column (the coding-agent pane beside the editor), 40–240 columns in 8-column
-  steps (`state::{MIN,MAX}_AGENT_WIDTH`, `AGENT_WIDTH_STEP`, `clamp_agent_width`,
+  rightmost `Agent` column (the coding-agent pane beside the editor), 24–320 columns in 4-column
+  steps — 75 stops, because an Agent column spans anything from a narrow sidecar to most of an
+  ultrawide tab (`state::{MIN,MAX}_AGENT_WIDTH`, `AGENT_WIDTH_STEP`, `clamp_agent_width`,
   `step_agent_width`). The column's HEIGHT is whatever the tab's middle column is, so only the
   width is configurable. `←`/`→` step it and apply it to the sidebar's OWN tab immediately;
   `⏎` clears it back to auto WITHOUT touching the current layout.
@@ -687,7 +704,9 @@ HACKING.md — budget time for that before promising a patched build.
   available when decorations are disabled; ignored-path scans do not.
 - `dock_right` in the same state file (default false) drives the “Dock on the right” Settings
   row. Launch target/ratio/swap, resize direction, and full-height repair all mirror from that
-  one persisted choice. Preview tabs inherit it when the `tab.created` hook docks their sidebar.
+  one persisted choice (the repair restores the tab's other split ratios afterwards — see the
+  re-dock bullet under pane geometry). Preview tabs inherit it when the `tab.created` hook docks
+  their sidebar.
 - The unified pane reports BOTH identity tokens (`herdr-sidebar-explorer`,
   `herdr-sidebar-git`) so either launcher decision finds it; turning unified off clears
   the other token (null value — report_metadata MERGES token maps).

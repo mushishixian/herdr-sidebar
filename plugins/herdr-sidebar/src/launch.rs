@@ -1193,15 +1193,8 @@ pub fn foreign_right_split(layout_json: &str, pane_id: &str) -> Option<(Vec<bool
     // is the tab's rightmost pane: that split sizes us, not the Agent. When our
     // pane IS the split's whole left child (a `[sidebar | viewer]` tab) the
     // split is our own boundary for the same reason.
-    let holds_our_column = |rect: &Rect, ratio: f64| {
-        let (from, to) = column(rect, ratio);
-        let in_our_column = mine.x >= from
-            && mine.x + mine.width <= to
-            && rect.y <= mine.y
-            && mine.y + mine.height <= rect.y + rect.height;
-        let left_child_is_ours = mine.x == rect.x && mine.x + mine.width == from;
-        in_our_column || left_child_is_ours
-    };
+    let holds_our_column =
+        |rect: &Rect, ratio: f64| split_bounds_pane(rect, Some("right"), ratio, mine);
     let candidates: Vec<(&Rect, f64, Vec<bool>)> = layout
         .splits
         .iter()
@@ -1235,6 +1228,139 @@ pub fn foreign_right_split(layout_json: &str, pane_id: &str) -> Option<(Vec<bool
         // never depends on the order herdr listed the splits in.
         .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)))
         .map(|(_, path, ratio, width)| (path, ratio, width))
+}
+
+/// One geometry-independent description of a split: what it separates and how.
+/// Used to carry a tab's ratios across a dock repair, which moves panes through
+/// a temporary tab and makes herdr re-create those splits at DEFAULT ratios —
+/// see [`restore_split_ratios`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplitRatio {
+    pub direction: String,
+    /// The ids of every pane this split's rect contains, SORTED, so the same
+    /// split can be found again after panes moved around.
+    pub panes: Vec<String>,
+    pub ratio: f64,
+}
+
+/// The ids of the panes a split's rect contains, sorted (see [`SplitRatio`]).
+/// The ids of every pane a split's rect contains, SORTED so the same split can
+/// be recognised after panes moved. `ignore` drops one pane id — a dock restore
+/// must compare against the pre-dock set, which cannot contain the sidebar that
+/// is being docked.
+fn contained_panes(layout: &Layout, rect: &Rect, ignore: Option<&str>) -> Vec<String> {
+    let mut panes: Vec<String> = layout
+        .panes
+        .iter()
+        .filter(|p| p.pane_id.as_deref() != ignore)
+        .filter(|p| p.rect.as_ref().is_some_and(|r| rect_holds(rect, r)))
+        .filter_map(|p| p.pane_id.clone())
+        .collect();
+    panes.sort();
+    panes
+}
+
+/// True when `mine` IS one of this split's two children along the split's axis —
+/// i.e. the split is our own column's boundary, which the sidebar launchers set
+/// from `sidebar_width`. A split that merely CONTAINS our pane is not our
+/// boundary: in the common `[[sidebar|editor] | agent]` shape the tab's root
+/// split holds the sidebar but its ratio sizes the Agent column.
+fn split_bounds_pane(rect: &Rect, direction: Option<&str>, ratio: f64, mine: &Rect) -> bool {
+    let vertical = direction == Some("down");
+    let (start, len, cross_start, cross_len) = if vertical {
+        (rect.y, rect.height, rect.x, rect.width)
+    } else {
+        (rect.x, rect.width, rect.y, rect.height)
+    };
+    let (mine_start, mine_len, mine_cross, mine_cross_len) = if vertical {
+        (mine.y, mine.height, mine.x, mine.width)
+    } else {
+        (mine.x, mine.width, mine.y, mine.height)
+    };
+    if cross_start > mine_cross || mine_cross + mine_cross_len > cross_start + cross_len {
+        return false;
+    }
+    let divider = start + (len as f64 * ratio).round() as i64;
+    (mine_start == start && mine_start + mine_len == divider)
+        || (mine_start >= divider && mine_start + mine_len <= start + len)
+}
+
+/// Every split of a `pane.layout` reply, described by the SORTED pane ids its
+/// rect contains (so the same split can be found again after panes move), the
+/// direction, and its ratio. Splits without a rect/ratio/direction are skipped,
+/// as are splits holding NO pane at all (a degenerate rect cannot describe a
+/// boundary, and could never match a real split on the other side). Unparseable
+/// input yields nothing rather than guessing.
+pub fn split_ratios(layout_json: &str) -> Vec<SplitRatio> {
+    let Ok(msg) = serde_json::from_str::<LayoutMsg>(strip_bom(layout_json)) else {
+        return Vec::new();
+    };
+    let layout = &msg.result.layout;
+    layout
+        .splits
+        .iter()
+        .filter_map(|split| {
+            let rect = split.rect.as_ref()?;
+            let panes = contained_panes(layout, rect, None);
+            Some(SplitRatio {
+                direction: split.direction.clone()?,
+                panes: (!panes.is_empty()).then_some(panes)?,
+                ratio: split.ratio?,
+            })
+        })
+        .collect()
+}
+
+/// `(path, ratio)` calls that put `before`'s ratios back into `after`.
+///
+/// A split in `after` matches when its direction and its contained-pane set are
+/// identical to a `before` entry and the ratio differs by more than 1e-6. The
+/// pane set is what identifies it across a repair (the split's path changes when
+/// its parent is re-created), and it also stops a ratio from being applied to a
+/// different split that happens to sit at the same path. Splits of `after` whose
+/// rect contains `skip_pane` (the freshly docked sidebar) are never touched —
+/// the sidebar's own column belongs to `sidebar_width`, and the tab's root split
+/// must not be resized here.
+pub fn restore_split_ratios(
+    before: &[SplitRatio],
+    after: &str,
+    skip_pane: &str,
+) -> Vec<(Vec<bool>, f64)> {
+    let Ok(msg) = serde_json::from_str::<LayoutMsg>(strip_bom(after)) else {
+        return Vec::new();
+    };
+    let layout = &msg.result.layout;
+    let mine = pane_rect(layout, skip_pane);
+    let mut calls = Vec::new();
+    for split in &layout.splits {
+        let (Some(rect), Some(ratio), Some(direction)) =
+            (split.rect.as_ref(), split.ratio, split.direction.as_deref())
+        else {
+            continue;
+        };
+        // A split that IS the sidebar's own boundary keeps the launcher's
+        // width; every other split's ratio is the user's layout, which the
+        // dock repair just clobbered.
+        if let Some(mine) = mine
+            && split_bounds_pane(rect, Some(direction), ratio, mine)
+        {
+            continue;
+        }
+        let Some(path) = split.id.as_deref().and_then(split_path) else {
+            continue;
+        };
+        let panes = contained_panes(layout, rect, Some(skip_pane));
+        let Some(want) = before
+            .iter()
+            .find(|b| b.direction == direction && b.panes == panes)
+        else {
+            continue;
+        };
+        if (want.ratio - ratio).abs() > 1e-6 {
+            calls.push((path, want.ratio));
+        }
+    }
+    calls
 }
 
 /// The rect of `pane_id` in a decoded layout, if the pane is there.
@@ -2254,6 +2380,160 @@ mod tests {
         assert!((ratio_for_cols(40, 0) - 0.5).abs() < 1e-9);
         // Rows and columns share one implementation.
         assert_eq!(ratio_for_cols(10, 40), ratio_for_rows(10, 40));
+    }
+
+    /// The dock repair re-parents the pane under the sidebar, so herdr gives
+    /// the re-created splits NEW paths and default ratios. The pane set is what
+    /// identifies a split across that: the IDE's editor/terminal split must
+    /// come back at the user's ratio however its path moved.
+    #[test]
+    fn restore_split_ratios_follows_a_split_whose_path_moved() {
+        let panes = r#"{"pane_id":"term","rect":{"x":32,"y":35,"width":80,"height":15}},
+               {"pane_id":"fresh","rect":{"x":32,"y":0,"width":80,"height":35}}"#;
+        let before = layout_with_splits(
+            panes,
+            r#"{"id":"split_2_1","direction":"down","ratio":0.7,"rect":{"x":32,"y":0,"width":80,"height":50}}"#,
+        );
+        let after = layout_with_splits(
+            panes,
+            r#"{"id":"split_3_01","direction":"down","ratio":0.5,"rect":{"x":32,"y":0,"width":80,"height":50}}"#,
+        );
+        assert_eq!(
+            restore_split_ratios(&split_ratios(&before), &after, "side"),
+            vec![(vec![false, true], 0.7)]
+        );
+    }
+
+    /// A split whose rect now holds a DIFFERENT set of panes is not the same
+    /// split: applying a stale ratio to whatever moved there would resize the
+    /// wrong boundary (the sidebar's own column, an Agent column's inner split).
+    #[test]
+    fn restore_split_ratios_skips_a_split_whose_pane_set_changed() {
+        let before = layout_with_splits(
+            r#"{"pane_id":"fresh","rect":{"x":32,"y":0,"width":80,"height":35}},
+               {"pane_id":"term","rect":{"x":32,"y":35,"width":80,"height":15}}"#,
+            r#"{"id":"split_2_1","direction":"down","ratio":0.7,"rect":{"x":32,"y":0,"width":80,"height":50}}"#,
+        );
+        // Same direction, path, and rect — but a pane appeared inside it.
+        let after = layout_with_splits(
+            r#"{"pane_id":"fresh","rect":{"x":32,"y":0,"width":80,"height":20}},
+               {"pane_id":"term","rect":{"x":32,"y":20,"width":80,"height":10}},
+               {"pane_id":"extra","rect":{"x":32,"y":30,"width":80,"height":20}}"#,
+            r#"{"id":"split_2_1","direction":"down","ratio":0.5,"rect":{"x":32,"y":0,"width":80,"height":50}}"#,
+        );
+        assert!(restore_split_ratios(&split_ratios(&before), &after, "side").is_empty());
+    }
+
+    /// The freshly docked sidebar's own column is `sidebar_width`'s job, and the
+    /// tab's root split holds it, so neither may be resized from a pre-dock
+    /// snapshot (that snapshot predates the sidebar and had no such split).
+    #[test]
+    fn restore_split_ratios_skips_the_docked_sidebars_own_split() {
+        // `[fresh | agent]` becomes `[sidebar | [fresh | agent]]`: the root split
+        // is now the sidebar's own boundary (its first child IS our column), so it
+        // must keep the launcher's width, while the split it wraps is restored.
+        let before = layout_with_splits(
+            r#"{"pane_id":"fresh","rect":{"x":0,"y":0,"width":60,"height":50}},
+               {"pane_id":"agent","rect":{"x":60,"y":0,"width":20,"height":50}}"#,
+            r#"{"id":"split_1_root","direction":"right","ratio":0.75,"rect":{"x":0,"y":0,"width":80,"height":50}}"#,
+        );
+        let after = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":20,"height":50}},
+               {"pane_id":"fresh","rect":{"x":20,"y":0,"width":45,"height":50}},
+               {"pane_id":"agent","rect":{"x":65,"y":0,"width":15,"height":50}}"#,
+            r#"{"id":"split_1_root","direction":"right","ratio":0.25,"rect":{"x":0,"y":0,"width":80,"height":50}},
+               {"id":"split_2_1","direction":"right","ratio":0.4,"rect":{"x":20,"y":0,"width":60,"height":50}}"#,
+        );
+        assert_eq!(
+            restore_split_ratios(&split_ratios(&before), &after, "side"),
+            vec![(vec![true], 0.75)]
+        );
+    }
+
+    /// The real IDE shape (verified live): `[[sidebar|editor] | agent]`, where the
+    /// Agent boundary is the tab's ROOT split and its rect therefore CONTAINS the
+    /// sidebar. A dock restore has to put both the Agent ratio and the
+    /// editor/terminal height back; skipping every split that holds our column (the
+    /// first version of this) restored only the height and silently dropped the
+    /// Agent width.
+    #[test]
+    fn restore_split_ratios_restores_a_whole_ide_tab_around_a_docked_sidebar() {
+        // Before the dock: no sidebar; Agent 122 of 338, terminal 17 of 69.
+        let before = layout_with_splits(
+            r#"{"pane_id":"fresh","rect":{"x":0,"y":0,"width":216,"height":52}},
+               {"pane_id":"term","rect":{"x":0,"y":52,"width":216,"height":17}},
+               {"pane_id":"agent","rect":{"x":216,"y":0,"width":122,"height":69}}"#,
+            r#"{"id":"split_0_root","direction":"right","ratio":0.639053,"rect":{"x":0,"y":0,"width":338,"height":69}},
+               {"id":"split_2_01","direction":"down","ratio":0.753623,"rect":{"x":0,"y":0,"width":216,"height":69}}"#,
+        );
+        // After the dock + full_height_repair: the repair recreated both splits at
+        // herdr's defaults (0.6 / 0.5) and added the sidebar's own split.
+        let after = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":69}},
+               {"pane_id":"fresh","rect":{"x":32,"y":0,"width":171,"height":34}},
+               {"pane_id":"term","rect":{"x":32,"y":34,"width":171,"height":35}},
+               {"pane_id":"agent","rect":{"x":203,"y":0,"width":135,"height":69}}"#,
+            r#"{"id":"split_0_root","direction":"right","ratio":0.6,"rect":{"x":0,"y":0,"width":338,"height":69}},
+               {"id":"split_1_0","direction":"right","ratio":0.157635,"rect":{"x":0,"y":0,"width":203,"height":69}},
+               {"id":"split_2_01","direction":"down","ratio":0.5,"rect":{"x":32,"y":0,"width":171,"height":69}}"#,
+        );
+        assert_eq!(
+            restore_split_ratios(&split_ratios(&before), &after, "side"),
+            vec![(Vec::new(), 0.639053), (vec![false, true], 0.753623)]
+        );
+    }
+
+    /// Only a real difference is a call: a split the repair left alone must not
+    /// be written back (every write is an IPC round trip and a layout event).
+    #[test]
+    fn restore_split_ratios_says_nothing_when_the_ratio_is_unchanged() {
+        let panes = r#"{"pane_id":"fresh","rect":{"x":32,"y":0,"width":80,"height":35}},
+               {"pane_id":"term","rect":{"x":32,"y":35,"width":80,"height":15}}"#;
+        let before = layout_with_splits(
+            panes,
+            r#"{"id":"split_2_1","direction":"down","ratio":0.7,"rect":{"x":32,"y":0,"width":80,"height":50}}"#,
+        );
+        let after = layout_with_splits(
+            panes,
+            r#"{"id":"split_3_01","direction":"down","ratio":0.7,"rect":{"x":32,"y":0,"width":80,"height":50}}"#,
+        );
+        assert!(restore_split_ratios(&split_ratios(&before), &after, "side").is_empty());
+        // Unreadable input never produces a guess.
+        assert!(restore_split_ratios(&[], "not json", "side").is_empty());
+        assert!(restore_split_ratios(&split_ratios("not json"), &after, "side").is_empty());
+    }
+
+    /// The snapshot itself: one entry per split that actually describes a
+    /// boundary, panes SORTED so the key does not depend on the order herdr
+    /// lists them in. A split with no ratio, or one whose rect holds no pane,
+    /// contributes nothing.
+    #[test]
+    fn split_ratios_describes_every_addressable_split() {
+        let json = layout_with_splits(
+            r#"{"pane_id":"term","rect":{"x":32,"y":35,"width":80,"height":15}},
+               {"pane_id":"fresh","rect":{"x":32,"y":0,"width":80,"height":35}},
+               {"pane_id":"agent","rect":{"x":112,"y":0,"width":48,"height":50}}"#,
+            r#"{"id":"split_1_root","direction":"right","ratio":0.2,"rect":{"x":0,"y":0,"width":160,"height":50}},
+               {"id":"split_2_1","direction":"down","ratio":0.7,"rect":{"x":32,"y":0,"width":80,"height":50}},
+               {"direction":"right","ratio":0.9,"rect":{"x":0,"y":0,"width":1,"height":1}},
+               {"id":"split_3_0","direction":"right","rect":{"x":0,"y":0,"width":1,"height":1}}"#,
+        );
+        assert_eq!(
+            split_ratios(&json),
+            vec![
+                SplitRatio {
+                    direction: "right".into(),
+                    panes: vec!["agent".into(), "fresh".into(), "term".into()],
+                    ratio: 0.2,
+                },
+                SplitRatio {
+                    direction: "down".into(),
+                    panes: vec!["fresh".into(), "term".into()],
+                    ratio: 0.7,
+                },
+            ]
+        );
+        assert!(split_ratios("not json").is_empty());
     }
 
     #[test]
