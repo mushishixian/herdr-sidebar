@@ -442,6 +442,10 @@ pub struct App {
     /// Reports which agent runs in each herdr space for the spaces rail's
     /// `$agents` line (own 5 s throttle; see [`herdr_sidebar::agent_tokens`]).
     agent_tokens: herdr_sidebar::agent_tokens::AgentTokens,
+    /// Keeps a space on `working` while a pi agent's BACKGROUND subagent runs
+    /// (pi's own hook reports `idle` when its turn settles). Own 3 s throttle;
+    /// see [`herdr_sidebar::pi_state`].
+    pi_state: herdr_sidebar::pi_state::PiState,
     /// A native folder picker running on a background thread; its result
     /// arrives here (None = cancelled).
     picking: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
@@ -581,6 +585,7 @@ impl App {
             last_preview: None,
             last_beat: std::time::Instant::now(),
             agent_tokens: Default::default(),
+            pi_state: Default::default(),
             picking: None,
             cwd_follower,
             repos,
@@ -884,6 +889,9 @@ impl App {
         // The spaces rail's `$agents` line. Self-throttled and failure-tolerant
         // (it never retries or blocks meaningfully: the socket is local).
         self.agent_tokens.report_if_due();
+        // pi's hook goes idle while a background subagent still runs: report
+        // `working` for it from the persisted transcript.
+        self.pi_state.report_if_due();
         self.follow_sibling_cwd();
     }
 

@@ -232,6 +232,26 @@ Two things that surprise people:
   rail shows them idle forever, and a **hung** hook agent can stay `◐` until the
   process exits (there is no staleness timeout). Other agents are detected from
   the screen tail and go back to idle within about a second.
+- **Background subagents used to make the space look idle.** pi's own hook reports
+  `working` for the main agent's turn and `idle` the moment that turn settles, and
+  `@tintinweb/pi-subagents` (the setup here) launches agents in the **background by
+  default**: the dispatch returns immediately, so the space flipped to `○` while the
+  child agent kept working (measured: 48 s of `idle` during one background run).
+  Foreground (blocking) subagents were never affected — the turn stays open while they
+  run. The sidebar fixes this itself (`plugins/herdr-sidebar/src/pi_state.rs`, no extra
+  pi extension): it reads pi's persisted transcript for every pi pane in the session
+  and keeps the pane `◐` while a background agent is unfinished or a turn is open, so the
+  space stops looking idle. Expect the rail to catch up within ~5 s of a dispatch or a
+  completion (it rides the sidebar's heartbeat). A background agent only counts while its
+  own output file (`/tmp/pi-subagents-<uid>/…/<id>.output`) changed in the last 5 minutes:
+  pi `/reload` or quitting pi stops its agents without recording it, and without this rule
+  the space stayed `◐` forever. The cost is that an agent stuck in one tool call for more
+  than 5 minutes shows `○` until it writes again. Two caveats: the sidebar has to report
+  the pane's state itself (herdr only accepts it from pi's own identity), so pi panes
+  show the old behaviour while **no sidebar** runs anywhere in the session, and quitting
+  every sidebar freezes their indicator until pi restarts. Subagent
+  activity inside a *nested* child (a workflow's agents) is covered by the top-level
+  agent's run, which is what the transcript records.
 
 ### IDE layout: `dotfiles-ide` plugin
 

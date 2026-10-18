@@ -23,6 +23,7 @@ pub mod icons;
 pub mod ipc;
 pub mod launch;
 pub mod pane_menu;
+pub mod pi_state;
 pub mod rundir;
 pub mod search_popup;
 pub mod shortcut_tip;

@@ -498,6 +498,49 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   pi — `herdr integration status` showed every target "not installed"). Only the
   process exiting resets it, so a hung hook agent sticks on `working` (no timeout).
   Screen-detected agents need 3 idle confirmations (≤700ms, 100ms re-checks).
+- **Background subagents look idle to the rail, and the SIDEBAR fixes it** (`src/pi_state.rs`).
+  pi's managed hook (`~/.pi/agent/extensions/herdr-agent-state.ts`, herdr integration v9)
+  reports `working` on `agent_start` and `idle` on `agent_settled`, but
+  `@tintinweb/pi-subagents` defaults to `backgroundByDefault = true`: the Agent tool returns
+  immediately, the root turn settles, and the rail drops to `idle` while the child still runs
+  (measured live: `working 1.5 s → idle 4.5 s → idle for 48 s while the child worked`;
+  FOREGROUND subagents were never affected — the turn stays open, so the rail stays
+  `working`). No extension can see a child's lifecycle (each child is its own `AgentSession`
+  with its own `ExtensionRunner`, bound `mode: "print"`), and herdr only accepts
+  `pane.report_agent` from the pane's real integration identity — a foreign `source` answers
+  `{"type":"ok"}` and is then DROPPED (verified). So the sidebar, which already runs a 5 s
+  heartbeat with a socket client, impersonates the hook: `source "herdr:pi"`, `agent "pi"`,
+  the pane's own `agent_session` ref from `pane.list`, and a state derived from **pi's
+  persisted transcript** (`~/.pi/agent/sessions/**/<session>.jsonl`, format v3):
+  `working` when an `Agent` background dispatch (`Agent started in background. Agent ID: <id>`)
+  has no matching `subagents:record`/`subagent-notification` completion yet, OR when the last
+  activity marker says a turn is open (a `user`/`toolResult`/`system` message, an assistant
+  message with `stopReason: "toolUse"`, or a `subagents:` custom record — `model_change` /
+  `thinking_level_change` / `usage` records are skipped so an idle session cannot stick on
+  `working`); otherwise `idle`. Unreadable/absent transcript = **idle**, so a broken read
+  degrades to the old behaviour instead of pinning `working`.
+  **A child can vanish without any completion record** (bit us live: a space stuck on
+  `working` 45 min after its turn ended). pi-subagents' `session_shutdown` handler (pi
+  `/reload`, session switch, quit) calls `manager.abortAll()`, and those stopped children
+  never get a `subagents:record` in the parent transcript; the only later trace is a
+  `steer_subagent`/`get_subagent_result` toolResult reading `Agent not found: "<id>"`, which
+  now counts as done. Everything else is caught by LIVENESS: the start text names the child's
+  own transcript (`Output file: /tmp/pi-subagents-<uid>/…/tasks/<id>.output`), which
+  pi-subagents appends to after every child turn, so an unfinished child counts only while
+  that file's mtime is younger than `CHILD_STALE` (5 min). No output path, a missing file or
+  a stat error = not running. A child silent for longer than that (one tool call running
+  >5 min) reads as idle — the fail-safe direction.
+  Two hard rules, both verified live: **`seq` must only ever come from `next_seq`**
+  (`max(last, now_ms*1000) + 1`) — herdr silently drops a report whose seq is not strictly
+  greater, and a future-dated seq (I tried 9e15 ≈ year 2286) blocks even a RESTARTED pi from
+  reporting; and **the state must be re-asserted every beat**, because from our first report
+  onward the hook's own reports are the dropped ones — the sidebar OWNS that pane's agent
+  state until the pi process restarts. Every sidebar reports EVERY pi pane in `pane.list`
+  (session-wide, not just its own workspace; duplicate reports from several sidebars are
+  identical). Consequences to keep in mind: pi panes keep the old behaviour only when no
+  sidebar runs anywhere in the session, killing every sidebar freezes those panes' state
+  until pi restarts, and pi's `herdr:blocked` permission state is masked while we report (inert on
+  this machine — nothing emits that event).
 - **A hook installed mid-run needs an agent RESTART, not `/reload`**: verified live by
   booting `pi` with the extension moved aside, restoring it, running `/reload` and then a
   prompt — the pane stayed `idle` while the agent answered (`/reload` swaps the extension
