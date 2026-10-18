@@ -241,6 +241,17 @@ menu, `s` Settings, `b` hide, `c` change folder, `q` quit.
   `layout.set_split_ratio`. Splits are found by geometry; a split id such as
   `split_2_01` encodes its tree path (0 = first child). The sidebar's own
   column is left to herdr-sidebar.
+- **Terminal height** (the `Terminal` "command line" under the editor) has a default in the
+  sidebar's ⚙ Settings: the row `Terminal height`, one below `Sidebar width`. It is measured in
+  ROWS (4–40, `←`/`→` in 2-row steps; `⏎` resets it to `auto`). Only the height is configurable —
+  the width is whatever the middle column is. `←`/`→` also resizes the terminal in the tab the
+  sidebar is in, right away; `⏎` does not touch the current layout. When a layout is BUILT
+  (`herdr-ide`, `fresh-restart`'s rebuilt editor, `herdr-ide-term` reopening a closed terminal)
+  the order is: the project's remembered ratio in `sizes.json` (your own drag) wins, then this
+  setting, then the historical 70% editor share. `lib.sh`'s `editor_split_ratio` computes it as
+  `1 - rows / column height`, clamped to herdr's 0.1..0.9, and reads the setting from
+  `~/.local/state/herdr/plugins/herdr-sidebar/state.json` (`terminal_height`); it never writes
+  there.
 - `bin/fresh-open FILE[:LINE[:COL]] | file://URL | --link` sends a file to the
   nearest `Fresh` pane (this tab, then this workspace — never another
   workspace's, even on the same project: that workspace has its own daemon).
@@ -330,6 +341,8 @@ and a sweeping highlight band. Clicking ✓ Commit during that just says "AI com
 Sidebar defaults seeded by the installer (`dotfiles/herdr-sidebar/state.json`):
 VS Code colours, git footer, auto-open, follow the neighbour pane's folder,
 preview in a pane (a git-change diff opens beside the sidebar inside the IDE tab, so the Agent column stays visible; Esc/q closes it), editor on click, editor inline.
+`Terminal height` is deliberately NOT seeded: unset ("auto") keeps the IDE layer's own
+precedence (remembered project ratio, else 70%).
 
 Pictures and videos never open in Fresh. An Explorer click, Enter, or a pick in the Ctrl+Q popup
 opens them in the sidebar's preview, which draws them in the terminal; `q` or Esc closes it.

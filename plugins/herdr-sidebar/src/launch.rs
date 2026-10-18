@@ -206,6 +206,10 @@ struct Layout {
 
 #[derive(Deserialize)]
 struct LayoutSplit {
+    /// `split_<n>_root` / `split_<n>_010`: herdr encodes the split's tree path
+    /// in its id (see [`split_path`]). Absent in hosts older than 0.9, which
+    /// simply makes that split unaddressable.
+    id: Option<String>,
     direction: Option<String>,
     ratio: Option<f64>,
     rect: Option<Rect>,
@@ -1116,6 +1120,74 @@ fn resize_plan_inner(
     })
 }
 
+/// Decode a `pane.layout` split id into its tree path. herdr names splits
+/// `split_<n>_root` (the tab's root split) or `split_<n>_<bits>`, where every
+/// bit is one child step: `1` = the SECOND child, `0` = the first. The path is
+/// what `layout.set_split_ratio` takes.
+fn split_path(id: &str) -> Option<Vec<bool>> {
+    let suffix = id.strip_prefix("split_")?.split_once('_')?.1;
+    if suffix == "root" {
+        return Some(Vec::new());
+    }
+    if suffix.is_empty() || !suffix.chars().all(|bit| matches!(bit, '0' | '1')) {
+        return None;
+    }
+    Some(suffix.chars().map(|bit| bit == '1').collect())
+}
+
+/// The tab's `down` split that does NOT contain `pane_id` — the IDE layout's
+/// editor/terminal column — as (path bools, current ratio, split height rows).
+///
+/// The ratio is the FIRST (top) child's share, so an editor/terminal column is
+/// sized by `1 - rows / height` (see [`ratio_for_rows`]). `None` when the tab
+/// has no addressable down split (nothing to size) or the layout is
+/// unreadable. A split whose rect CONTAINS our pane is skipped: sizing our own
+/// column is what `sidebar_width` does. When several qualify the smallest rect
+/// wins (innermost), tie-broken by path, so the choice is deterministic.
+pub fn foreign_down_split(layout_json: &str, pane_id: &str) -> Option<(Vec<bool>, f64, i64)> {
+    let msg = serde_json::from_str::<LayoutMsg>(strip_bom(layout_json)).ok()?;
+    let layout = &msg.result.layout;
+    let mine = layout
+        .panes
+        .iter()
+        .find(|p| p.pane_id.as_deref() == Some(pane_id))?
+        .rect
+        .as_ref()?;
+    let holds_us = |rect: &Rect| {
+        rect.x <= mine.x
+            && mine.x + mine.width <= rect.x + rect.width
+            && rect.y <= mine.y
+            && mine.y + mine.height <= rect.y + rect.height
+    };
+    layout
+        .splits
+        .iter()
+        .filter(|s| s.direction.as_deref() == Some("down"))
+        .filter_map(|s| {
+            let rect = s.rect.as_ref()?;
+            let ratio = s.ratio?;
+            let path = split_path(s.id.as_deref()?)?;
+            (!holds_us(rect) && rect.height > 0)
+                .then(|| (rect.width * rect.height, path, ratio, rect.height))
+        })
+        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+        .map(|(_, path, ratio, height)| (path, ratio, height))
+}
+
+/// The `down` split ratio that leaves the BOTTOM pane `rows` rows tall, out of
+/// `split_height` rows: the ratio is the top child's share, so it is
+/// `1 - rows / height`. Clamped so both sides keep at least one row and the
+/// ratio stays inside herdr's own 0.1..0.9 bounds.
+pub fn ratio_for_rows(rows: u16, split_height: i64) -> f64 {
+    let height = split_height as f64;
+    if height < 3.0 {
+        // No room for a ratio that gives both panes a row.
+        return 0.5;
+    }
+    let rows = f64::from(rows).max(1.0).min(height - 1.0);
+    (1.0 - rows / height).clamp(0.1, 0.9)
+}
+
 /// True when the id can be passed as a positional argument to the herdr CLI
 /// without any risk of being parsed as a flag.
 fn is_flag_safe(id: &str) -> bool {
@@ -1854,5 +1926,106 @@ mod tests {
         assert_eq!(open_plan(&layout(""), false, 32), "");
         let unsafe_id = layout(r#"{"pane_id":"--x","rect":{"x":0,"y":0,"width":90,"height":50}}"#);
         assert_eq!(open_plan(&unsafe_id, true, 32), "");
+    }
+
+    /// The IDE tab is `[sidebar | [[fresh|terminal] | agent]]`. The editor over
+    /// terminal split is the only one a "terminal height" can size, and the
+    /// sidebar's own column is not it.
+    #[test]
+    fn foreign_down_split_finds_the_editor_terminal_column() {
+        let json = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":50}},
+               {"pane_id":"fresh","rect":{"x":32,"y":0,"width":80,"height":35}},
+               {"pane_id":"term","rect":{"x":32,"y":35,"width":80,"height":15}},
+               {"pane_id":"agent","rect":{"x":112,"y":0,"width":48,"height":50}}"#,
+            r#"{"id":"split_1_root","direction":"right","ratio":0.2,"rect":{"x":0,"y":0,"width":160,"height":50}},
+               {"id":"split_2_1","direction":"down","ratio":0.7,"rect":{"x":32,"y":0,"width":80,"height":50}},
+               {"id":"split_3_11","direction":"right","ratio":0.625,"rect":{"x":32,"y":0,"width":128,"height":50}}"#,
+        );
+        // The sidebar is in its own column, so the editor/terminal split is
+        // foreign to it: that is the one a terminal height sizes.
+        assert_eq!(
+            foreign_down_split(&json, "side"),
+            Some((vec![true], 0.7, 50))
+        );
+        // A pane INSIDE the split is "ours" for that split, so it is skipped
+        // (sizing the split we live in is not what this helper is for).
+        assert_eq!(foreign_down_split(&json, "fresh"), None);
+        assert_eq!(foreign_down_split(&json, "term"), None);
+        // Another column of the same tab finds the same foreign split.
+        assert_eq!(
+            foreign_down_split(&json, "agent"),
+            Some((vec![true], 0.7, 50))
+        );
+    }
+
+    #[test]
+    fn foreign_down_split_skips_a_split_holding_our_own_pane() {
+        // A sidebar stacked over a preview: the down split IS our column, so
+        // there is nothing here for a terminal height to size.
+        let json = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":30}},
+               {"pane_id":"viewer","rect":{"x":0,"y":30,"width":32,"height":20}}"#,
+            r#"{"id":"split_1_root","direction":"down","ratio":0.6,"rect":{"x":0,"y":0,"width":32,"height":50}}"#,
+        );
+        assert_eq!(foreign_down_split(&json, "side"), None);
+        assert_eq!(foreign_down_split(&json, "viewer"), None);
+    }
+
+    #[test]
+    fn foreign_down_split_prefers_the_innermost_then_the_path() {
+        // Two qualifying down splits (a full-height column and a nested half),
+        // plus a right split that must be ignored.
+        let json = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":20,"height":50}},
+               {"pane_id":"a","rect":{"x":20,"y":0,"width":70,"height":30}},
+               {"pane_id":"b","rect":{"x":20,"y":30,"width":70,"height":20}}"#,
+            r#"{"id":"split_9_0","direction":"down","ratio":0.5,"rect":{"x":20,"y":0,"width":140,"height":50}},
+               {"id":"split_4_01","direction":"down","ratio":0.4,"rect":{"x":20,"y":0,"width":70,"height":40}},
+               {"id":"split_2_1","direction":"right","ratio":0.5,"rect":{"x":20,"y":0,"width":140,"height":50}}"#,
+        );
+        assert_eq!(
+            foreign_down_split(&json, "side"),
+            Some((vec![false, true], 0.4, 40))
+        );
+    }
+
+    #[test]
+    fn foreign_down_split_needs_an_addressable_split() {
+        let rights_only = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":50}}"#,
+            r#"{"id":"split_1_root","direction":"right","ratio":0.2,"rect":{"x":0,"y":0,"width":160,"height":50}}"#,
+        );
+        assert_eq!(foreign_down_split(&rights_only, "side"), None);
+        // A host that does not encode the path in the split id (pre-0.9) is
+        // unaddressable: claim nothing rather than guess a wrong path.
+        let id_less = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":50}}"#,
+            r#"{"direction":"down","ratio":0.7,"rect":{"x":0,"y":0,"width":160,"height":50}}"#,
+        );
+        assert_eq!(foreign_down_split(&id_less, "side"), None);
+        // Garbage, an unknown pane, and a split without a rect or ratio.
+        assert_eq!(foreign_down_split("not json", "side"), None);
+        assert_eq!(foreign_down_split(&rights_only, "missing"), None);
+        let partial = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":50}}"#,
+            r#"{"id":"split_1_root","direction":"down","rect":{"x":0,"y":0,"width":160,"height":50}}"#,
+        );
+        assert_eq!(foreign_down_split(&partial, "side"), None);
+    }
+
+    #[test]
+    fn ratio_for_rows_leaves_the_bottom_pane_that_many_rows() {
+        // A 40-row column with a 10-row terminal leaves 30 rows on top: 0.75.
+        assert!((ratio_for_rows(10, 40) - 0.75).abs() < 1e-9);
+        // herdr's own 0.1..0.9 clamp, mirrored here.
+        assert!((ratio_for_rows(4, 40) - 0.9).abs() < 1e-9);
+        assert!((ratio_for_rows(39, 40) - 0.1).abs() < 1e-9);
+        // Both panes keep at least one row.
+        assert!((ratio_for_rows(40, 40) - 0.1).abs() < 1e-9);
+        assert!((ratio_for_rows(0, 40) - 0.9).abs() < 1e-9);
+        // Too small to size at all: stay neutral instead of dividing by ~0.
+        assert!((ratio_for_rows(4, 2) - 0.5).abs() < 1e-9);
+        assert!((ratio_for_rows(4, 0) - 0.5).abs() < 1e-9);
     }
 }

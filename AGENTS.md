@@ -615,6 +615,33 @@ HACKING.md — budget time for that before promising a patched build.
   `WIDTH_SETTLE`) writes it through `state::clamp_sidebar_width` + `update_state` without a
   further resize. It is ONE global setting, so a separated Explorer/Source Control pair follows
   whichever pane was dragged last. The 15%–50% share bounds still win at extreme tab widths.
+- **Terminal height** is the same row pattern one slot below Sidebar width: `terminal_height`
+  (`Option<u16>`, `None` = "auto") is the default height in ROWS of the IDE layout's
+  bottom-middle pane (the `Terminal` "command line" under the Fresh editor), 4–40 rows in
+  2-row steps (`state::{MIN,MAX}_TERMINAL_HEIGHT`, `TERMINAL_HEIGHT_STEP`,
+  `clamp_terminal_height`, `step_terminal_height`). The pane's WIDTH is whatever the middle
+  column is, so only height is configurable. `←`/`→` step it and apply it to the sidebar's
+  OWN tab immediately; `⏎` clears it back to auto WITHOUT touching the current layout.
+  - The row is a DEFAULT, not an override: `dotfiles/herdr-plugins/ide/bin/lib.sh`
+    `editor_split_ratio` reads `<state dir>/herdr-sidebar/state.json`
+    (`jq -r '.terminal_height // empty'`) at BUILD time and the project's remembered ratio in
+    `dotfiles-ide`'s `sizes.json` still wins, so a user's own drag is never undone. That is
+    the one-way cross-layer contract: the shell layer reads the sidebar's state file, the
+    sidebar never reads `sizes.json` or anything under the `dotfiles-ide` plugin.
+  - Mechanism: `launch::foreign_down_split(layout_json, pane_id)` returns
+    `(path, ratio, height)` of the tab's `down` split that does NOT contain our own pane
+    (innermost wins; a split holding our column is `sidebar_width`'s job), and
+    `launch::ratio_for_rows(rows, height)` converts rows into the split's ratio
+    (`1 - rows/height`, clamped to herdr's 0.1..0.9 with a row kept on each side). Split paths
+    come from herdr's split ids (`split_<n>_root` = `[]`, `split_<n>_010` = one bool per child
+    step), which is what `layout.set_split_ratio` takes.
+  - `PaneCtl::set_terminal_rows` applies the ratio on `HERDR_TAB_ID` (falling back to
+    `pane_id`, so a launch without the tab env still resolves the same tab) and reports
+    "Terminal height: no pane to size in this tab" when the tab has no such split; the stored
+    value is kept, because it still applies to tabs built later. When "auto" is stepped for the
+    first time the value is seeded from the live layout's rows
+    (`PaneCtl::terminal_rows_now`), or `state::SEED_TERMINAL_HEIGHT` when there is no split to
+    measure.
 - Every Settings action uses `state::update_state`, a lock-protected read-modify-write.
   State/tree/SCM/root writers use persistent sibling `.lock` files with OS-backed locks; the
   kernel releases ownership on process death, so do not poll, age, or delete those files.

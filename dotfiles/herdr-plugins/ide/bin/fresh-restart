@@ -171,7 +171,7 @@ restart_one() {
       warn "$project: pane $pane closed and tab $tab has no Terminal pane; press Ctrl+B I to rebuild the IDE layout"
       return 1
     fi
-    editor=$(new_editor_pane "$term" "$root") || { warn "$project: could not split a new editor pane above $term"; return 1; }
+    editor=$(new_editor_pane "$term" "$root" "$(editor_ratio_for "$term" "$saved")") || { warn "$project: could not split a new editor pane above $term"; return 1; }
     [ "$focus_target" = "$pane" ] && focus_target=$editor
     pane=$editor
     mark_fresh_pane "$pane" "$daemon" || warn "$project: could not label pane $pane"

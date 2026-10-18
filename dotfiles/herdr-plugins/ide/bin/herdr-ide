@@ -65,7 +65,7 @@ if [ -n "$anchor_agent" ]; then
   [ -n "$middle" ] || die "pane split failed"
   "$HERDR" pane swap --source-pane "$agent" --target-pane "$middle" >/dev/null
   editor=$middle
-  term=$(split "$editor" down 0.7)
+  term=$(split "$editor" down "$(editor_ratio_for "$editor" "$saved")")
   [ -n "$term" ] || die "pane split failed"
 else
   # A shell: it stays as the Terminal, under a new editor, left of a new agent.
@@ -79,7 +79,7 @@ else
     "$HERDR" pane run "$agent" ". $(printf '%q' "$here/../shell/agent-title.zsh"); $agent_cmd" >/dev/null
     "$here/ide-agent-title" "$agent" "$agent_cmd"
   fi
-  editor=$(new_editor_pane "$term" "$root") || die "pane split failed"
+  editor=$(new_editor_pane "$term" "$root" "$(editor_ratio_for "$term" "$saved")") || die "pane split failed"
 fi
 
 [ -n "$agent" ] && "$HERDR" pane rename "$agent" "$AGENT_LABEL" >/dev/null

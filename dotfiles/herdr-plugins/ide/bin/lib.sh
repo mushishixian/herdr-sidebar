@@ -112,16 +112,105 @@ mark_fresh_pane() { # pane daemon
   "$HERDR" pane input "$1" --right-click pane >/dev/null
 }
 
-# New editor pane above the terminal pane $1, rooted at $2: split $1 down at
-# 0.7, then swap so the new pane sits on top. Prints its id; the caller marks
-# and starts it. Used by herdr-ide and fresh-restart (pane gone case).
-new_editor_pane() { # term root
-  local editor
-  editor=$("$HERDR" pane split "$1" --direction down --ratio 0.7 --cwd "$2" \
+# New editor pane above the terminal pane $1, rooted at $2, taking $3 of the
+# column (the editor/terminal SPLIT RATIO, i.e. the EDITOR's share): split $1
+# down, then swap so the new pane sits on top. Prints its id; the caller marks
+# and starts it. Callers compute $3 with editor_ratio_for (a remembered ratio
+# wins over the sidebar's terminal-height setting). Used by herdr-ide and
+# fresh-restart (pane gone case).
+new_editor_pane() { # term root ratio
+  local editor ratio=${3:-0.7}
+  [ -n "$ratio" ] || ratio=0.7
+  editor=$("$HERDR" pane split "$1" --direction down --ratio "$ratio" --cwd "$2" \
     | jq -r '.result.pane.pane_id // empty')
   [ -n "$editor" ] || return 1
   "$HERDR" pane swap --source-pane "$1" --target-pane "$editor" >/dev/null
   printf '%s\n' "$editor"
+}
+
+# ── Editor/terminal split (terminal height) ────────────────────────────
+# The split ratio is the TOP (editor) child's share, so a terminal of N rows
+# out of a column of H rows is 1 - N/H. Three sources, in order:
+#   1. sizes.json's remembered "editor" ratio for this project (the user's own
+#      drag ALWAYS wins),
+#   2. the herdr-sidebar plugin's `terminal_height` setting (rows) — the ONE-WAY
+#      dependency: this layer only READS the sidebar's state file,
+#   3. the historical 0.7.
+# The sidebar's "Terminal height" row also applies itself to the tab it runs in;
+# these helpers only matter when a layout is (re)built.
+SIDEBAR_STATE_FILE=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr-sidebar/state.json
+# Historical editor share; also the fallback inside editor_split_ratio.
+DEFAULT_EDITOR_RATIO=0.7
+
+# The sidebar's Terminal height setting in ROWS, or nothing when unset ("auto")
+# or unreadable. Never fails: a missing/garbled file simply means "auto".
+terminal_height_rows() {
+  local value
+  [ -r "$SIDEBAR_STATE_FILE" ] || return 0
+  # Numbers only: the sidebar writes a number or null, and a hand-edited
+  # `"10"` must read as "auto" exactly like the Rust parser (`as_u64`).
+  value=$(jq -r '.terminal_height | numbers' "$SIDEBAR_STATE_FILE" 2>/dev/null) || value=''
+  case $value in
+    '' | *[!0-9]*) return 0 ;;
+  esac
+  # Same bounds as the sidebar's row (4..40 rows, 2 per step).
+  if [ "$value" -lt 4 ]; then value=4; elif [ "$value" -gt 40 ]; then value=40; fi
+  printf '%s\n' "$value"
+}
+
+# The editor (top) share for a terminal pane about to be split in tab layout
+# $1, pane $2. A remembered ratio ($3, sizes.json "editor") always wins — the
+# user's own drag — otherwise the sidebar's `terminal_height` setting (rows),
+# otherwise the historical 0.7. Pure: takes a `pane layout` reply on stdin and
+# calls no herdr command, so it is unit-testable on fixtures.
+editor_split_ratio() { # pane saved-ratio [fallback] < layout.json
+  local pane=$1 saved=${2:-} fallback=${3:-$DEFAULT_EDITOR_RATIO} rows height millionths
+  if [ -n "$saved" ]; then
+    printf '%.6f\n' "$saved"
+    return 0
+  fi
+  rows=$(terminal_height_rows)
+  if [ -z "$rows" ]; then
+    printf '%.6f\n' "$fallback"
+    return 0
+  fi
+  height=$(jq -r --arg pane "$pane" '
+    .result.layout as $L
+    | (first($L.panes[]? | select(.pane_id == $pane) | .rect) // null) as $r
+    | if $r == null then empty
+      else
+        # The COLUMN height. Before the split exists the pane spans it, but a
+        # collapsed terminal leaves the editor short of the column, so prefer
+        # the smallest enclosing `down` split.
+        ([ $L.splits[]? | select(.direction == "down")
+           | select(.rect.x <= $r.x and $r.x + $r.width <= .rect.x + .rect.width
+                    and .rect.y <= $r.y and $r.y + $r.height <= .rect.y + .rect.height)
+           | .rect.height ] | min) // $r.height
+      end' 2>/dev/null) || height=''
+  case $height in
+    '' | *[!0-9]*) printf '%.6f\n' "$fallback"; return 0 ;;
+  esac
+  # Both panes keep at least one row; herdr clamps the ratio to 0.1..0.9.
+  if [ "$height" -lt 3 ]; then
+    printf '%.6f\n' "$fallback"
+    return 0
+  fi
+  if [ "$rows" -lt 1 ]; then rows=1; elif [ "$rows" -gt $((height - 1)) ]; then rows=$((height - 1)); fi
+  # Integer math in millionths: (height - rows) / height.
+  millionths=$(((height - rows) * 1000000 / height))
+  if [ "$millionths" -lt 100000 ]; then millionths=100000; fi
+  if [ "$millionths" -gt 900000 ]; then millionths=900000; fi
+  printf '%d.%06d\n' $((millionths / 1000000)) $((millionths % 1000000))
+}
+
+# editor_split_ratio for the layout being built around pane $1, with the tab's
+# saved sizes entry $2 ({"editor": r, “agent”: r}, or empty) supplying the
+# remembered ratio. Takes one `pane layout` snapshot.
+editor_ratio_for() { # pane saved-entry
+  local entry=${2:-} saved
+  [ -n "$entry" ] || entry='{}'
+  saved=$(jq -r '.editor // empty' <<<"$entry" 2>/dev/null) || saved=''
+  editor_split_ratio "$1" "$saved" <<<"$("$HERDR" pane layout --pane "$1" 2>/dev/null || true)"
 }
 
 # ── Remembered sizes ───────────────────────────────────────────────────
@@ -240,13 +329,15 @@ restore_sizes() {
   done
 }
 
-# Saved editor ratio for the project of Fresh pane $1, or $2 when none is saved.
+# Saved editor ratio for the project of Fresh pane $1, or $2 when none is saved
+# and the sidebar has no Terminal height setting.
 saved_editor_ratio() { # fresh-pane fallback
   local daemon ratio
   daemon=$("$HERDR" pane list | jq -r --arg p "$1" '
     first(.result.panes[] | select(.pane_id == $p) | .tokens.fresh_daemon) // empty')
   ratio=$(jq -r '.editor // empty' <<<"$(saved_entry "$daemon")" 2>/dev/null) || ratio=''
-  printf '%s\n' "${ratio:-$2}"
+  editor_split_ratio "$1" "$ratio" "$2" \
+    <<<"$("$HERDR" pane layout --pane "$1" 2>/dev/null || true)"
 }
 
 # ── Toasts naming a shortcut ───────────────────────────────────────────

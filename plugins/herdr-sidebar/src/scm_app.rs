@@ -899,6 +899,9 @@ enum Setting {
     UnifiedSidebar,
     DockRight,
     SidebarWidth,
+    /// Default height, in rows, of the bottom pane of the IDE layout's
+    /// editor/terminal column.
+    TerminalHeight,
     IconTheme,
     ColorTheme,
     PreviewPlacement,
@@ -966,6 +969,9 @@ struct ClickZones {
 /// Handle for identity/label control of our own pane over the socket API.
 struct PaneCtl {
     pane_id: String,
+    /// The pane's tab, so a split ratio can be set on the whole tab rather than
+    /// on whichever pane happens to be focused.
+    tab_id: Option<String>,
 }
 
 impl PaneCtl {
@@ -973,7 +979,12 @@ impl PaneCtl {
         let pane_id = std::env::var("HERDR_PANE_ID")
             .ok()
             .filter(|id| !id.is_empty())?;
-        Some(Self { pane_id })
+        Some(Self {
+            pane_id,
+            tab_id: std::env::var("HERDR_TAB_ID")
+                .ok()
+                .filter(|id| !id.is_empty()),
+        })
     }
 
     /// Set or clear the pane label — cleared while collapsed so the sliver
@@ -1043,6 +1054,51 @@ impl PaneCtl {
             serde_json::json!({ "pane_id": self.pane_id }),
         )
         .ok()
+    }
+
+    /// Rows the bottom pane of this tab's editor/terminal column occupies right
+    /// now — the seed for the first `←`/`→` on an "auto" Terminal height.
+    fn terminal_rows_now(&self) -> Option<u16> {
+        let layout = self.layout()?;
+        let (_, ratio, height) = herdr_sidebar::launch::foreign_down_split(&layout, &self.pane_id)?;
+        let rows = (1.0 - ratio) * height as f64;
+        Some(rows.round().max(0.0) as u16)
+    }
+
+    /// Size this tab's editor/terminal split so its BOTTOM pane is `rows` rows
+    /// tall. False when the tab has no such split (nothing to size), so the
+    /// caller can say so instead of looking like it worked.
+    fn set_terminal_rows(&self, rows: u16) -> bool {
+        let Ok(layout) = herdr_sidebar::ipc::call_text(
+            "pane.layout",
+            serde_json::json!({ "pane_id": self.pane_id }),
+        ) else {
+            return false;
+        };
+        let Some((path, _ratio, height)) =
+            herdr_sidebar::launch::foreign_down_split(&layout, &self.pane_id)
+        else {
+            return false;
+        };
+        let mut params = serde_json::json!({
+            "path": path,
+            "ratio": herdr_sidebar::launch::ratio_for_rows(rows, height),
+        });
+        // Prefer the tab form; a launch that did not tell us its tab still
+        // resolves the same tab from the pane.
+        match &self.tab_id {
+            Some(tab) => params["tab_id"] = serde_json::Value::String(tab.clone()),
+            None => params["pane_id"] = serde_json::Value::String(self.pane_id.clone()),
+        }
+        match herdr_sidebar::ipc::call_text("layout.set_split_ratio", params) {
+            // call_text returns the reply line even for an error response.
+            Ok(reply) => {
+                serde_json::from_str::<serde_json::Value>(reply.trim_start_matches('\u{feff}'))
+                    .map(|value| value.get("error").is_none())
+                    .unwrap_or(false)
+            }
+            Err(_) => false,
+        }
     }
 
     /// Report identity tokens: always our own; in merged mode also the other
@@ -2556,6 +2612,7 @@ impl App {
             Activate,
             ToggleSetting(usize),
             AdjustWidth(bool),
+            AdjustHeight(bool),
             DiscardConfirmed(usize, FileEntry),
             DiscardAllConfirmed(usize),
             GitConfirmed(usize, Vec<String>),
@@ -2600,6 +2657,18 @@ impl App {
                 {
                     Cmd::AdjustWidth(true)
                 }
+                KeyCode::Left | KeyCode::Char('h')
+                    if settings.get(*selected).map(|row| row.0)
+                        == Some(Setting::TerminalHeight) =>
+                {
+                    Cmd::AdjustHeight(false)
+                }
+                KeyCode::Right | KeyCode::Char('l')
+                    if settings.get(*selected).map(|row| row.0)
+                        == Some(Setting::TerminalHeight) =>
+                {
+                    Cmd::AdjustHeight(true)
+                }
                 KeyCode::Enter | KeyCode::Char(' ') => Cmd::ToggleSetting(*selected),
                 _ => Cmd::Nothing,
             },
@@ -2639,6 +2708,7 @@ impl App {
             Cmd::Activate => self.activate_menu_entry(),
             Cmd::ToggleSetting(index) => self.toggle_setting(index),
             Cmd::AdjustWidth(wider) => self.adjust_sidebar_width(wider),
+            Cmd::AdjustHeight(taller) => self.adjust_terminal_height(taller),
             Cmd::GitConfirmed(repo, args) => {
                 self.overlay = None;
                 match safe_branch_delete(&args) {
@@ -2868,6 +2938,15 @@ impl App {
                 true,
             ),
             (
+                Setting::TerminalHeight,
+                "Terminal height",
+                match self.sidebar_state.terminal_height {
+                    Some(rows) => format!("{rows} rows"),
+                    None => "auto".to_string(),
+                },
+                true,
+            ),
+            (
                 Setting::IconTheme,
                 "Icon theme",
                 match self.theme {
@@ -3006,6 +3085,7 @@ impl App {
                     sidebar::update_state(|state| state.dock_right = !state.dock_right);
             }
             Setting::SidebarWidth => self.adjust_sidebar_width(true),
+            Setting::TerminalHeight => self.clear_terminal_height(),
             Setting::IconTheme => self.set_theme(self.theme.toggled()),
             Setting::ColorTheme => {
                 self.sidebar_state = sidebar::update_state(|state| {
@@ -3066,6 +3146,37 @@ impl App {
                 self.sidebar_state.dock_right,
             );
         }
+    }
+
+    /// `←`/`→` on the Terminal height row: step the persisted default and size
+    /// THIS tab's editor/terminal column right away. The setting is a default
+    /// (the IDE layer's remembered per-project ratio still wins when a layout is
+    /// built); applying it here just makes the row feel immediate.
+    fn adjust_terminal_height(&mut self, taller: bool) {
+        let seed = self
+            .pane_ctl
+            .as_ref()
+            .and_then(|ctl| ctl.terminal_rows_now())
+            .unwrap_or(sidebar::SEED_TERMINAL_HEIGHT);
+        let rows = sidebar::step_terminal_height(seed, taller);
+        self.sidebar_state = sidebar::update_state(|state| state.terminal_height = Some(rows));
+        let applied = self
+            .pane_ctl
+            .as_ref()
+            .is_some_and(|ctl| ctl.set_terminal_rows(rows));
+        if !applied {
+            // Keep the stored value: it still applies to tabs built later.
+            self.flash = Some((
+                "Terminal height: no pane to size in this tab".to_string(),
+                false,
+            ));
+        }
+    }
+
+    /// `⏎` on the Terminal height row: back to "auto", so a built layout uses
+    /// the IDE layer's own default again. The current layout is left alone.
+    fn clear_terminal_height(&mut self) {
+        self.sidebar_state = sidebar::update_state(|state| state.terminal_height = None);
     }
 
     /// The NATIVE folder picker on a background thread (the pane's liveness
@@ -3174,7 +3285,7 @@ impl App {
             Style::default().bold(),
         )));
         lines.extend(hint_lines);
-        lines.push(Line::from(" click/⏎ · ←/→ width · esc".dim()));
+        lines.push(Line::from(" click/⏎ · ←/→ adjust · esc".dim()));
 
         frame.render_widget(Clear, popup);
         frame.render_widget(

@@ -9,6 +9,8 @@
 //! - `follow_cwd`: follow the live cwd of the neighbouring pane.
 //! - `dock_right`: dock at the right edge instead of the default left edge.
 //! - `sidebar_width`: preferred sidebar width in terminal columns.
+//! - `terminal_height`: default height, in ROWS, of the IDE layout's bottom
+//!   "command line" pane (see `launch::foreign_down_split`).
 //!
 //! Both views live in ONE binary; switching is an in-process re-render, and
 //! separated panes are the same binary pinned to a starting view with
@@ -37,6 +39,32 @@ pub fn step_sidebar_width(width: u16, wider: bool) -> u16 {
         width
             .saturating_sub(SIDEBAR_WIDTH_STEP)
             .max(MIN_SIDEBAR_WIDTH)
+    }
+}
+
+/// Rows for the bottom pane of the IDE layout's editor/terminal column (the
+/// "command line" under the Fresh editor). Only the HEIGHT is configurable:
+/// the width is whatever the middle column is.
+pub const MIN_TERMINAL_HEIGHT: u16 = 4;
+pub const MAX_TERMINAL_HEIGHT: u16 = 40;
+pub const TERMINAL_HEIGHT_STEP: u16 = 2;
+
+/// Seed for the first `←`/`→` when the setting is unset AND the current tab has
+/// no editor/terminal split to measure. It is never written by itself: an
+/// unset setting keeps the historical 70% editor share.
+pub const SEED_TERMINAL_HEIGHT: u16 = 12;
+
+pub fn clamp_terminal_height(rows: u16) -> u16 {
+    rows.clamp(MIN_TERMINAL_HEIGHT, MAX_TERMINAL_HEIGHT)
+}
+
+pub fn step_terminal_height(rows: u16, taller: bool) -> u16 {
+    let rows = clamp_terminal_height(rows);
+    if taller {
+        (rows + TERMINAL_HEIGHT_STEP).min(MAX_TERMINAL_HEIGHT)
+    } else {
+        rows.saturating_sub(TERMINAL_HEIGHT_STEP)
+            .max(MIN_TERMINAL_HEIGHT)
     }
 }
 
@@ -322,6 +350,11 @@ pub struct State {
     /// column target in the normal range and yields proportionally when the
     /// tab becomes unusually narrow.
     pub sidebar_width: u16,
+    /// Default height, in ROWS, of the bottom pane of the IDE layout's
+    /// editor/terminal column. `None` (the historical behavior) leaves the
+    /// split to the IDE layer, which then uses its remembered per-project
+    /// ratio or its own 70% default.
+    pub terminal_height: Option<u16>,
     /// Whether a clicked file opens in its own tab or in a viewer pane beside
     /// the sidebar, inside the tab the click came from.
     pub preview_placement: PreviewPlacement,
@@ -355,6 +388,7 @@ impl Default for State {
             git_deco: true,
             dock_right: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            terminal_height: None,
             preview_placement: PreviewPlacement::Tab,
             custom_editor_on_click: false,
             custom_editor_inline: false,
@@ -524,7 +558,7 @@ fn write_state(path: &Path, state: State) {
         None => String::new(),
     };
     let json = format!(
-        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"custom_editor_inline\":{},\"scm_tree_view\":{}{icons}}}",
+        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"terminal_height\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"custom_editor_inline\":{},\"scm_tree_view\":{}{icons}}}",
         state.merged,
         state.active.state_name(),
         state.search_active,
@@ -538,6 +572,11 @@ fn write_state(path: &Path, state: State) {
         state.git_deco,
         state.dock_right,
         clamp_sidebar_width(state.sidebar_width),
+        // `null` is "auto": the IDE layer keeps its own default.
+        match state.terminal_height {
+            Some(rows) => clamp_terminal_height(rows).to_string(),
+            None => "null".to_string(),
+        },
         state.color_theme.label(),
         state.preview_placement.label(),
         state.custom_editor_on_click,
@@ -978,6 +1017,12 @@ pub fn parse_state(json: &str) -> State {
             .and_then(|v| u16::try_from(v).ok())
             .map(clamp_sidebar_width)
             .unwrap_or(default.sidebar_width),
+        // Absent or null = auto (the historical behavior).
+        terminal_height: value
+            .get("terminal_height")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u16::try_from(v).ok())
+            .map(clamp_terminal_height),
         preview_placement: value
             .get("preview_placement")
             .and_then(|v| v.as_str())
@@ -1137,12 +1182,13 @@ mod tests {
             git_deco: false,
             dock_right: true,
             sidebar_width: 44,
+            terminal_height: Some(22),
             preview_placement: PreviewPlacement::Pane,
             custom_editor_on_click: true,
             custom_editor_inline: true,
             scm_tree_view: true,
         };
-        let json = "{\"merged\":true,\"active\":\"source-control\",\"search_active\":true,\"hotkeys\":true,\"git_footer\":false,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"custom_editor_on_click\":true,\"custom_editor_inline\":true,\"scm_tree_view\":true,\"icons\":\"emoji\"}";
+        let json = "{\"merged\":true,\"active\":\"source-control\",\"search_active\":true,\"hotkeys\":true,\"git_footer\":false,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"terminal_height\":22,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"custom_editor_on_click\":true,\"custom_editor_inline\":true,\"scm_tree_view\":true,\"icons\":\"emoji\"}";
         assert_eq!(parse_state(json), state);
         assert!(parse_state("\u{feff}{\"merged\":true}").merged);
         // Files written before the flag existed keep auto-open AND the git
@@ -1183,6 +1229,25 @@ mod tests {
         assert_eq!(parse_state("{\"merged\":true}").sidebar_width, 32);
         assert_eq!(parse_state("{\"sidebar_width\":1}").sidebar_width, 24);
         assert_eq!(parse_state("{\"sidebar_width\":999}").sidebar_width, 80);
+        // Files written before the terminal-height row existed keep "auto"
+        // (the IDE layer's own default), and null means the same thing.
+        assert_eq!(parse_state("{\"merged\":true}").terminal_height, None);
+        assert_eq!(
+            parse_state(r#"{"terminal_height":null}"#).terminal_height,
+            None
+        );
+        assert_eq!(
+            parse_state(r#"{"terminal_height":3}"#).terminal_height,
+            Some(MIN_TERMINAL_HEIGHT)
+        );
+        assert_eq!(
+            parse_state(r#"{"terminal_height":999}"#).terminal_height,
+            Some(MAX_TERMINAL_HEIGHT)
+        );
+        assert_eq!(
+            parse_state(r#"{"terminal_height":"auto"}"#).terminal_height,
+            None
+        );
         // Files written before the preview setting existed keep the
         // historical behavior: a tab per document.
         assert_eq!(
@@ -1238,6 +1303,31 @@ mod tests {
         );
         assert_eq!(step_sidebar_width(1, true), 28);
         assert_eq!(step_sidebar_width(u16::MAX, false), 76);
+    }
+
+    #[test]
+    fn terminal_height_steps_and_saturates_within_supported_bounds() {
+        assert_eq!(step_terminal_height(10, true), 12);
+        assert_eq!(step_terminal_height(10, false), 8);
+        assert_eq!(
+            step_terminal_height(MAX_TERMINAL_HEIGHT, true),
+            MAX_TERMINAL_HEIGHT
+        );
+        assert_eq!(
+            step_terminal_height(MIN_TERMINAL_HEIGHT, false),
+            MIN_TERMINAL_HEIGHT
+        );
+        // Out-of-range values (hand-edited state files) are clamped first.
+        assert_eq!(
+            step_terminal_height(1, true),
+            MIN_TERMINAL_HEIGHT + TERMINAL_HEIGHT_STEP
+        );
+        assert_eq!(
+            step_terminal_height(u16::MAX, false),
+            MAX_TERMINAL_HEIGHT - TERMINAL_HEIGHT_STEP
+        );
+        assert_eq!(clamp_terminal_height(0), MIN_TERMINAL_HEIGHT);
+        assert_eq!(clamp_terminal_height(500), MAX_TERMINAL_HEIGHT);
     }
 
     #[test]
