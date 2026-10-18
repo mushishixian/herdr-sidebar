@@ -1,4 +1,5 @@
-# apt packages for install.sh (Ubuntu 24.04+). One per line.
+# apt packages for install.sh. One per line. Ubuntu 25.10+ has all of them; older releases
+# (24.04) skip what apt lacks (lazygit, starship) and build.sh installs a newer Rust.
 zsh
 zsh-autosuggestions
 zsh-syntax-highlighting
@@ -14,6 +15,7 @@ eza
 fzf
 zoxide
 git-delta
+build-essential
 btop
 lazygit
 starship

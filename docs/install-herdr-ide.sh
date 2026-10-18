@@ -49,6 +49,7 @@ DOTFILES=$REPO/dotfiles
 [ -f "$DOTFILES/install.sh" ] || die "dotfiles/ missing in $REPO"
 info "sidebar source: $REPO"
 info "dotfiles:       $DOTFILES"
+info "distro:         $(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release 2>/dev/null || echo unknown)"
 
 # ── 1. Config drift check ──────────────────────────────────────────────
 # Fresh's settings UI and herdr can replace the dotfiles symlink with a copy.
@@ -151,7 +152,17 @@ fi
 if command -v lazygit >/dev/null 2>&1; then
   ok "lazygit present (ctrl+b alt+g)"
 else
-  bad "lazygit missing (sudo apt install lazygit)"
+  bad "lazygit missing (Ubuntu 25.10+: sudo apt install lazygit; older: install a release from github.com/jesseduffield/lazygit/releases)"
+fi
+
+# The sidebar build needs cargo/rustc >= the crate's rust-version (build.sh installs one if needed).
+need=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' "$PLUGIN/Cargo.toml" | head -n1)
+have=$(PATH="$HOME/.cargo/bin:$PATH" rustc --version 2>/dev/null | awk '{print $2}' || true)
+have=${have%%-*}
+if [ -n "$have" ] && [ -n "$need" ] && [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -n1)" = "$need" ]; then
+  ok "rustc $have (needs >= $need)"
+else
+  bad "rustc ${have:-missing} is too old or missing (needs >= ${need:-?}; dotfiles/herdr-sidebar/build.sh installs a rustup toolchain)"
 fi
 
 if [ "$with_oco" = 1 ]; then

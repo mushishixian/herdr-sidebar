@@ -25,8 +25,8 @@ plugins, configuration, and this fork of herdr-sidebar.
 
 | Piece | Location | Kind |
 |---|---|---|
-| herdr-sidebar fork | `~/code/herdr-sidebar`, branch `fresh-inline-editor` (this repo) | Rust herdr plugin, linked with `herdr plugin link` |
-| Dotfiles | `dotfiles/` in this repo (branch `fresh-inline-editor`; backed up wherever this branch is pushed) | configs + scripts |
+| herdr-sidebar fork | `~/code/herdr-sidebar`, branch `main` (this repo) | Rust herdr plugin, linked with `herdr plugin link` |
+| Dotfiles | `dotfiles/` in this repo (branch `main`; pushed to the fork `mushishixian/herdr-siderbar`) | configs + scripts |
 | dotfiles installer | `dotfiles/install.sh` | apt, herdr, Fresh, symlinks, plugins |
 | Sidebar build helper | `dotfiles/herdr-sidebar/build.sh` | builds this checkout (`plugins/herdr-sidebar`) and points herdr's `herdr-sidebar` registration at it |
 | IDE plugin `dotfiles-ide` | `dotfiles/herdr-plugins/ide` | bash herdr plugin (layout, terminal toggle, Ctrl+click → Fresh) |
@@ -40,7 +40,7 @@ plugins, configuration, and this fork of herdr-sidebar.
 ### Repository layout
 
 ```
-herdr-sidebar/                 this repo (branch fresh-inline-editor)
+herdr-sidebar/                 this repo (branch main)
 ├── plugins/herdr-sidebar/     Rust plugin: explorer, search, source control (upstream-shaped, builds standalone)
 ├── dotfiles/                  IDE layer: install.sh, herdr/Fresh/lazygit/shell configs, dotfiles-ide plugin, build.sh
 └── docs/                      this document and install-herdr-ide.sh
@@ -50,13 +50,21 @@ herdr-sidebar/                 this repo (branch fresh-inline-editor)
 
 ## Install
 
-On a new machine, clone this repo's `fresh-inline-editor` branch from wherever it
-is pushed (your fork, not `alexarthurs/herdr-sidebar`: `origin` there is upstream
-and would NOT contain these commits). The dotfiles live in its `dotfiles/`
-directory, so there is no second repo to fetch.
+**Requirements.** Windows with WSL and an Ubuntu distro, plus Windows Terminal (or WezTerm) with a
+Nerd Font selected as the terminal font, so the sidebar and Fresh icons render. Ubuntu 25.10 or newer
+(26.04 LTS recommended) gets every package from apt. On Ubuntu 24.04 the installer still works but
+skips `lazygit` and `starship` (apt does not have them there): `starship` is only the optional shell
+prompt, and `lazygit` is the `ctrl+b alt+g` popup. The sidebar is built with a rustup toolchain,
+because 24.04's apt `rustc` is too old for the crate (`rust-version` 1.89).
+
+Clone `main` of the fork, `https://github.com/mushishixian/herdr-siderbar.git` (the GitHub
+repo is spelled `siderbar`; the checkout directory is still `~/code/herdr-sidebar`). HTTPS works
+without an SSH key because the repo is public. The upstream `alexarthurs/herdr-sidebar` does NOT
+contain these commits. The dotfiles live in the fork's `dotfiles/` directory, so there is no second
+repo to fetch.
 
 ```bash
-git clone -b fresh-inline-editor <your fork URL> ~/code/herdr-sidebar
+git clone https://github.com/mushishixian/herdr-siderbar.git ~/code/herdr-sidebar
 cd ~/code/herdr-sidebar
 docs/install-herdr-ide.sh            # --help for options (--no-lsp, --no-packages, --no-claude, --no-oco)
 ```
@@ -68,11 +76,15 @@ What it does, in order:
 
 1. Drift check: warns if Fresh or herdr replaced their config symlink with a plain
    copy (see *Gotchas*) and shows the diff so you can merge it into `dotfiles/config/` first.
-2. Runs `dotfiles/install.sh`: apt packages (incl. `rustc cargo jq`), herdr + Fresh
+2. Runs `dotfiles/install.sh`: apt packages (incl. `rustc cargo build-essential jq`; any package this
+   Ubuntu's apt does not have is skipped with a note, never aborting the install), herdr + Fresh
    official installers, all symlinks, `dotfiles/herdr-sidebar/build.sh` (builds
    `plugins/herdr-sidebar` from this checkout and points herdr's `herdr-sidebar`
    registration at it, replacing any other registration), links `dotfiles-ide`,
    seeds the sidebar settings, installs herdr's Claude Code and pi agent-state hooks.
+   `build.sh` uses the first Rust toolchain at least as new as the crate's `rust-version`: the
+   `rustc` on PATH, else an existing `~/.cargo/bin` (rustup), else it installs rustup into your
+   home directory, non-interactively.
 3. Installs OpenCommit into `~/.local`.
 4. Verifies the actions, Fresh plugins and keys are visible, that the `herdr-sidebar`
    and `dotfiles-ide` registrations both point into this repo, then reloads herdr.
@@ -366,8 +378,7 @@ tokens and attaches Fresh again.
 
 ### herdr-sidebar fork (this repo)
 
-Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on
-`fresh-inline-editor`:
+Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (the fork):
 
 | Commit | Feature | Mechanism |
 |---|---|---|
@@ -511,12 +522,13 @@ herdr server reload-config
 dotfiles/herdr-plugins/ide/bin/fresh-restart --all   # graceful; unsaved buffers come back (hot exit), run from the repo root
 # by hand, if fresh-restart is unavailable: fresh --cmd daemon list; fresh --cmd daemon kill <name>; then fresh-ide in that pane
 
-# pull this branch (or rerun docs/install-herdr-ide.sh), then rebuild and re-point herdr at this checkout
+# pull main (or rerun docs/install-herdr-ide.sh), then rebuild and re-point herdr at this checkout
 git pull
 dotfiles/herdr-sidebar/build.sh
 
-# take upstream herdr-sidebar changes (origin is alexarthurs/herdr-sidebar), then rebuild the same way
-git fetch origin && git merge origin/main
+# take upstream herdr-sidebar changes (origin is the fork, mushishixian/herdr-siderbar; upstream is alexarthurs/herdr-sidebar), then rebuild the same way
+git remote add upstream https://github.com/alexarthurs/herdr-sidebar.git   # once
+git fetch upstream && git merge upstream/main
 dotfiles/herdr-sidebar/build.sh
 ```
 
@@ -589,7 +601,7 @@ popups, and conflict routing.
 | Status bar says `Restricted` / `LSP (off)` | the workspace is not trusted: Fresh never starts servers there. `Ctrl+P` → "Trust This Folder" |
 | `LSP (rust)`: "outdated toolchain version" | the downloaded rust-analyzer is newer than your `rustc` supports: `dotfiles/install-lsp.sh --update --only rust` picks the release that matches |
 | No completions in Rust std | `rust-src` is missing: `apt-cache policy rust-src`, then `dotfiles/install-lsp.sh --update` (or `rustup component add rust-src`) |
-| `ctrl+b alt+g` (lazygit) does nothing | `command -v lazygit` (it is in `dotfiles/packages.txt`: rerun the installer without `--no-packages`, or `sudo apt install lazygit`) |
+| `ctrl+b alt+g` (lazygit) does nothing | `command -v lazygit`. Ubuntu 25.10+: `sudo apt install lazygit`. Older Ubuntu (24.04) has no lazygit package: install a release binary from github.com/jesseduffield/lazygit/releases into `~/.local/bin` |
 | Ctrl+click / Send to Agent / sidebar click still run scripts from `~/code/dotfiles` | rerun `docs/install-herdr-ide.sh` (it re-points the links, the `dotfiles-ide` registration and `editor-command.txt`), then `dotfiles/herdr-plugins/ide/bin/fresh-restart --all` so the daemons pick up `DOTFILES_IDE_BIN` |
 
 More internals (herdr behaviour, heartbeat liveness, preview tabs, release

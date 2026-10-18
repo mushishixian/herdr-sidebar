@@ -3,7 +3,8 @@
 #
 # The fork, the plugin and these dotfiles live in one repo, so there are no
 # upstream patches. Update = `git pull`, then rerun (install or this script).
-# Needs cargo and rustc (Ubuntu: apt install rustc cargo) and jq.
+# Needs cargo and rustc at least as new as the crate's rust-version (Ubuntu 24.04's
+# apt Rust is too old, so a rustup toolchain is used). Needs jq.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
@@ -11,7 +12,37 @@ REPO=$(cd "$HERE/../.." && pwd)
 PLUGIN=$REPO/plugins/herdr-sidebar
 export PATH="$HOME/.local/bin:$PATH"
 
-command -v cargo >/dev/null || { echo "cargo missing: sudo apt install rustc cargo" >&2; exit 1; }
+# The toolchain must be at least the crate's rust-version (currently 1.89).
+need=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' "$PLUGIN/Cargo.toml" | head -n1)
+[ -n "$need" ] || { echo "no rust-version in $PLUGIN/Cargo.toml" >&2; exit 1; }
+
+# rust_ok — cargo and a rustc on PATH that are >= $need (sort -V picks the older one).
+rust_ok() {
+  local have
+  command -v cargo >/dev/null 2>&1 || return 1
+  command -v rustc >/dev/null 2>&1 || return 1
+  have=$(rustc --version 2>/dev/null | awk '{print $2}') || true
+  have=${have%%-*}
+  [ -n "$have" ] && [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -n1)" = "$need" ]
+}
+
+# 1. Whatever is on PATH; 2. an existing rustup install; 3. install rustup into $HOME.
+if rust_ok; then
+  how="system rust"
+elif [ -x "$HOME/.cargo/bin/rustc" ]; then
+  export PATH="$HOME/.cargo/bin:$PATH"
+  if ! rust_ok && command -v rustup >/dev/null 2>&1; then
+    rustup update stable >/dev/null
+  fi
+  how="rustup in ~/.cargo/bin"
+else
+  echo "Rust >= $need needed: installing rustup into ~/.cargo (non-interactive)"
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+  export PATH="$HOME/.cargo/bin:$PATH"
+  how="rustup installed into ~/.cargo"
+fi
+rust_ok || { echo "no cargo/rustc >= $need found (rustc: $(rustc --version 2>/dev/null || echo none))" >&2; exit 1; }
+echo "using $how: $(rustc --version)"
 
 (cd "$PLUGIN" && cargo build --release --quiet)
 

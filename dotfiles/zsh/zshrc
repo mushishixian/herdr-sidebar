@@ -1,6 +1,8 @@
 # ~/.zshrc (managed by herdr-sidebar/dotfiles — machine-only bits go in ~/.zshrc.local)
 
 export PATH="$HOME/.local/bin:$PATH"
+# rustup (installed by herdr-sidebar/build.sh where apt's Rust is too old) wins over apt's.
+[ -d "$HOME/.cargo/bin" ] && export PATH="$HOME/.cargo/bin:$PATH"
 export EDITOR=fresh VISUAL=fresh
 export RIPGREP_CONFIG_PATH="$HOME/.config/ripgrep/config"
 export BAT_CONFIG_PATH="$HOME/.config/bat/config"

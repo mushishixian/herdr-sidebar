@@ -34,6 +34,13 @@ done
 step() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 
+# apt_has PKG — true when this release's apt has an install candidate for PKG.
+apt_has() {
+  local cand
+  cand=$(apt-cache policy "$1" 2>/dev/null | sed -n 's/^  Candidate: //p') || true
+  [ -n "$cand" ] && [ "$cand" != "(none)" ]
+}
+
 # link SRC DEST — symlink, backing up whatever was there.
 link() {
   local src=$DOTFILES/$1 dest=$2
@@ -56,7 +63,17 @@ if [ "$with_packages" = 1 ]; then
   step "apt packages"
   mapfile -t pkgs < <(grep -v '^\s*#' "$DOTFILES/packages.txt" | grep -v '^\s*$')
   sudo apt-get update -qq
-  sudo apt-get install -y -qq "${pkgs[@]}"
+  # Older releases lack some packages (24.04 has no lazygit or starship): install what apt has.
+  avail=() skipped=()
+  for p in "${pkgs[@]}"; do
+    if apt_has "$p"; then avail+=("$p"); else skipped+=("$p"); fi
+  done
+  if [ "${#avail[@]}" -gt 0 ]; then
+    sudo apt-get install -y -qq "${avail[@]}"
+  fi
+  if [ "${#skipped[@]}" -gt 0 ]; then
+    info "skipped (not in this Ubuntu's apt): ${skipped[*]} — see docs/herdr-ide.md"
+  fi
 fi
 # Ubuntu renames these two; give them their upstream names.
 mkdir -p "$BIN"
@@ -113,6 +130,8 @@ plugins=$(herdr plugin list --json 2>/dev/null || echo '{}')
 # Patched fork: clicks open in Fresh without switching herdr tabs.
 "$DOTFILES/herdr-sidebar/build.sh"
 info "herdr-sidebar: built from this repo (update: git pull, then rerun)"
+# build.sh may have installed rustup; later steps (install-lsp.sh) must see it first.
+if [ -d "$HOME/.cargo/bin" ]; then export PATH="$HOME/.cargo/bin:$PATH"; fi
 root=$(jq -r '.result.plugins[]? | select(.plugin_id=="dotfiles-ide") | .plugin_root' <<<"$plugins" 2>/dev/null || true)
 if [ "$root" = "$DOTFILES/herdr-plugins/ide" ]; then
   info "dotfiles-ide linked"
