@@ -1147,18 +1147,7 @@ fn split_path(id: &str) -> Option<Vec<bool>> {
 pub fn foreign_down_split(layout_json: &str, pane_id: &str) -> Option<(Vec<bool>, f64, i64)> {
     let msg = serde_json::from_str::<LayoutMsg>(strip_bom(layout_json)).ok()?;
     let layout = &msg.result.layout;
-    let mine = layout
-        .panes
-        .iter()
-        .find(|p| p.pane_id.as_deref() == Some(pane_id))?
-        .rect
-        .as_ref()?;
-    let holds_us = |rect: &Rect| {
-        rect.x <= mine.x
-            && mine.x + mine.width <= rect.x + rect.width
-            && rect.y <= mine.y
-            && mine.y + mine.height <= rect.y + rect.height
-    };
+    let mine = pane_rect(layout, pane_id)?;
     layout
         .splits
         .iter()
@@ -1167,11 +1156,104 @@ pub fn foreign_down_split(layout_json: &str, pane_id: &str) -> Option<(Vec<bool>
             let rect = s.rect.as_ref()?;
             let ratio = s.ratio?;
             let path = split_path(s.id.as_deref()?)?;
-            (!holds_us(rect) && rect.height > 0)
+            (!rect_holds(rect, mine) && rect.height > 0)
                 .then(|| (rect.width * rect.height, path, ratio, rect.height))
         })
         .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
         .map(|(_, path, ratio, height)| (path, ratio, height))
+}
+
+/// The tab's `right` split that sizes the RIGHTMOST column — the IDE layout's
+/// Agent column — as (path bools, current ratio, split width cols).
+///
+/// The ratio is the FIRST (left/middle) child's share, so an Agent column of N
+/// columns inside a `width`-wide split is sized by `1 - cols / width` (see
+/// [`ratio_for_cols`]). `None` when the tab has no addressable right split
+/// (nothing to size) or the layout is unreadable.
+///
+/// Candidates are the right splits whose RIGHT child is not our own column
+/// (that one is `sidebar_width`'s job, and skipping it is what lets a
+/// RIGHT-docked sidebar still resolve the Agent boundary), and whose right child
+/// nests no other right split — i.e. the boundary of the rightmost column, not
+/// one inside it. The sidebar is normally NESTED in the same left subtree as
+/// the middle column, so the Agent boundary is often the tab's root split and
+/// does contain our pane: containment alone must not reject it (that bug made
+/// the row refuse to size the common `[[sidebar|editor] | agent]` shape).
+/// The largest remaining rect wins, tie-broken by path, so the choice never
+/// depends on the order herdr listed the splits in.
+pub fn foreign_right_split(layout_json: &str, pane_id: &str) -> Option<(Vec<bool>, f64, i64)> {
+    let msg = serde_json::from_str::<LayoutMsg>(strip_bom(layout_json)).ok()?;
+    let layout = &msg.result.layout;
+    let mine = pane_rect(layout, pane_id)?;
+    let column = |rect: &Rect, ratio: f64| -> (i64, i64) {
+        let divider = rect.x + (rect.width as f64 * ratio).round() as i64;
+        (divider, rect.x + rect.width)
+    };
+    // Our own column is the right child of a split when a right-docked sidebar
+    // is the tab's rightmost pane: that split sizes us, not the Agent. When our
+    // pane IS the split's whole left child (a `[sidebar | viewer]` tab) the
+    // split is our own boundary for the same reason.
+    let holds_our_column = |rect: &Rect, ratio: f64| {
+        let (from, to) = column(rect, ratio);
+        let in_our_column = mine.x >= from
+            && mine.x + mine.width <= to
+            && rect.y <= mine.y
+            && mine.y + mine.height <= rect.y + rect.height;
+        let left_child_is_ours = mine.x == rect.x && mine.x + mine.width == from;
+        in_our_column || left_child_is_ours
+    };
+    let candidates: Vec<(&Rect, f64, Vec<bool>)> = layout
+        .splits
+        .iter()
+        .filter(|s| s.direction.as_deref() == Some("right"))
+        .filter_map(|s| {
+            let rect = s.rect.as_ref()?;
+            let ratio = s.ratio?;
+            let path = split_path(s.id.as_deref()?)?;
+            (rect.width > 0 && !holds_our_column(rect, ratio)).then_some((rect, ratio, path))
+        })
+        .collect();
+    // The rightmost column boundary: no other right split sits inside this
+    // split's right child, or the Agent boundary itself would be skipped for a
+    // nested one.
+    let mut kept = Vec::with_capacity(candidates.len());
+    for (index, (rect, ratio, _)) in candidates.iter().enumerate() {
+        let (from, to) = column(rect, *ratio);
+        let nested = candidates.iter().enumerate().any(|(other_index, other)| {
+            other_index != index
+                && other.0.width < rect.width
+                && other.0.x >= from
+                && other.0.x + other.0.width <= to
+        });
+        if !nested {
+            kept.push(candidates[index].clone());
+        }
+    }
+    kept.into_iter()
+        .map(|(rect, ratio, path)| (rect.width * rect.height, path, ratio, rect.width))
+        // Largest first; on equal area the SMALLER path wins, so the choice
+        // never depends on the order herdr listed the splits in.
+        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)))
+        .map(|(_, path, ratio, width)| (path, ratio, width))
+}
+
+/// The rect of `pane_id` in a decoded layout, if the pane is there.
+fn pane_rect<'a>(layout: &'a Layout, pane_id: &str) -> Option<&'a Rect> {
+    layout
+        .panes
+        .iter()
+        .find(|p| p.pane_id.as_deref() == Some(pane_id))?
+        .rect
+        .as_ref()
+}
+
+/// True when `rect` fully contains `inner` — i.e. a split at `rect` holds the
+/// `inner` pane.
+fn rect_holds(rect: &Rect, inner: &Rect) -> bool {
+    rect.x <= inner.x
+        && inner.x + inner.width <= rect.x + rect.width
+        && rect.y <= inner.y
+        && inner.y + inner.height <= rect.y + rect.height
 }
 
 /// The `down` split ratio that leaves the BOTTOM pane `rows` rows tall, out of
@@ -1179,13 +1261,28 @@ pub fn foreign_down_split(layout_json: &str, pane_id: &str) -> Option<(Vec<bool>
 /// `1 - rows / height`. Clamped so both sides keep at least one row and the
 /// ratio stays inside herdr's own 0.1..0.9 bounds.
 pub fn ratio_for_rows(rows: u16, split_height: i64) -> f64 {
-    let height = split_height as f64;
-    if height < 3.0 {
-        // No room for a ratio that gives both panes a row.
+    ratio_for_tail(rows, split_height)
+}
+
+/// The `right` split ratio that leaves the RIGHTMOST pane `cols` columns wide,
+/// out of a `split_width`-wide split: the ratio is the left child's share, so
+/// it is `1 - cols / width`. Clamped so both sides keep at least one column and
+/// the ratio stays inside herdr's own 0.1..0.9 bounds.
+pub fn ratio_for_cols(cols: u16, split_width: i64) -> f64 {
+    ratio_for_tail(cols, split_width)
+}
+
+/// `1 - units / total` for the tail pane of a split, whichever axis it runs
+/// along: the one implementation behind [`ratio_for_rows`] and
+/// [`ratio_for_cols`].
+fn ratio_for_tail(units: u16, total: i64) -> f64 {
+    let total = total as f64;
+    if total < 3.0 {
+        // No room for a ratio that gives both panes a cell.
         return 0.5;
     }
-    let rows = f64::from(rows).max(1.0).min(height - 1.0);
-    (1.0 - rows / height).clamp(0.1, 0.9)
+    let units = f64::from(units).max(1.0).min(total - 1.0);
+    (1.0 - units / total).clamp(0.1, 0.9)
 }
 
 /// True when the id can be passed as a positional argument to the herdr CLI
@@ -2012,6 +2109,151 @@ mod tests {
             r#"{"id":"split_1_root","direction":"down","rect":{"x":0,"y":0,"width":160,"height":50}}"#,
         );
         assert_eq!(foreign_down_split(&partial, "side"), None);
+    }
+
+    /// The IDE tab is `[sidebar | [[fresh|terminal] | agent]]`. The Agent
+    /// column is the tab's right split that does not hold the sidebar itself,
+    /// so an Agent width can find it from either dock side.
+    #[test]
+    fn foreign_right_split_finds_the_agent_column() {
+        let json = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":50}},
+               {"pane_id":"fresh","rect":{"x":32,"y":0,"width":80,"height":35}},
+               {"pane_id":"term","rect":{"x":32,"y":35,"width":80,"height":15}},
+               {"pane_id":"agent","rect":{"x":112,"y":0,"width":48,"height":50}}"#,
+            r#"{"id":"split_1_root","direction":"right","ratio":0.2,"rect":{"x":0,"y":0,"width":160,"height":50}},
+               {"id":"split_2_1","direction":"down","ratio":0.7,"rect":{"x":32,"y":0,"width":80,"height":50}},
+               {"id":"split_3_11","direction":"right","ratio":0.625,"rect":{"x":32,"y":0,"width":128,"height":50}}"#,
+        );
+        // The root split is the sidebar's own boundary (its left child IS our
+        // column), so the Agent column is the next right split.
+        assert_eq!(
+            foreign_right_split(&json, "side"),
+            Some((vec![true, true], 0.625, 128))
+        );
+        // A pane inside that boundary (the editor column) is its left child, so
+        // nothing there sizes an Agent column.
+        assert_eq!(foreign_right_split(&json, "fresh"), None);
+    }
+
+    /// The layout shape herdr actually docks into (verified live): the sidebar
+    /// is NESTED in the same left subtree as the editor, so the Agent boundary
+    /// is the tab's ROOT split and its rect does contain our pane. Rejecting
+    /// candidates by containment alone made this shape unsizeable.
+    #[test]
+    fn foreign_right_split_finds_a_root_agent_boundary_holding_our_column() {
+        let json = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":42}},
+               {"pane_id":"fresh","rect":{"x":32,"y":0,"width":99,"height":30}},
+               {"pane_id":"term","rect":{"x":32,"y":30,"width":99,"height":12}},
+               {"pane_id":"agent","rect":{"x":131,"y":0,"width":88,"height":42}}"#,
+            r#"{"id":"split_0_root","direction":"right","ratio":0.6,"rect":{"x":0,"y":0,"width":219,"height":42}},
+               {"id":"split_1_0","direction":"right","ratio":0.243538,"rect":{"x":0,"y":0,"width":131,"height":42}},
+               {"id":"split_2_01","direction":"down","ratio":0.714286,"rect":{"x":32,"y":0,"width":99,"height":42}}"#,
+        );
+        assert_eq!(foreign_right_split(&json, "side"), Some((vec![], 0.6, 219)));
+    }
+
+    #[test]
+    fn foreign_right_split_finds_the_agent_column_with_a_right_docked_sidebar() {
+        let json = layout_with_splits(
+            r#"{"pane_id":"fresh","rect":{"x":0,"y":0,"width":80,"height":35}},
+               {"pane_id":"term","rect":{"x":0,"y":35,"width":80,"height":15}},
+               {"pane_id":"agent","rect":{"x":80,"y":0,"width":48,"height":50}},
+               {"pane_id":"side","rect":{"x":128,"y":0,"width":32,"height":50}}"#,
+            r#"{"id":"split_1_root","direction":"right","ratio":0.8,"rect":{"x":0,"y":0,"width":160,"height":50}},
+               {"id":"split_2_0","direction":"right","ratio":0.625,"rect":{"x":0,"y":0,"width":128,"height":50}},
+               {"id":"split_3_1","direction":"down","ratio":0.7,"rect":{"x":0,"y":0,"width":80,"height":50}}"#,
+        );
+        // The sidebar's own split is skipped, so its docking side is irrelevant.
+        assert_eq!(
+            foreign_right_split(&json, "side"),
+            Some((vec![false], 0.625, 128))
+        );
+    }
+
+    #[test]
+    fn foreign_right_split_skips_a_split_holding_our_own_pane() {
+        // A sidebar stacked over a preview: both right splits here hold our
+        // column, so there is nothing for an Agent width to size.
+        let json = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":30}},
+               {"pane_id":"viewer","rect":{"x":0,"y":30,"width":32,"height":20}}"#,
+            r#"{"id":"split_1_root","direction":"right","ratio":0.2,"rect":{"x":0,"y":0,"width":160,"height":50}}"#,
+        );
+        assert_eq!(foreign_right_split(&json, "side"), None);
+        assert_eq!(foreign_right_split(&json, "viewer"), None);
+    }
+
+    #[test]
+    fn foreign_right_split_prefers_the_largest_then_the_path() {
+        // Two qualifying right splits: a nested one inside the middle column
+        // and the outer middle|agent boundary. The Agent column is the OUTER
+        // one, so the larger rect wins whatever order herdr lists them in.
+        let json = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":20,"height":50}},
+               {"pane_id":"a","rect":{"x":20,"y":0,"width":60,"height":50}},
+               {"pane_id":"agent","rect":{"x":80,"y":0,"width":80,"height":50}}"#,
+            r#"{"id":"split_4_1","direction":"right","ratio":0.5,"rect":{"x":20,"y":0,"width":60,"height":50}},
+               {"id":"split_3_11","direction":"right","ratio":0.625,"rect":{"x":20,"y":0,"width":140,"height":50}}"#,
+        );
+        assert_eq!(
+            foreign_right_split(&json, "side"),
+            Some((vec![true, true], 0.625, 140))
+        );
+        // Equal areas fall back to the smaller path, so the choice does not
+        // depend on the order of `.splits`.
+        let tied = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":20,"height":50}},
+               {"pane_id":"a","rect":{"x":20,"y":0,"width":140,"height":50}}"#,
+            r#"{"id":"split_9_1","direction":"right","ratio":0.5,"rect":{"x":20,"y":0,"width":140,"height":50}},
+               {"id":"split_3_0","direction":"right","ratio":0.7,"rect":{"x":20,"y":0,"width":140,"height":50}}"#,
+        );
+        assert_eq!(
+            foreign_right_split(&tied, "side"),
+            Some((vec![false], 0.7, 140))
+        );
+    }
+
+    #[test]
+    fn foreign_right_split_needs_an_addressable_split() {
+        let downs_only = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":50}}"#,
+            r#"{"id":"split_1_root","direction":"down","ratio":0.2,"rect":{"x":0,"y":0,"width":160,"height":50}}"#,
+        );
+        assert_eq!(foreign_right_split(&downs_only, "side"), None);
+        // A host that does not encode the path in the split id (pre-0.9) is
+        // unaddressable: claim nothing rather than guess a wrong path.
+        let id_less = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":50}}"#,
+            r#"{"direction":"right","ratio":0.7,"rect":{"x":0,"y":0,"width":160,"height":50}}"#,
+        );
+        assert_eq!(foreign_right_split(&id_less, "side"), None);
+        // Garbage, an unknown pane, and a split without a rect or ratio.
+        assert_eq!(foreign_right_split("not json", "side"), None);
+        assert_eq!(foreign_right_split(&downs_only, "missing"), None);
+        let partial = layout_with_splits(
+            r#"{"pane_id":"side","rect":{"x":0,"y":0,"width":32,"height":50}}"#,
+            r#"{"id":"split_1_root","direction":"right","rect":{"x":0,"y":0,"width":160,"height":50}}"#,
+        );
+        assert_eq!(foreign_right_split(&partial, "side"), None);
+    }
+
+    #[test]
+    fn ratio_for_cols_leaves_the_right_pane_that_many_columns() {
+        // A 200-column anchor split so the Agent column keeps 40": 0.8 left.
+        assert!((ratio_for_cols(40, 200) - 0.8).abs() < 1e-9);
+        assert!((ratio_for_cols(160, 200) - 0.2).abs() < 1e-9);
+        // herdr's own 0.1..0.9 clamp, mirrored here.
+        assert!((ratio_for_cols(1, 200) - 0.9).abs() < 1e-9);
+        assert!((ratio_for_cols(199, 200) - 0.1).abs() < 1e-9);
+        // Both panes keep at least one column.
+        assert!((ratio_for_cols(240, 200) - 0.1).abs() < 1e-9);
+        // Too small to size at all: stay neutral instead of dividing by ~0.
+        assert!((ratio_for_cols(40, 2) - 0.5).abs() < 1e-9);
+        assert!((ratio_for_cols(40, 0) - 0.5).abs() < 1e-9);
+        // Rows and columns share one implementation.
+        assert_eq!(ratio_for_cols(10, 40), ratio_for_rows(10, 40));
     }
 
     #[test]

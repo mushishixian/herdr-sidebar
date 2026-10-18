@@ -25,7 +25,7 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 | An apt, npm or cargo dependency | `dotfiles/packages.txt` (apt) or the installer step (npm/cargo) in `dotfiles/install.sh` or `docs/install-herdr-ide.sh`; the *Install* section of `docs/herdr-ide.md`; a check in the verify step |
 | A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; the verify list in `docs/install-herdr-ide.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
 | A sidebar setting default | `dotfiles/herdr-sidebar/state.json`, and the *Sidebar defaults* paragraph in `docs/herdr-ide.md` (*herdr-sidebar fork*) |
-| Anything the sidebar (Rust) and the dotfiles scripts share (env vars such as `HERDR_SIDEBAR_OPEN_DIFF`, `HERDR_SIDEBAR_PREVIEW_HOSTED`, `FRESH_IDE_DAEMON`, `DOTFILES_IDE_BIN`; pane tokens such as `fresh_daemon`, `hs-preview-host`; request files such as the AI-commit request, the live-diff request and `preview-host/<pane>.req`; `editor-command.txt`; the sidebar's `state.json` read at build time for `terminal_height`) | Both sides in the same change. Document the contract in the root `AGENTS.md` (Rust side) and in `docs/herdr-ide.md` |
+| Anything the sidebar (Rust) and the dotfiles scripts share (env vars such as `HERDR_SIDEBAR_OPEN_DIFF`, `HERDR_SIDEBAR_PREVIEW_HOSTED`, `FRESH_IDE_DAEMON`, `DOTFILES_IDE_BIN`; pane tokens such as `fresh_daemon`, `hs-preview-host`; request files such as the AI-commit request, the live-diff request and `preview-host/<pane>.req`; `editor-command.txt`; the sidebar's `state.json` read at build time for `terminal_height` and `agent_width`) | Both sides in the same change. Document the contract in the root `AGENTS.md` (Rust side) and in `docs/herdr-ide.md` |
 | Pane labels `Fresh`, `Terminal`, `Agent`, or the plugin id `dotfiles-ide` | Do not rename them: scripts, state dirs and key bindings look them up. Show new display text through a metadata title (`pane report-metadata --title`) |
 | Any user-visible behaviour | `docs/herdr-ide.md`: the feature section, *Keys* and *Troubleshooting*; the fork commit table (*herdr-sidebar fork*): its `*uncommitted*` row until the user commits, then the hash |
 | Install, upgrade or migration behaviour | `docs/install-herdr-ide.sh` (and its `--help` text, the `sed -n '2,11p'` header) and `dotfiles/install.sh` (its `--help` header, `sed -n '2,14p'`); the *Install*, *Migrating* and *Updating* sections of `docs/herdr-ide.md` |
@@ -55,6 +55,12 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   `terminal_height` setting → 0.7). Keep it pure (layout JSON on stdin, no `$HERDR` call) so
   it stays testable on fixtures, and never let the sidebar read `sizes.json` back: the
   dependency is one-way (this layer reads `herdr-sidebar/state.json`).
+- **The Agent split ratio is the MIDDLE column's share**, the same axis trick on the other side:
+  both `herdr-ide` build sites split the anchor pane rightwards (`--ratio` = the ORIGINAL
+  anchor's share, which the swap then hands to the middle column), so an Agent column of N
+  columns in a W-wide anchor is `1 - N/W`. `lib.sh`'s `agent_split_ratio` is the one place that
+  converts (saved `sizes.json` `agent` ratio → sidebar `agent_width` setting → 0.6), and it is
+  pure for the same fixture-testing reason.
 
 - Fresh's settings UI replaces the symlinked `~/.config/fresh/config.json` with a plain copy, and later
   dotfiles edits then do nothing. Merge the copy into `dotfiles/config/fresh/config.json`, then rerun the

@@ -11,6 +11,8 @@
 //! - `sidebar_width`: preferred sidebar width in terminal columns.
 //! - `terminal_height`: default height, in ROWS, of the IDE layout's bottom
 //!   "command line" pane (see `launch::foreign_down_split`).
+//! - `agent_width`: default width, in COLUMNS, of the IDE layout's rightmost
+//!   Agent column (see `launch::foreign_right_split`).
 //!
 //! Both views live in ONE binary; switching is an in-process re-render, and
 //! separated panes are the same binary pinned to a starting view with
@@ -65,6 +67,31 @@ pub fn step_terminal_height(rows: u16, taller: bool) -> u16 {
     } else {
         rows.saturating_sub(TERMINAL_HEIGHT_STEP)
             .max(MIN_TERMINAL_HEIGHT)
+    }
+}
+
+/// Columns for the IDE layout's rightmost Agent column (the coding-agent pane
+/// beside the editor). The height is whatever the column is, so only the WIDTH
+/// is configurable.
+pub const MIN_AGENT_WIDTH: u16 = 40;
+pub const MAX_AGENT_WIDTH: u16 = 240;
+pub const AGENT_WIDTH_STEP: u16 = 8;
+
+/// Seed for the first `←`/`→` when the setting is unset AND the current tab has
+/// no Agent split to measure. It is never written by itself: an unset setting
+/// keeps the IDE layer's own historical 60% middle / 40% agent share.
+pub const SEED_AGENT_WIDTH: u16 = 80;
+
+pub fn clamp_agent_width(cols: u16) -> u16 {
+    cols.clamp(MIN_AGENT_WIDTH, MAX_AGENT_WIDTH)
+}
+
+pub fn step_agent_width(cols: u16, wider: bool) -> u16 {
+    let cols = clamp_agent_width(cols);
+    if wider {
+        (cols + AGENT_WIDTH_STEP).min(MAX_AGENT_WIDTH)
+    } else {
+        cols.saturating_sub(AGENT_WIDTH_STEP).max(MIN_AGENT_WIDTH)
     }
 }
 
@@ -355,6 +382,11 @@ pub struct State {
     /// split to the IDE layer, which then uses its remembered per-project
     /// ratio or its own 70% default.
     pub terminal_height: Option<u16>,
+    /// Default width, in COLUMNS, of the IDE layout's rightmost Agent column.
+    /// `None` (the historical behavior) leaves the split to the IDE layer,
+    /// which then uses its remembered per-project ratio or its own 60/40
+    /// default.
+    pub agent_width: Option<u16>,
     /// Whether a clicked file opens in its own tab or in a viewer pane beside
     /// the sidebar, inside the tab the click came from.
     pub preview_placement: PreviewPlacement,
@@ -389,6 +421,7 @@ impl Default for State {
             dock_right: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             terminal_height: None,
+            agent_width: None,
             preview_placement: PreviewPlacement::Tab,
             custom_editor_on_click: false,
             custom_editor_inline: false,
@@ -558,7 +591,7 @@ fn write_state(path: &Path, state: State) {
         None => String::new(),
     };
     let json = format!(
-        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"terminal_height\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"custom_editor_inline\":{},\"scm_tree_view\":{}{icons}}}",
+        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"terminal_height\":{},\"agent_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"custom_editor_inline\":{},\"scm_tree_view\":{}{icons}}}",
         state.merged,
         state.active.state_name(),
         state.search_active,
@@ -575,6 +608,11 @@ fn write_state(path: &Path, state: State) {
         // `null` is "auto": the IDE layer keeps its own default.
         match state.terminal_height {
             Some(rows) => clamp_terminal_height(rows).to_string(),
+            None => "null".to_string(),
+        },
+        // `null` is "auto": the IDE layer keeps its own default.
+        match state.agent_width {
+            Some(cols) => clamp_agent_width(cols).to_string(),
             None => "null".to_string(),
         },
         state.color_theme.label(),
@@ -1023,6 +1061,12 @@ pub fn parse_state(json: &str) -> State {
             .and_then(|v| v.as_u64())
             .and_then(|v| u16::try_from(v).ok())
             .map(clamp_terminal_height),
+        // Absent or null = auto (the historical behavior).
+        agent_width: value
+            .get("agent_width")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u16::try_from(v).ok())
+            .map(clamp_agent_width),
         preview_placement: value
             .get("preview_placement")
             .and_then(|v| v.as_str())
@@ -1183,12 +1227,13 @@ mod tests {
             dock_right: true,
             sidebar_width: 44,
             terminal_height: Some(22),
+            agent_width: Some(96),
             preview_placement: PreviewPlacement::Pane,
             custom_editor_on_click: true,
             custom_editor_inline: true,
             scm_tree_view: true,
         };
-        let json = "{\"merged\":true,\"active\":\"source-control\",\"search_active\":true,\"hotkeys\":true,\"git_footer\":false,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"terminal_height\":22,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"custom_editor_on_click\":true,\"custom_editor_inline\":true,\"scm_tree_view\":true,\"icons\":\"emoji\"}";
+        let json = "{\"merged\":true,\"active\":\"source-control\",\"search_active\":true,\"hotkeys\":true,\"git_footer\":false,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"terminal_height\":22,\"agent_width\":96,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"custom_editor_on_click\":true,\"custom_editor_inline\":true,\"scm_tree_view\":true,\"icons\":\"emoji\"}";
         assert_eq!(parse_state(json), state);
         assert!(parse_state("\u{feff}{\"merged\":true}").merged);
         // Files written before the flag existed keep auto-open AND the git
@@ -1248,6 +1293,20 @@ mod tests {
             parse_state(r#"{"terminal_height":"auto"}"#).terminal_height,
             None
         );
+        // The same for the Agent width row: absent/null = auto, out-of-range
+        // values clamp, and a non-number reads as auto like the Rust parser.
+        assert_eq!(parse_state("{\"merged\":true}").agent_width, None);
+        assert_eq!(parse_state(r#"{"agent_width":null}"#).agent_width, None);
+        assert_eq!(
+            parse_state(r#"{"agent_width":12}"#).agent_width,
+            Some(MIN_AGENT_WIDTH)
+        );
+        assert_eq!(
+            parse_state(r#"{"agent_width":4000}"#).agent_width,
+            Some(MAX_AGENT_WIDTH)
+        );
+        assert_eq!(parse_state(r#"{"agent_width":"auto"}"#).agent_width, None);
+        assert_eq!(parse_state(r#"{"agent_width":96}"#).agent_width, Some(96));
         // Files written before the preview setting existed keep the
         // historical behavior: a tab per document.
         assert_eq!(
@@ -1328,6 +1387,27 @@ mod tests {
         );
         assert_eq!(clamp_terminal_height(0), MIN_TERMINAL_HEIGHT);
         assert_eq!(clamp_terminal_height(500), MAX_TERMINAL_HEIGHT);
+    }
+
+    #[test]
+    fn agent_width_steps_and_saturates_within_supported_bounds() {
+        assert_eq!(step_agent_width(80, true), 88);
+        assert_eq!(step_agent_width(80, false), 72);
+        assert_eq!(step_agent_width(MAX_AGENT_WIDTH, true), MAX_AGENT_WIDTH);
+        assert_eq!(step_agent_width(MIN_AGENT_WIDTH, false), MIN_AGENT_WIDTH);
+        // Out-of-range values (hand-edited state files) are clamped first.
+        assert_eq!(
+            step_agent_width(1, true),
+            MIN_AGENT_WIDTH + AGENT_WIDTH_STEP
+        );
+        assert_eq!(
+            step_agent_width(u16::MAX, false),
+            MAX_AGENT_WIDTH - AGENT_WIDTH_STEP
+        );
+        assert_eq!(clamp_agent_width(0), MIN_AGENT_WIDTH);
+        assert_eq!(clamp_agent_width(5000), MAX_AGENT_WIDTH);
+        // The seed is inside the range the row steps through.
+        assert_eq!(clamp_agent_width(SEED_AGENT_WIDTH), SEED_AGENT_WIDTH);
     }
 
     #[test]

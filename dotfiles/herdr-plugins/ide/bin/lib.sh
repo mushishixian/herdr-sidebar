@@ -141,21 +141,43 @@ new_editor_pane() { # term root ratio
 SIDEBAR_STATE_FILE=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr-sidebar/state.json
 # Historical editor share; also the fallback inside editor_split_ratio.
 DEFAULT_EDITOR_RATIO=0.7
+# Historical Agent-column split ratio; also the fallback in agent_split_ratio.
+DEFAULT_AGENT_RATIO=0.6
 
-# The sidebar's Terminal height setting in ROWS, or nothing when unset ("auto")
-# or unreadable. Never fails: a missing/garbled file simply means "auto".
-terminal_height_rows() {
+# One numeric field of the sidebar's state file, or nothing when the file is
+# missing, unreadable, or the key is absent/null. Never fails.
+sidebar_state_number() { # key
   local value
   [ -r "$SIDEBAR_STATE_FILE" ] || return 0
   # Numbers only: the sidebar writes a number or null, and a hand-edited
-  # `"10"` must read as "auto" exactly like the Rust parser (`as_u64`).
-  value=$(jq -r '.terminal_height | numbers' "$SIDEBAR_STATE_FILE" 2>/dev/null) || value=''
+  # `"10"` must read as unset exactly like the Rust parser (`as_u64`).
+  value=$(jq -r --arg k "$1" '.[$k] | numbers' "$SIDEBAR_STATE_FILE" 2>/dev/null) || value=''
   case $value in
     '' | *[!0-9]*) return 0 ;;
   esac
-  # Same bounds as the sidebar's row (4..40 rows, 2 per step).
-  if [ "$value" -lt 4 ]; then value=4; elif [ "$value" -gt 40 ]; then value=40; fi
   printf '%s\n' "$value"
+}
+
+# The sidebar's Terminal height setting in ROWS, or nothing when unset ("auto")
+# or unreadable.
+terminal_height_rows() {
+  local rows
+  rows=$(sidebar_state_number terminal_height) || rows=''
+  [ -n "$rows" ] || return 0
+  # Same bounds as the sidebar's row (4..40 rows, 2 per step).
+  if [ "$rows" -lt 4 ]; then rows=4; elif [ "$rows" -gt 40 ]; then rows=40; fi
+  printf '%s\n' "$rows"
+}
+
+# The sidebar's Agent width setting in COLUMNS, or nothing when unset ("auto")
+# or unreadable.
+agent_width_cols() {
+  local cols
+  cols=$(sidebar_state_number agent_width) || cols=''
+  [ -n "$cols" ] || return 0
+  # Same bounds as the sidebar's row (40..240 columns, 8 per step).
+  if [ "$cols" -lt 40 ]; then cols=40; elif [ "$cols" -gt 240 ]; then cols=240; fi
+  printf '%s\n' "$cols"
 }
 
 # The editor (top) share for a terminal pane about to be split in tab layout
@@ -211,6 +233,62 @@ editor_ratio_for() { # pane saved-entry
   [ -n "$entry" ] || entry='{}'
   saved=$(jq -r '.editor // empty' <<<"$entry" 2>/dev/null) || saved=''
   editor_split_ratio "$1" "$saved" <<<"$("$HERDR" pane layout --pane "$1" 2>/dev/null || true)"
+}
+
+# ── Agent column split (agent width) ───────────────────────────────────
+# The split ratio at both herdr-ide build sites is the LEFT (middle) child's
+# share of a `right` split, so an Agent column of N columns out of a W-wide
+# anchor is 1 - N/W — the mirror of editor_split_ratio's 1 - rows/H. Three
+# sources, in order:
+#   1. sizes.json's remembered "agent" ratio for this project (the user's own
+#      drag ALWAYS wins),
+#   2. the herdr-sidebar plugin's `agent_width` setting (columns),
+#   3. the historical 0.6.
+
+# The Agent-column split ratio for the anchor pane $1 about to be split
+# rightwards in the layout on stdin. A remembered ratio ($2, sizes.json
+# "agent") wins, otherwise the sidebar's `agent_width` setting, otherwise $3.
+# Pure: takes a `pane layout` reply on stdin and calls no herdr command, so it
+# is unit-testable on fixtures.
+agent_split_ratio() { # pane saved-ratio [fallback] < layout.json
+  local pane=$1 saved=${2:-} fallback=${3:-$DEFAULT_AGENT_RATIO} cols width millionths
+  if [ -n "$saved" ]; then
+    printf '%.6f\n' "$saved"
+    return 0
+  fi
+  cols=$(agent_width_cols)
+  if [ -z "$cols" ]; then
+    printf '%.6f\n' "$fallback"
+    return 0
+  fi
+  # The anchor pane spans the width being split, so its own rect width IS W.
+  width=$(jq -r --arg pane "$pane" '
+    first(.result.layout.panes[]? | select(.pane_id == $pane) | .rect.width) // empty' \
+    2>/dev/null) || width=''
+  case $width in
+    '' | *[!0-9]*) printf '%.6f\n' "$fallback"; return 0 ;;
+  esac
+  # Both panes keep at least one column; herdr clamps the ratio to 0.1..0.9.
+  if [ "$width" -lt 3 ]; then
+    printf '%.6f\n' "$fallback"
+    return 0
+  fi
+  if [ "$cols" -lt 1 ]; then cols=1; elif [ "$cols" -gt $((width - 1)) ]; then cols=$((width - 1)); fi
+  # Integer math in millionths: (width - cols) / width.
+  millionths=$(((width - cols) * 1000000 / width))
+  if [ "$millionths" -lt 100000 ]; then millionths=100000; fi
+  if [ "$millionths" -gt 900000 ]; then millionths=900000; fi
+  printf '%d.%06d\n' $((millionths / 1000000)) $((millionths % 1000000))
+}
+
+# agent_split_ratio for the layout being built around pane $1, with the tab's
+# saved sizes entry $2 supplying the remembered ratio. Takes one `pane layout`
+# snapshot.
+agent_ratio_for() { # pane saved-entry
+  local entry=${2:-} saved
+  [ -n "$entry" ] || entry='{}'
+  saved=$(jq -r '.agent // empty' <<<"$entry" 2>/dev/null) || saved=''
+  agent_split_ratio "$1" "$saved" <<<"$("$HERDR" pane layout --pane "$1" 2>/dev/null || true)"
 }
 
 # ── Remembered sizes ───────────────────────────────────────────────────

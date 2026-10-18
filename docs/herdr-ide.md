@@ -252,6 +252,15 @@ menu, `s` Settings, `b` hide, `c` change folder, `q` quit.
   `1 - rows / column height`, clamped to herdr's 0.1..0.9, and reads the setting from
   `~/.local/state/herdr/plugins/herdr-sidebar/state.json` (`terminal_height`); it never writes
   there.
+- **Agent width** (the rightmost `Agent` column) has the same kind of default: the ⚙ Settings row
+  `Agent width`, one below `Terminal height`. It is measured in COLUMNS (40–240, `←`/`→` in 8-column
+  steps; `⏎` resets it to `auto`). Only the width is configurable — the height is whatever the tab
+  is. `←`/`→` also resizes the Agent column in the tab the sidebar is in, right away; `⏎` does not
+  touch the current layout. Build order (`herdr-ide`'s two sites) is: `sizes.json`'s remembered
+  `agent` ratio (your own drag) wins, then this setting, then the historical 0.6 middle / 0.4 agent
+  share. `lib.sh`'s `agent_split_ratio` computes `1 - cols / column width` (the split ratio is the
+  middle column's share), clamped to herdr's 0.1..0.9, and reads `agent_width` from the same sidebar
+  state file; it never writes there.
 - `bin/fresh-open FILE[:LINE[:COL]] | file://URL | --link` sends a file to the
   nearest `Fresh` pane (this tab, then this workspace — never another
   workspace's, even on the same project: that workspace has its own daemon).
@@ -342,7 +351,8 @@ Sidebar defaults seeded by the installer (`dotfiles/herdr-sidebar/state.json`):
 VS Code colours, git footer, auto-open, follow the neighbour pane's folder,
 preview in a pane (a git-change diff opens beside the sidebar inside the IDE tab, so the Agent column stays visible; Esc/q closes it), editor on click, editor inline.
 `Terminal height` is deliberately NOT seeded: unset ("auto") keeps the IDE layer's own
-precedence (remembered project ratio, else 70%).
+precedence (remembered project ratio, else 70%). `Agent width` is not seeded either (else the
+historical 0.6, i.e. a 40% Agent column).
 
 Pictures and videos never open in Fresh. An Explorer click, Enter, or a pick in the Ctrl+Q popup
 opens them in the sidebar's preview, which draws them in the terminal; `q` or Esc closes it.

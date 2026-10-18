@@ -191,10 +191,47 @@ impl PaneCtl {
         else {
             return false;
         };
-        let mut params = serde_json::json!({
-            "path": path,
-            "ratio": herdr_sidebar::launch::ratio_for_rows(rows, height),
-        });
+        self.apply_split_ratio(
+            path,
+            herdr_sidebar::launch::ratio_for_rows(rows, height),
+        )
+    }
+
+    /// Columns the Agent column of this tab occupies right now — the seed for
+    /// the first `←`/`→` on an "auto" Agent width.
+    fn agent_cols_now(&self) -> Option<u16> {
+        let layout = self.layout()?;
+        let (_, ratio, width) =
+            herdr_sidebar::launch::foreign_right_split(&layout, &self.pane_id)?;
+        let cols = (1.0 - ratio) * width as f64;
+        Some(cols.round().max(0.0) as u16)
+    }
+
+    /// Size this tab's Agent column so it is `cols` columns wide. False when the
+    /// tab has no such split (nothing to size), so the caller can say so
+    /// instead of looking like it worked.
+    fn set_agent_cols(&self, cols: u16) -> bool {
+        let Ok(layout) = herdr_sidebar::ipc::call_text(
+            "pane.layout",
+            serde_json::json!({ "pane_id": self.pane_id }),
+        ) else {
+            return false;
+        };
+        let Some((path, _ratio, width)) =
+            herdr_sidebar::launch::foreign_right_split(&layout, &self.pane_id)
+        else {
+            return false;
+        };
+        self.apply_split_ratio(
+            path,
+            herdr_sidebar::launch::ratio_for_cols(cols, width),
+        )
+    }
+
+    /// Set one of this tab's splits to `ratio`. False when the host refused it
+    /// (call_text returns the reply line even for an error response).
+    fn apply_split_ratio(&self, path: Vec<bool>, ratio: f64) -> bool {
+        let mut params = serde_json::json!({ "path": path, "ratio": ratio });
         // Prefer the tab form; a launch that did not tell us its tab still
         // resolves the same tab from the pane.
         match &self.tab_id {
@@ -202,7 +239,6 @@ impl PaneCtl {
             None => params["pane_id"] = serde_json::Value::String(self.pane_id.clone()),
         }
         match herdr_sidebar::ipc::call_text("layout.set_split_ratio", params) {
-            // call_text returns the reply line even for an error response.
             Ok(reply) => {
                 serde_json::from_str::<serde_json::Value>(reply.trim_start_matches('\u{feff}'))
                     .map(|value| value.get("error").is_none())
@@ -324,6 +360,8 @@ enum Setting {
     /// Default height, in rows, of the bottom pane of the IDE layout's
     /// editor/terminal column.
     TerminalHeight,
+    /// Default width, in columns, of the IDE layout's rightmost Agent column.
+    AgentWidth,
     IconTheme,
     ColorTheme,
     PreviewPlacement,
@@ -1536,6 +1574,7 @@ impl App {
             ToggleSetting(usize),
             AdjustWidth(bool),
             AdjustHeight(bool),
+            AdjustAgentWidth(bool),
             DeleteConfirmed(PathBuf, bool),
             Picker(PickerAction),
         }
@@ -1573,6 +1612,16 @@ impl App {
                         == Some(Setting::TerminalHeight) =>
                 {
                     Cmd::AdjustHeight(true)
+                }
+                KeyCode::Left | KeyCode::Char('h')
+                    if settings.get(*selected).map(|row| row.0) == Some(Setting::AgentWidth) =>
+                {
+                    Cmd::AdjustAgentWidth(false)
+                }
+                KeyCode::Right | KeyCode::Char('l')
+                    if settings.get(*selected).map(|row| row.0) == Some(Setting::AgentWidth) =>
+                {
+                    Cmd::AdjustAgentWidth(true)
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => Cmd::ToggleSetting(*selected),
                 _ => Cmd::Nothing,
@@ -1894,6 +1943,7 @@ impl App {
             Cmd::ToggleSetting(index) => self.toggle_setting(index),
             Cmd::AdjustWidth(wider) => self.adjust_sidebar_width(wider),
             Cmd::AdjustHeight(taller) => self.adjust_terminal_height(taller),
+            Cmd::AdjustAgentWidth(wider) => self.adjust_agent_width(wider),
             Cmd::DeleteConfirmed(path, is_dir) => {
                 self.overlay = None;
                 match actions::delete(&path, is_dir) {
@@ -2610,6 +2660,15 @@ impl App {
                 true,
             ),
             (
+                Setting::AgentWidth,
+                "Agent width",
+                match self.sidebar_state.agent_width {
+                    Some(cols) => format!("{cols} cols"),
+                    None => "auto".to_string(),
+                },
+                true,
+            ),
+            (
                 Setting::IconTheme,
                 "Icon theme",
                 match self.theme {
@@ -2781,6 +2840,7 @@ impl App {
             }
             Setting::SidebarWidth => self.adjust_sidebar_width(true),
             Setting::TerminalHeight => self.clear_terminal_height(),
+            Setting::AgentWidth => self.clear_agent_width(),
             Setting::IconTheme => self.set_theme(self.theme.toggled()),
             Setting::ColorTheme => {
                 self.sidebar_state = sidebar::update_state(|state| {
@@ -2895,6 +2955,34 @@ impl App {
     /// the IDE layer's own default again. The current layout is left alone.
     fn clear_terminal_height(&mut self) {
         self.sidebar_state = sidebar::update_state(|state| state.terminal_height = None);
+    }
+
+    /// `←`/`→` on the Agent width row: step the persisted default and size THIS
+    /// tab's Agent column right away. The setting is a default (the IDE layer's
+    /// remembered per-project ratio still wins when a layout is built); applying
+    /// it here just makes the row feel immediate.
+    fn adjust_agent_width(&mut self, wider: bool) {
+        let seed = self
+            .pane_ctl
+            .as_ref()
+            .and_then(|ctl| ctl.agent_cols_now())
+            .unwrap_or(sidebar::SEED_AGENT_WIDTH);
+        let cols = sidebar::step_agent_width(seed, wider);
+        self.sidebar_state = sidebar::update_state(|state| state.agent_width = Some(cols));
+        let applied = self
+            .pane_ctl
+            .as_ref()
+            .is_some_and(|ctl| ctl.set_agent_cols(cols));
+        if !applied {
+            // Keep the stored value: it still applies to tabs built later.
+            self.notice = Some("Agent width: no pane to size in this tab".into());
+        }
+    }
+
+    /// `⏎` on the Agent width row: back to "auto", so a built layout uses the
+    /// IDE layer's own default again. The current layout is left alone.
+    fn clear_agent_width(&mut self) {
+        self.sidebar_state = sidebar::update_state(|state| state.agent_width = None);
     }
 
     /// Render the centered Settings popup and remember its rect for clicks.

@@ -642,6 +642,32 @@ HACKING.md — budget time for that before promising a patched build.
     first time the value is seeded from the live layout's rows
     (`PaneCtl::terminal_rows_now`), or `state::SEED_TERMINAL_HEIGHT` when there is no split to
     measure.
+- **Agent width** is the same row pattern one slot below Terminal height: `agent_width`
+  (`Option<u16>`, `None` = "auto") is the default width in COLUMNS of the IDE layout's
+  rightmost `Agent` column (the coding-agent pane beside the editor), 40–240 columns in 8-column
+  steps (`state::{MIN,MAX}_AGENT_WIDTH`, `AGENT_WIDTH_STEP`, `clamp_agent_width`,
+  `step_agent_width`). The column's HEIGHT is whatever the tab's middle column is, so only the
+  width is configurable. `←`/`→` step it and apply it to the sidebar's OWN tab immediately;
+  `⏎` clears it back to auto WITHOUT touching the current layout.
+  - Same one-way contract as Terminal height: `dotfiles/herdr-plugins/ide/bin/lib.sh`'s
+    `agent_split_ratio` reads `agent_width` out of `<state dir>/herdr-sidebar/state.json` at
+    BUILD time, and the project's remembered `agent` ratio in `dotfiles-ide`'s `sizes.json`
+    still wins, so a user's own drag is never undone. Order: remembered ratio → this setting →
+    the historical 0.6.
+  - Mechanism: `launch::foreign_right_split(layout_json, pane_id)` returns `(path, ratio,
+    width)` of the LARGEST `right` split whose rect does NOT contain our own pane. Both
+    `herdr-ide` build sites split the anchor pane (an existing agent, or the shell) rightwards,
+    and the ratio is the LEFT (middle) child's share, so a column of N columns inside a
+    W-wide split is `1 - N/W` — `launch::ratio_for_cols`, which shares ONE implementation
+    (`ratio_for_tail`) with `ratio_for_rows`. Excluding splits that hold our own pane is what
+    lets a RIGHT-docked sidebar still resolve the Agent boundary: the sidebar's column is
+    `sidebar_width`'s job, not this row's. Picking the largest rect skips narrower inner
+    splits, and paths tie-break so the choice never depends on host listing order.
+  - `PaneCtl::set_agent_cols` applies the ratio on `HERDR_TAB_ID` (falling back to `pane_id`)
+    and reports "Agent width: no pane to size in this tab" when the tab has no such split; the
+    stored value is kept, because it still applies to tabs built later. The first `←`/`→` on
+    "auto" is seeded from the live column (`PaneCtl::agent_cols_now`), or
+    `state::SEED_AGENT_WIDTH` when there is nothing to measure.
 - Every Settings action uses `state::update_state`, a lock-protected read-modify-write.
   State/tree/SCM/root writers use persistent sibling `.lock` files with OS-backed locks; the
   kernel releases ownership on process death, so do not poll, age, or delete those files.

@@ -61,7 +61,7 @@ if [ -n "$anchor_agent" ]; then
   # title when that agent exits (run ide-agent-title --clear PANE to do it).
   "$here/ide-agent-title" "$agent" "$anchor_agent"
   # The ratio sizes the first (left) slot, which the middle takes after the swap.
-  middle=$(split "$agent" right 0.6)
+  middle=$(split "$agent" right "$(agent_ratio_for "$agent" "$saved")")
   [ -n "$middle" ] || die "pane split failed"
   "$HERDR" pane swap --source-pane "$agent" --target-pane "$middle" >/dev/null
   editor=$middle
@@ -72,7 +72,7 @@ else
   term=$anchor
   agent=''
   if [ "$agent_cmd" != none ]; then
-    agent=$(split "$term" right 0.6)
+    agent=$(split "$term" right "$(agent_ratio_for "$term" "$saved")")
     [ -n "$agent" ] || die "pane split failed"
     # The hook titles this pane for the command and clears the title when the
     # agent exits; the first line is not hooked yet, so title it directly.
