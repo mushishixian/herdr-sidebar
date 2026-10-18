@@ -507,6 +507,10 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   diffing, which is what keeps the TTL alive, so a killed sidebar's value can never
   outlive 20 s; a second reporter is unnecessary, because duplicate reports are identical
   and `report_metadata` merges.
+- **The rail is display-only for plugins.** herdr renders it client-side (`src/client/shell/sidebar.rs`
+  `render_workspace_rows`) and handles its mouse input itself; tokens are plain text with no click or
+  hover hook, so a plugin cannot add a per-space button (a hover ✕ close was requested and declined as
+  needing a herdr fork). Closing a space is herdr's own right-click → Close ("Close workspace?").
 - Per-token `rules` (≤16, text-valued tokens only) style by value
   (`{ equals = "working", fg = "#f5c542", bold = true }`) or HIDE it
   (`{ equals = "idle", hide = true }`); that is how "only busy spaces get a word line"

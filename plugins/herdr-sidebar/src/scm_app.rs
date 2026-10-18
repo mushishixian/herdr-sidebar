@@ -923,6 +923,25 @@ enum Setting {
 /// don't toggle.
 type SettingRow = (Setting, &'static str, String, bool);
 
+/// Smallest row index `top` such that the rows from `top` to the end fit in
+/// `height` lines. Returns the last index when even that row alone is taller
+/// than `height`, and 0 when every row fits.
+fn max_scroll_for(heights: &[usize], height: usize) -> usize {
+    let mut used = 0usize;
+    let mut top = heights.len();
+    for (i, &h) in heights.iter().enumerate().rev() {
+        if used + h > height {
+            break;
+        }
+        used += h;
+        top = i;
+    }
+    if top == heights.len() {
+        return heights.len().saturating_sub(1);
+    }
+    top
+}
+
 /// Where the list body was drawn last frame, for mouse hit-testing.
 #[derive(Clone, Copy, Default)]
 struct BodyGeom {
@@ -4259,7 +4278,11 @@ impl App {
 
     /// Wheel: move the VIEW only — the selection stays where it is.
     fn scroll_view(&mut self, delta: isize) {
-        let max = self.rows.len().saturating_sub(1) as isize;
+        let max = if self.body.height == 0 {
+            self.rows.len().saturating_sub(1)
+        } else {
+            self.max_scroll(self.body.height as usize)
+        } as isize;
         self.scroll = (self.scroll as isize + delta).clamp(0, max) as usize;
         self.persist_scm();
     }
@@ -4725,6 +4748,17 @@ impl App {
             Row::Commit(_) => 3,
             _ => 1,
         }
+    }
+
+    /// Largest scroll offset that still shows the bottom of the list in a
+    /// `height`-line viewport (0 when everything fits).
+    fn max_scroll(&self, height: usize) -> usize {
+        let heights: Vec<usize> = self
+            .rows
+            .iter()
+            .map(|row| self.row_height(*row) as usize)
+            .collect();
+        max_scroll_for(&heights, height)
     }
 
     /// Content rows repo `r`'s inline message box shows right now.
@@ -5535,7 +5569,22 @@ impl App {
             })
             .collect();
         frame.render_widget(List::new(items), area);
-        draw_scrollbar(frame, area, self.rows.len(), visible, self.scroll);
+        // Measure in screen lines, not rows: Message and Commit rows are taller.
+        let heights: Vec<usize> = self
+            .rows
+            .iter()
+            .map(|row| self.row_height(*row) as usize)
+            .collect();
+        let total: usize = heights.iter().sum();
+        let viewport = area.height as usize;
+        let pos: usize = heights[..self.scroll.min(heights.len())].iter().sum();
+        draw_scrollbar(
+            frame,
+            area,
+            total,
+            viewport,
+            pos.min(total.saturating_sub(viewport)),
+        );
 
         // Terminal cursor inside the focused INLINE message box (multi-repo).
         if self.multi() && self.focus == Focus::Message {
@@ -5564,7 +5613,7 @@ impl App {
         // Clamp the scroll and (keyboard nav only) walk it forward until the
         // selection fits — rows have variable heights.
         let h = (area.height as usize).max(1);
-        self.scroll = self.scroll.min(self.rows.len().saturating_sub(1));
+        self.scroll = self.scroll.min(self.max_scroll(h));
         if self.snap {
             if let Some(sel) = self.selected {
                 if sel < self.scroll {
@@ -5582,6 +5631,9 @@ impl App {
                 }
             }
             self.snap = false;
+            // The snap never leaves the selection above `scroll`, so this
+            // clamp only trims a window that overshoots the bottom.
+            self.scroll = self.scroll.min(self.max_scroll(h));
         }
         // Visible slice: everything from `scroll` until the viewport is
         // spent (plus one partially-clipped row).
@@ -6413,6 +6465,35 @@ fn same_path(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_scroll_is_zero_when_everything_fits() {
+        assert_eq!(max_scroll_for(&[1, 1, 1], 3), 0);
+        assert_eq!(max_scroll_for(&[1, 3, 1], 5), 0);
+        assert_eq!(max_scroll_for(&[], 5), 0);
+    }
+
+    #[test]
+    fn max_scroll_stops_with_last_row_at_bottom() {
+        // Ten 1-line rows in a 4-line viewport: the window starts at row 6.
+        assert_eq!(max_scroll_for(&[1; 10], 4), 6);
+        // Tail [1, 1, 3, 1] (6 lines) overflows 5, so the window starts at 2 ([1, 3, 1]).
+        assert_eq!(max_scroll_for(&[3, 1, 1, 3, 1], 5), 2);
+    }
+
+    #[test]
+    fn max_scroll_handles_variable_heights() {
+        // Commit-style 3-line rows mixed with 1-line rows.
+        assert_eq!(max_scroll_for(&[1, 3, 1, 3], 6), 2);
+        // The 3-line tail plus two 1-line rows fill 5 lines exactly.
+        assert_eq!(max_scroll_for(&[1, 1, 1, 3], 5), 1);
+    }
+
+    #[test]
+    fn max_scroll_returns_last_index_for_row_taller_than_viewport() {
+        assert_eq!(max_scroll_for(&[1, 1, 5], 3), 2);
+        assert_eq!(max_scroll_for(&[1], 1), 0);
+    }
 
     #[test]
     fn diff_routes_to_editor_only_when_every_condition_holds() {
