@@ -343,6 +343,9 @@ pub struct State {
     /// Show the compact branch + sync strip at the bottom while the current
     /// folder belongs to a Git repository.
     pub show_git_footer: bool,
+    /// Ask before deleting a file or folder from the Explorer. Off deletes
+    /// immediately (no undo) — the user opted out of the confirmation.
+    pub confirm_delete: bool,
     /// The user's explicit icon-theme choice; `None` = auto (Nerd Font
     /// probe). Set the moment they toggle `i` or the Settings row, so a
     /// wrong auto-guess is corrected once and stays corrected.
@@ -412,6 +415,7 @@ impl Default for State {
             search_active: false,
             show_hotkeys: false,
             show_git_footer: true,
+            confirm_delete: true,
             icons: None,
             color_theme: ColorTheme::VsCode,
             font_prompt_done: false,
@@ -593,12 +597,13 @@ fn write_state(path: &Path, state: State) {
         None => String::new(),
     };
     let json = format!(
-        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"terminal_height\":{},\"agent_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"custom_editor_inline\":{},\"scm_tree_view\":{}{icons}}}",
+        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"confirm_delete\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"terminal_height\":{},\"agent_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"custom_editor_inline\":{},\"scm_tree_view\":{}{icons}}}",
         state.merged,
         state.active.state_name(),
         state.search_active,
         state.show_hotkeys,
         state.show_git_footer,
+        state.confirm_delete,
         state.font_prompt_done,
         state.auto_open,
         state.strict_toggle,
@@ -1014,6 +1019,10 @@ pub fn parse_state(json: &str) -> State {
             .get("git_footer")
             .and_then(|v| v.as_bool())
             .unwrap_or(default.show_git_footer),
+        confirm_delete: value
+            .get("confirm_delete")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(default.confirm_delete),
         icons: value
             .get("icons")
             .and_then(|v| v.as_str())
@@ -1218,6 +1227,7 @@ mod tests {
             search_active: true,
             show_hotkeys: true,
             show_git_footer: false,
+            confirm_delete: false,
             icons: Some(crate::icons::IconTheme::Emoji),
             color_theme: ColorTheme::Terminal,
             font_prompt_done: true,
@@ -1235,7 +1245,7 @@ mod tests {
             custom_editor_inline: true,
             scm_tree_view: true,
         };
-        let json = "{\"merged\":true,\"active\":\"source-control\",\"search_active\":true,\"hotkeys\":true,\"git_footer\":false,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"terminal_height\":22,\"agent_width\":96,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"custom_editor_on_click\":true,\"custom_editor_inline\":true,\"scm_tree_view\":true,\"icons\":\"emoji\"}";
+        let json = "{\"merged\":true,\"active\":\"source-control\",\"search_active\":true,\"hotkeys\":true,\"git_footer\":false,\"confirm_delete\":false,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"terminal_height\":22,\"agent_width\":96,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"custom_editor_on_click\":true,\"custom_editor_inline\":true,\"scm_tree_view\":true,\"icons\":\"emoji\"}";
         assert_eq!(parse_state(json), state);
         assert!(parse_state("\u{feff}{\"merged\":true}").merged);
         // Files written before the flag existed keep auto-open AND the git
@@ -1271,6 +1281,8 @@ mod tests {
         assert!(parse_state("{\"merged\":true}").follow_cwd);
         assert!(parse_state("{\"merged\":true}").git_deco);
         assert!(parse_state("{\"merged\":true}").show_git_footer);
+        // Files written before the Confirm-delete row existed still ask.
+        assert!(parse_state("{\"merged\":true}").confirm_delete);
         // Files written before the dock setting existed stay left-docked.
         assert!(!parse_state("{\"merged\":true}").dock_right);
         assert_eq!(parse_state("{\"merged\":true}").sidebar_width, 32);

@@ -7,7 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::icons::IconTheme;
@@ -655,6 +655,70 @@ pub fn truncate_to(s: String, max: usize) -> String {
     out
 }
 
+/// Widest a one-line input dialog gets in a sidebar pane. Kept below a wide
+/// pane's width so the box reads as a dialog, not a footer strip.
+pub const INPUT_DIALOG_MAX_WIDTH: u16 = 60;
+
+/// Rect of a one-line input dialog: fitted to the pane, never wider than
+/// `max` cells, centered, one third of the way down. Also never narrower than
+/// the label on the border needs (still capped by `max` and by `area`), so a
+/// narrow pane can show what it is asking for.
+pub fn input_dialog_rect(area: Rect, title: &str, max: u16) -> Rect {
+    let max = max.max(1);
+    let label_width = u16::try_from(Span::raw(title).width() + 4).unwrap_or(u16::MAX);
+    let width = area
+        .width
+        .saturating_sub(2)
+        .clamp(1, max)
+        .max(label_width.min(max))
+        .min(area.width);
+    let height = 3.min(area.height);
+    Rect::new(
+        area.x + (area.width.saturating_sub(width)) / 2,
+        area.y + (area.height.saturating_sub(height)) / 3,
+        width,
+        height,
+    )
+}
+
+/// Draw a one-line input dialog (`title` on the border, `input`'s TAIL so the
+/// caret end stays visible, ⏎ ok · esc cancel while it fits) as a box over the
+/// body instead of burying the prompt in the footer. Returns the box's rect.
+pub fn draw_input_dialog(frame: &mut Frame, title: &str, input: &str) -> Rect {
+    let rect = input_dialog_rect(frame.area(), title, INPUT_DIALOG_MAX_WIDTH);
+    // A block TITLE is silently clipped rather than wrapped, so trim it to the
+    // border's usable width first.
+    let label = truncate_to(title.to_string(), usize::from(rect.width.saturating_sub(4)));
+
+    let inner_width = usize::from(rect.width.saturating_sub(2));
+    // Drop the hint before the typed text loses room.
+    let hint = "  ⏎ ok · esc cancel";
+    let typed = input_tail(input, inner_width.saturating_sub(3));
+    let hint_fits = Span::raw(typed.as_str()).width() + Span::raw(hint).width() + 2 <= inner_width;
+
+    let mut spans = vec![
+        Span::raw(" "),
+        // Tail, not head: a long name must keep its end — where the cursor
+        // is — on screen.
+        Span::raw(typed),
+        Span::styled("█", Style::default().dim()),
+    ];
+    if hint_fits {
+        spans.push(Span::styled(hint, Style::default().dim()));
+    }
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).block(
+            Block::bordered()
+                .title(format!(" {label} "))
+                .border_style(Style::default().fg(palette().accent)),
+        ),
+        rect,
+    );
+    rect
+}
+
 /// Pane ids in the same tab as `my_pane_id` that belong to the `other` view
 /// (matched by its standalone label or its metadata token), from a
 /// `pane.list` response.
@@ -701,6 +765,45 @@ pub fn sibling_panes_of(pane_list_json: &str, my_pane_id: &str, other: View) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn encloses(outer: Rect, inner: Rect) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.width <= outer.x + outer.width
+            && inner.y + inner.height <= outer.y + outer.height
+    }
+
+    #[test]
+    fn input_dialog_centers_and_stays_inside_a_normal_pane() {
+        let area = Rect::new(0, 0, 32, 20);
+        let rect = input_dialog_rect(area, "Rename", INPUT_DIALOG_MAX_WIDTH);
+        assert!(encloses(area, rect), "{rect:?} escaped {area:?}");
+        // One cell of inset each side, one bordered content row.
+        assert_eq!((rect.width, rect.height), (30, 3));
+        assert_eq!(rect.x, 1);
+        // A third of the way down, never the very first row.
+        assert_eq!(rect.y, (20 - 3) / 3);
+        // A wide pane caps the box at `max` and still centers it.
+        let wide = Rect::new(10, 0, 200, 40);
+        let capped = input_dialog_rect(wide, "Custom editor", INPUT_DIALOG_MAX_WIDTH);
+        assert_eq!(capped.width, INPUT_DIALOG_MAX_WIDTH);
+        assert_eq!(capped.x, 10 + (200 - INPUT_DIALOG_MAX_WIDTH) / 2);
+        assert!(encloses(wide, capped));
+    }
+
+    #[test]
+    fn input_dialog_clamps_into_tiny_panes() {
+        for area in [
+            Rect::new(0, 0, 6, 2),
+            Rect::new(4, 7, 0, 0),
+            Rect::new(2, 3, 1, 1),
+            Rect::new(0, 0, 3, 0),
+        ] {
+            let rect = input_dialog_rect(area, "Custom editor", INPUT_DIALOG_MAX_WIDTH);
+            assert!(encloses(area, rect), "{rect:?} escaped {area:?}");
+            assert!(rect.width <= INPUT_DIALOG_MAX_WIDTH);
+        }
+    }
 
     /// Perceived brightness on a 0..1 scale, the measure `darken_for_light`
     /// caps.

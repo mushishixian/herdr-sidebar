@@ -190,6 +190,12 @@ Diff (see AGENTS.md, *SCM changed-file routing*).
 field), `ctrl+p` Quick Open, `ctrl+f` search, `m` or **right-click** context
 menu, `s` Settings, `b` hide, `c` change folder, `q` quit.
 
+Anything that asks you to type (new file/folder, rename, typed change folder,
+custom editor, pane rename) opens as a small bordered dialog over the tree;
+`⏎` accepts, `esc` cancels. Deleting from the Explorer asks first — turn that
+off with the ⚙ Settings row **Confirm delete** (`on`/`off`, remembered across
+sessions) when you would rather have no prompt at all.
+
 ## How each piece works
 
 ### Which space's agent is busy (herdr's spaces rail)

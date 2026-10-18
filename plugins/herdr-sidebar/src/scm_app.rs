@@ -4933,8 +4933,18 @@ impl App {
             }
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
             Some(Overlay::Settings { .. }) => self.draw_settings(frame),
+            Some(Overlay::PaneRename { .. }) => self.draw_pane_rename(frame),
             _ => {}
         }
+    }
+
+    /// The pane-rename field as a bordered dialog over the body — a footer
+    /// line was too easy to miss while typing a new pane name.
+    fn draw_pane_rename(&mut self, frame: &mut Frame) {
+        let Some(Overlay::PaneRename { input }) = self.overlay.as_ref() else {
+            return;
+        };
+        herdr_sidebar::ui::draw_input_dialog(frame, "Rename pane", input.as_str());
     }
 
     /// The VS Code activity bar: view-switcher icons plus a detach button.
@@ -5542,10 +5552,6 @@ impl App {
             (Some(Overlay::ConfirmGit { prompt, .. }), _) => {
                 Some((prompt.clone(), palette().deleted))
             }
-            (Some(Overlay::PaneRename { input }), _) => Some((
-                format!("Rename pane: {input}_  (⏎ ok · esc cancel)"),
-                palette().deleted,
-            )),
             (_, Some((text, is_error))) => {
                 let color = if *is_error {
                     palette().deleted

@@ -369,6 +369,8 @@ enum Setting {
     Hotkeys,
     GitDecorations,
     GitFooter,
+    /// Ask before deleting a file or folder from the Explorer.
+    ConfirmDelete,
     Folder,
 }
 
@@ -1946,10 +1948,7 @@ impl App {
             Cmd::AdjustAgentWidth(wider) => self.adjust_agent_width(wider),
             Cmd::DeleteConfirmed(path, is_dir) => {
                 self.overlay = None;
-                match actions::delete(&path, is_dir) {
-                    Ok(()) => self.refresh_tree(),
-                    Err(err) => self.notice = Some(format!("delete failed: {err}")),
-                }
+                self.delete_path(path, is_dir);
             }
             Cmd::Picker(action) => self.handle_picker_action(action),
         }
@@ -2804,6 +2803,17 @@ impl App {
                 true,
             ),
             (
+                Setting::ConfirmDelete,
+                "Confirm delete",
+                if self.sidebar_state.confirm_delete {
+                    "on"
+                } else {
+                    "off"
+                }
+                .to_string(),
+                true,
+            ),
+            (
                 Setting::Folder,
                 "Change folder…",
                 self.tree.root_name(),
@@ -2908,6 +2918,10 @@ impl App {
                 });
                 self.rediscover_repos();
                 self.request_decorations(true);
+            }
+            Setting::ConfirmDelete => {
+                self.sidebar_state =
+                    sidebar::update_state(|state| state.confirm_delete = !state.confirm_delete);
             }
             Setting::Folder => {
                 self.overlay = None;
@@ -3132,7 +3146,13 @@ impl App {
             }
             MenuAction::Delete => {
                 let Some((path, is_dir)) = target else { return };
-                self.overlay = Some(Overlay::ConfirmDelete { path, is_dir });
+                if self.sidebar_state.confirm_delete {
+                    self.overlay = Some(Overlay::ConfirmDelete { path, is_dir });
+                } else {
+                    // The user opted out of the prompt: no undo either way,
+                    // so this is the same work the confirmed path does.
+                    self.delete_path(path, is_dir);
+                }
             }
             MenuAction::OpenExternal => {
                 let Some((path, _)) = target else { return };
@@ -3693,39 +3713,10 @@ impl App {
                 .into_iter()
                 .map(|l| l.fg(color).into())
                 .collect()
+        } else if self.show_hotkeys() {
+            wrap_hints(&self.hints(), frame.area().width, 3)
         } else {
-            match &self.overlay {
-                Some(Overlay::Prompt { title, input, .. }) => {
-                    // One line, always: drop the hint when narrow, and show
-                    // the TAIL of a long input so the cursor stays visible.
-                    let head = format!(" {title}: ");
-                    let hint = "  (⏎ ok · esc cancel)";
-                    let fixed = Span::raw(head.as_str()).width() + 1 + 4;
-                    let width = usize::from(footer.width);
-                    let hint_fits =
-                        fixed + Span::raw(hint).width() + Span::raw(input.as_str()).width()
-                            <= width;
-                    let avail = width
-                        .saturating_sub(fixed)
-                        .saturating_sub(if hint_fits {
-                            Span::raw(hint).width()
-                        } else {
-                            0
-                        })
-                        .max(4);
-                    let mut spans = vec![
-                        Span::styled(head, Style::default().bold()),
-                        Span::raw(input_tail(input, avail)),
-                        Span::styled("█", Style::default().dim()),
-                    ];
-                    if hint_fits {
-                        spans.push(Span::styled(hint, Style::default().dim()));
-                    }
-                    vec![Line::from(spans)]
-                }
-                _ if self.show_hotkeys() => wrap_hints(&self.hints(), frame.area().width, 3),
-                _ => Vec::new(),
-            }
+            Vec::new()
         };
         let git_footer = self.sidebar_state.show_git_footer && self.git_footer_status.is_some();
         let menu_hint = git_footer && footer_lines.is_empty();
@@ -3779,6 +3770,7 @@ impl App {
                 }
             }
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
+            Some(Overlay::Prompt { .. }) => self.draw_prompt(frame),
             Some(Overlay::Settings { .. }) => self.draw_settings(frame),
             Some(Overlay::QuickOpen { .. }) => self.draw_quick_open(frame),
             _ => {}
@@ -3879,14 +3871,12 @@ impl App {
 
     /// Rows the footer needs at `width`: notices and confirms WRAP in narrow
     /// panes (a one-line assumption used to clip "Delete '…' permanently?
-    /// (y/N)" mid-question); the name prompt stays one line (its input
-    /// shrinks instead); hints wrap as before.
+    /// (y/N)" mid-question); hints wrap as before. The name prompt is a
+    /// dialog over the body, so it asks for no footer row.
     fn footer_height(&self, width: u16) -> u16 {
         let git_footer = self.sidebar_state.show_git_footer && self.git_footer_status.is_some();
         let content = if let Some((msg, _)) = self.footer_message() {
             wrap_footer_message(&msg, width, 4).len() as u16
-        } else if matches!(self.overlay, Some(Overlay::Prompt { .. })) {
-            1
         } else if self.show_hotkeys() {
             wrap_hints(&self.hints(), width, 3).len() as u16
         } else if git_footer {
@@ -4067,6 +4057,26 @@ impl App {
                 .block(ratatui::widgets::Block::bordered().border_style(Style::default().dim())),
             popup,
         );
+    }
+
+    /// Render the name/command prompt as a bordered dialog over the body —
+    /// a footer line was too easy to miss. The title names the field
+    /// ("Rename", "New file", "Custom editor"), so no prefix is needed.
+    fn draw_prompt(&mut self, frame: &mut Frame) {
+        let Some(Overlay::Prompt { title, input, .. }) = self.overlay.as_ref() else {
+            return;
+        };
+        let (title, input) = (title.as_str(), input.as_str());
+        herdr_sidebar::ui::draw_input_dialog(frame, title, input);
+    }
+
+    /// Delete `path` and report the outcome: shared by the confirmed overlay
+    /// path and the "Confirm delete: off" immediate path so they cannot drift.
+    fn delete_path(&mut self, path: PathBuf, is_dir: bool) {
+        match actions::delete(&path, is_dir) {
+            Ok(()) => self.refresh_tree(),
+            Err(err) => self.notice = Some(format!("delete failed: {err}")),
+        }
     }
 
     fn draw_quick_open(&mut self, frame: &mut Frame) {

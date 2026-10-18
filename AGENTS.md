@@ -746,6 +746,19 @@ HACKING.md — budget time for that before promising a patched build.
   kernel releases ownership on process death, so do not poll, age, or delete those files.
   Never write an app's startup snapshot wholesale: preview tabs run independent sidebar
   processes, and a stale snapshot silently reverts newer settings from another tab.
+- **Name/command prompts are DIALOGS, not footer lines** (`ui::draw_input_dialog`, driven by
+  the pure `ui::input_dialog_rect`): Explorer's `Overlay::Prompt` (New file / New folder /
+  Rename / typed Change folder / Custom editor) and Source Control's `Overlay::PaneRename`
+  draw a bordered box (palette `accent`, `INPUT_DIALOG_MAX_WIDTH` 60, one third down, input
+  TAIL + dim `█` + `⏎ ok · esc cancel` while it fits) over the body. A footer line was
+  user-rejected as too easy to miss while typing. So the footer no longer reserves a row for
+  them (`footer_height` has no prompt branch) — if you add another text prompt, draw it with
+  the same helper instead of reviving that branch. Field/key handling is unchanged.
+- **`Confirm delete`** (`confirm_delete`, default on, Settings row right above `Change
+  folder…`) gates ONLY the Explorer's Delete menu entry: off deletes immediately through the
+  same `delete_path` helper the confirmed `Cmd::DeleteConfirmed` path uses, so the two cannot
+  drift. There is no undo either way. Source Control has no file-delete action, so the row is
+  Explorer-only; git's destructive confirms (`ConfirmGit`, discard) are a separate overlay.
 - Separated Explorer and Source Control panes periodically re-read shared display settings,
   including `color_theme`, `strict_toggle`, and `focus_on_open`; theme changes also update
   the process palette immediately. The Settings modal scrolls to keep its selected row visible
