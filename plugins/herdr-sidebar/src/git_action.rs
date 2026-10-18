@@ -186,8 +186,12 @@ pub fn run(op: &str) -> io::Result<()> {
     }
 
     let status = child.wait()?;
-    let stderr_bytes = stderr_handle.join().map_err(|_| io::Error::other("stderr thread panic"))?;
-    let stdout_bytes = stdout_handle.join().map_err(|_| io::Error::other("stdout thread panic"))?;
+    let stderr_bytes = stderr_handle
+        .join()
+        .map_err(|_| io::Error::other("stderr thread panic"))?;
+    let stdout_bytes = stdout_handle
+        .join()
+        .map_err(|_| io::Error::other("stdout thread panic"))?;
 
     let stdout_str = String::from_utf8_lossy(&stdout_bytes);
     let stderr_str = String::from_utf8_lossy(&stderr_bytes);
@@ -324,16 +328,13 @@ fn focused_cwd() -> Option<PathBuf> {
         .or_else(|| {
             let list = crate::ipc::call_text("pane.list", serde_json::json!({})).ok()?;
             let id = crate::launch::server_focused_pane_id(&list);
-            if id.is_empty() {
-                None
-            } else {
-                Some(id)
-            }
+            if id.is_empty() { None } else { Some(id) }
         });
 
     let cwd = pane_id.and_then(|id| {
         let reply = crate::ipc::call_text("pane.get", serde_json::json!({ "pane_id": id })).ok()?;
-        let reply: serde_json::Value = serde_json::from_str(crate::launch::strip_bom(&reply)).ok()?;
+        let reply: serde_json::Value =
+            serde_json::from_str(crate::launch::strip_bom(&reply)).ok()?;
         let pane = &reply["result"]["pane"];
         pane["foreground_cwd"]
             .as_str()
@@ -462,12 +463,16 @@ mod tests {
 
     #[test]
     fn strip_ansi_removes_osc_sequences() {
-        assert_eq!(strip_ansi("\u{1b}]8;;http://x\u{7}link\u{1b}]8;;\u{1b}\\"), "link");
+        assert_eq!(
+            strip_ansi("\u{1b}]8;;http://x\u{7}link\u{1b}]8;;\u{1b}\\"),
+            "link"
+        );
     }
 
     #[test]
     fn oco_unconfigured_is_explained() {
-        let stdout = "┌   Welcome to OpenCommit! \nnode:tty:97\n    throw new ERR_TTY_INIT_FAILED(ctx);\n";
+        let stdout =
+            "┌   Welcome to OpenCommit! \nnode:tty:97\n    throw new ERR_TTY_INIT_FAILED(ctx);\n";
         assert_eq!(
             summarize_oco_failure(stdout, ""),
             "OpenCommit is not configured. Run `oco setup` in a terminal to choose an AI provider. Changes are left staged."
@@ -476,7 +481,10 @@ mod tests {
 
     #[test]
     fn oco_no_changes_is_nothing_to_commit() {
-        assert_eq!(summarize_oco_failure("No changes detected\n", ""), "Nothing to commit.");
+        assert_eq!(
+            summarize_oco_failure("No changes detected\n", ""),
+            "Nothing to commit."
+        );
     }
 
     #[test]

@@ -101,6 +101,19 @@ for a in git-commit-ai git-pull git-push file-search search-popup replace-popup 
   fi
 done
 
+# Agent-state hooks: without them the spaces rail cannot show which space's
+# agent is working (pi has hook authority, so herdr never scans its screen).
+for d in .pi .claude; do
+  [ -d "$HOME/$d" ] || continue
+  name=${d#.}
+  hook=$(herdr integration status 2>/dev/null | grep -E "^$name: " || true)
+  if [ -n "$hook" ] && ! grep -q "not installed" <<<"$hook"; then
+    ok "herdr integration $name"
+  else
+    bad "herdr integration $name not installed (herdr integration install $name)"
+  fi
+done
+
 for p in selection_share.ts git_line_history.ts; do
   if [ -L "$HOME/.config/fresh/plugins/$p" ] || [ -e "$HOME/.config/fresh/plugins/$p" ]; then
     ok "fresh plugin $p"

@@ -9,8 +9,8 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -24,7 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph};
 
 use crate::file_search::{
-    QuickFile, QuickIndex, QUICK_OPEN_FILE_LIMIT, collect_quick_files, quick_matches,
+    QUICK_OPEN_FILE_LIMIT, QuickFile, QuickIndex, collect_quick_files, quick_matches,
     truncate_path_tail,
 };
 use crate::icons::{self, IconTheme};
@@ -547,8 +547,8 @@ pub fn open_file_in_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn file_popup_key_navigation_and_cancellation() {

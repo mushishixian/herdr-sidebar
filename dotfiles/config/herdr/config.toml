@@ -22,6 +22,28 @@ tab_bar_position = "top"
 host_cursor = "native"
 status_indicators = "symbols"
 
+# Which space's agent is busy, at a glance. Row 1's `state_icon` is a single
+# cell (symbols style: ◐ working, × blocked, ✓ done, ○ idle, · unknown), so a
+# busy space also gets a BOLD stand-alone word line. The `hide` rules drop that
+# line for idle/unknown spaces, so quiet spaces keep the two-line layout.
+# `$agents` is reported by herdr-sidebar itself (source `herdr-sidebar`, 20 s
+# TTL, refreshed from every sidebar pane's 5 s heartbeat): the agent names in
+# that space, the busy one first, e.g. `claude` or `pi · codex`. Agent state
+# comes from herdr's agent-state hooks (`herdr integration status`; the
+# installer installs the pi and Claude Code ones).
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+  ["$agents", { token = "state_text", bold = true, rules = [
+      { equals = "idle", hide = true },
+      { equals = "unknown", hide = true },
+      { equals = "working", fg = "#f5c542" },
+      { equals = "blocked", fg = "#ff5f5f" },
+      { equals = "done", fg = "#5fd7c4" },
+  ] }],
+  ["branch", "git_status"],
+]
+
 [ui.toast]
 delivery = "herdr"
 

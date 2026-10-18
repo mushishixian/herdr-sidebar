@@ -458,6 +458,62 @@ Pane identity & titles:
 herdr config: `%APPDATA%\herdr\config.toml`; `herdr server reload-config` applies edits to
 the running server ("status":"applied" + diagnostics in the reply).
 
+Agent status & the spaces rail (verified live, herdr 0.9.5):
+
+- Every pane has an `agent_status`; a workspace's is the MAX over its panes, priority
+  Blocked(4) > Done(3, = idle-but-unseen) > Working(2) > Idle(1) > Unknown(0)
+  (`src/workspace/aggregate.rs`, `src/client/shell.rs`). `herdr workspace list` exposes
+  it, so a plugin can poll it. `pane report-agent --state` accepts only
+  `idle|working|blocked|unknown` — `done` exists ONLY at workspace/UI level.
+- The rail's default first row `["state_icon", "workspace"]` IS that status. Symbols
+  style: `◐` working, `×` blocked, `✓` done, `○` idle, `·` unknown (yellow/red/teal/
+  green/grey); DOTS style draws `●` for working+blocked+done, differing only in colour —
+  which reads as "the indicator never changes". `ui.status_indicators = "symbols"`.
+- Injecting text into the spaces rail: `workspace report-metadata --token k=v` stores
+  display-only tokens and `[ui.sidebar.spaces] rows` may render `$k`
+  (`SpaceSidebarToken::Custom`). Rows REPLACE the defaults (re-declare
+  workspace/branch/git_status if wanted), long values truncate with `…`, `--clear-token`
+  removes a token, `ttl_ms` ≤ 24h. `herdr server reload-config` applies rows and tokens
+  to a LIVE client (`ClientShellConfig::apply_live_config`) — no client restart.
+- **The space's agent NAMES come from the sidebar** (`src/agent_tokens.rs`), because herdr
+  has no agent-name space token of its own. Token key `agents`, source `herdr-sidebar`,
+  `ttl_ms` 20000; both sidebar apps (Explorer and Source Control, unified included) report
+  it from their existing 5 s heartbeat, and nothing else does — not `ensure.rs`, not the
+  viewer, not the sidecar. Value format `label · label`: `display_agent` (else `agent`) per
+  agent pane, deduped inside the workspace, agents with a `working` pane first and then
+  alphabetical, capped at 48 chars; a workspace with no agent pane is cleared with an
+  explicit `null`. EVERY workspace in `pane.list` is re-reported each beat instead of
+  diffing, which is what keeps the TTL alive, so a killed sidebar's value can never
+  outlive 20 s; a second reporter is unnecessary, because duplicate reports are identical
+  and `report_metadata` merges.
+- Per-token `rules` (≤16, text-valued tokens only) style by value
+  (`{ equals = "working", fg = "#f5c542", bold = true }`) or HIDE it
+  (`{ equals = "idle", hide = true }`); that is how "only busy spaces get a word line"
+  is built with no reporter of our own. `state_text` renders idle/working/blocked/
+  done/unknown; `fg` is `#RGB`/`#RRGGBB`.
+- State arrives through ACTIVE HOOks: `herdr integration install <agent>` / `status`.
+  `pi`/`omp`/`mastracode`/`opencode`/`kilo`/`kimi` have full hook authority
+  (`src/detect/mod.rs` `full_lifecycle_hook_authority`), so herdr SKIPS screen scanning
+  for them: with no hook installed the rail shows them idle forever (bit us live with
+  pi — `herdr integration status` showed every target "not installed"). Only the
+  process exiting resets it, so a hung hook agent sticks on `working` (no timeout).
+  Screen-detected agents need 3 idle confirmations (≤700ms, 100ms re-checks).
+- **A hook installed mid-run needs an agent RESTART, not `/reload`**: verified live by
+  booting `pi` with the extension moved aside, restoring it, running `/reload` and then a
+  prompt — the pane stayed `idle` while the agent answered (`/reload` swaps the extension
+  runtime but does not re-emit `session_start`, which is what arms it). A freshly started
+  `pi` with the hook reports `working` within ~1 s of a prompt and `idle` when the turn
+  settles.
+- `pane report-agent` is GATED, not just written: on a pane where herdr already detects
+  an agent process, a report whose `source`/`agent` is not the real integration identity
+  is silently dropped while the API still answers `{"type":"ok"}` (`src/terminal/state.rs`
+  `set_hook_authority_at` / `route_full_lifecycle_hook_report`); a live full-hook agent
+  also needs a session ref plus increasing `seq`. So the screenshot trick (fake agent
+  rows via `pane.report_agent`) only works on panes with no agent detected, a fake
+  `working` on a live agent pane will not clear with a plain `idle` from the same source,
+  and `state: idle` from a non-hook source lands as `done`, not `idle`. `pane
+  release-agent <pane>` is the clean way to undo a fake report.
+
 Terminal fonts for icon glyphs (Windows, verified live):
 
 - Nerd Font "**Mono**" builds squeeze icons into one cell (tiny); the **non-Mono** build
@@ -1315,7 +1371,12 @@ required), then `pane run <id> "& '<abs path to exe>'"` (PS call operator — a 
 splits on spaces), then `pane send-keys <id> Down Enter …`, capture with
 `pane read <id> --source visible`, and confirm side effects with plain `git` commands in
 the scratch repo. Close the pane when done. Cheap, and it catches layout truncation bugs
-unit tests can't. **Build the verification binary into its OWN target dir**
+unit tests can't. **Set `HERDR_SIDEBAR_FONT_PROMPT=off`** (and `HERDR_SIDEBAR_ICONS=emoji`
+if you want to SEE glyph positions): a throwaway state dir has no persisted `font_prompt`,
+so the first-run Nerd Font offer blocks BEFORE the app loop starts — the pane shows only
+the prompt, the heartbeat/reporters never run, and it looks like a broken feature (cost a
+full debugging round: `agent_tokens` never logged because the loop had not started).
+**Build the verification binary into its OWN target dir**
 (`cargo build --release --target-dir target/verify`): a different exe path can't collide
 with the running sidebar's Windows exe lock, so no rename-aside dance and the user's live
 panes keep running. Delete the dir afterwards. Run the TUI with `$env:HERDR_PANE_ID=''` so it skips identity-token

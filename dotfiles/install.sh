@@ -143,6 +143,13 @@ if [ "$with_claude" = 1 ] && [ -d "$HOME/.claude" ]; then
   herdr integration install claude >/dev/null && info "Claude Code hook installed (herdr integration status)"
 fi
 
+# herdr gets an agent's state from these hooks. pi has "full lifecycle hook
+# authority", so herdr skips its screen heuristics for it: without the
+# integration the spaces rail shows pi idle forever. Rerun after a pi upgrade.
+if [ -d "$HOME/.pi" ]; then
+  herdr integration install pi >/dev/null && info "pi agent-state hook installed (herdr integration status)"
+fi
+
 herdr server reload-config >/dev/null 2>&1 && info "reloaded the running herdr server" || true
 
 # ── 5. Language servers (default; --no-lsp skips) ─────────────────────

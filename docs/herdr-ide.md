@@ -72,7 +72,7 @@ What it does, in order:
    official installers, all symlinks, `dotfiles/herdr-sidebar/build.sh` (builds
    `plugins/herdr-sidebar` from this checkout and points herdr's `herdr-sidebar`
    registration at it, replacing any other registration), links `dotfiles-ide`,
-   seeds the sidebar settings, installs herdr's Claude Code hook.
+   seeds the sidebar settings, installs herdr's Claude Code and pi agent-state hooks.
 3. Installs OpenCommit into `~/.local`.
 4. Verifies the actions, Fresh plugins and keys are visible, that the `herdr-sidebar`
    and `dotfiles-ide` registrations both point into this repo, then reloads herdr.
@@ -191,6 +191,41 @@ field), `ctrl+p` Quick Open, `ctrl+f` search, `m` or **right-click** context
 menu, `s` Settings, `b` hide, `c` change folder, `q` quit.
 
 ## How each piece works
+
+### Which space's agent is busy (herdr's spaces rail)
+
+herdr aggregates every pane's agent state into a per-workspace `agent_status`
+(`workspace list`), and the top-left rail draws it: row 1's `state_icon` is the
+workspace's status (symbols style: `◐` working, `×` blocked, `✓` done, `○` idle,
+`·` unknown — colours yellow / red / teal / green / grey). That glyph is a single
+cell, so `dotfiles/config/herdr/config.toml` adds a **bold stand-alone word line**
+for busy spaces only (`[ui.sidebar.spaces]` rows with `state_text` plus `hide`
+rules for idle/unknown), keeping the usual branch/git line underneath.
+
+That word line also names the agents in the space, because a bare `◐` does not say
+*what* is running. herdr has no built-in "agent name" token, but it renders any
+`$custom` token in those rows, so the sidebar reports one per space: `$agents`
+(next to the bold state word) reads `claude` for an idle Claude space and
+`pi · codex` for one running two agents, busy ones first. `plugins/herdr-sidebar`
+sends it every 5 s from each sidebar pane's heartbeat (`src/agent_tokens.rs`,
+source `herdr-sidebar`, `ttl_ms` 20 s), so it expires on its own when the last
+sidebar of a session goes away, and it clears a space that has no agent pane.
+Agents are read from `pane.list`, so this needs no extra configuration. Toggling
+herdr's own sidebar (`prefix+b`, "agent sidebar") shows or hides the whole rail,
+these per-space agent lines included.
+
+Two things that surprise people:
+
+- **The aggregation is a max, and working is not the top of it**: blocked > done
+  (finished, not looked at yet) > working > idle > unknown. A space whose agent
+  is working shows `◐` only while nothing louder is in it.
+- **The state has to be reported.** herdr gets it from per-agent hooks
+  (`herdr integration install <agent>`; the installer installs `pi` and Claude
+  Code). `pi`, `omp`, `mastracode`, `opencode`, `kilo` and `kimi` have *full hook
+  authority*, so herdr does not scan their screens at all: without the hook the
+  rail shows them idle forever, and a **hung** hook agent can stay `◐` until the
+  process exits (there is no staleness timeout). Other agents are detected from
+  the screen tail and go back to idle within about a second.
 
 ### IDE layout: `dotfiles-ide` plugin
 
@@ -514,6 +549,7 @@ popups, and conflict routing.
 | `ctrl+shift+a` does nothing | Windows Terminal's Select-all binding; `herdr plugin action invoke herdr-sidebar.git-commit-ai` to test without the key |
 | "OpenCommit is not configured" toast | run `oco setup` |
 | Agent pane title stays "Agent" | the pane's shell must be zsh with the hook sourced (`. …/shell/agent-title.zsh`, or rebuild with `ctrl+b i`); check the title with `herdr pane list \| jq '.result.panes[] \| select(.label=="Agent") \| .title'` |
+| Spaces rail shows a space's agent idle while it is working | `herdr integration status`: the agent needs its hook (`herdr integration install pi`). An agent STARTED BEFORE the install must be **restarted** — `/reload` is not enough (verified: the hook only arms itself on `session_start`, which a reload does not re-emit) |
 | "No Agent pane in this tab" | the tab has no pane labelled `Agent`; run `ctrl+b i` |
 | Sidebar lacks a new feature | `herdr plugin list --json` → `plugin_root` must be this checkout; rebuild + redeploy |
 | Actions missing in `herdr plugin action list` | manifest error: `herdr plugin log list --plugin herdr-sidebar` |

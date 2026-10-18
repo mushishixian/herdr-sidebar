@@ -1217,6 +1217,9 @@ pub struct App {
     pane_named: bool,
     /// Last heartbeat stamp, throttling the token refresh.
     last_beat: std::time::Instant,
+    /// Reports which agent runs in each herdr space for the spaces rail's
+    /// `$agents` line (own 5 s throttle; see [`herdr_sidebar::agent_tokens`]).
+    agent_tokens: herdr_sidebar::agent_tokens::AgentTokens,
     /// A native folder picker running on a background thread; its result
     /// arrives here (None = cancelled).
     picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
@@ -1363,6 +1366,7 @@ impl App {
             pane_ctl,
             pane_named: true,
             last_beat: std::time::Instant::now(),
+            agent_tokens: Default::default(),
             picking: None,
             cwd_follower,
             persisted_draft_roots,
@@ -1501,6 +1505,8 @@ impl App {
         if let Some(ctl) = &self.pane_ctl {
             ctl.report_tokens(MY_VIEW, self.merged());
         }
+        // The spaces rail's `$agents` line. Self-throttled and failure-tolerant.
+        self.agent_tokens.report_if_due();
         self.follow_sibling_cwd();
     }
 

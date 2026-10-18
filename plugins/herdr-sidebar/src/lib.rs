@@ -4,6 +4,7 @@
 //! sidecar (`herdr-sidebar-ensure`).
 
 pub mod actions;
+pub mod agent_tokens;
 pub mod ai_commit;
 pub mod ansi;
 pub mod branch_ui;
@@ -22,8 +23,8 @@ pub mod icons;
 pub mod ipc;
 pub mod launch;
 pub mod pane_menu;
-pub mod search_popup;
 pub mod rundir;
+pub mod search_popup;
 pub mod shortcut_tip;
 pub mod snooze;
 pub mod state;
