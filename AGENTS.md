@@ -518,10 +518,8 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   it from their existing 5 s heartbeat, and nothing else does — not `ensure.rs`, not the
   viewer, not the sidecar. Value format `label · label`: `display_agent` (else `agent`) per
   agent pane, deduped inside the workspace, agents with a `working` pane first and then
-  alphabetical, capped at 48 chars; a workspace with no agent pane reports `-`
-  (`agent_tokens::NO_AGENT`), because an empty slot after the project name reads as a
-  rendering glitch rather than as "no agent here" — `null` would drop the token and leave
-  the gap. EVERY workspace in `pane.list` is re-reported each beat instead of
+  alphabetical, capped at 48 chars; a workspace with no agent pane is cleared with an
+  explicit `null`. EVERY workspace in `pane.list` is re-reported each beat instead of
   diffing, which is what keeps the TTL alive, so a killed sidebar's value can never
   outlive 20 s; a second reporter is unnecessary, because duplicate reports are identical
   and `report_metadata` merges.

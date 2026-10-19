@@ -13,8 +13,8 @@
 //! The same heartbeat also reports a `pad` token, rendered as `$pad` on the
 //! `branch`/`git_status` row. herdr drops a row whose tokens are all empty, so
 //! a Space whose project is not a git repository would otherwise be one line
-//! shorter than its neighbours; `$pad` holds the row open with an invisible
-//! zero-width space and is cleared (`null`) wherever a repository exists.
+//! shorter than its neighbours; `$pad` holds the row open with a visible `-`
+//! ("no repository here") and is cleared (`null`) wherever a repository exists.
 //!
 //! Public surface:
 //!
@@ -42,13 +42,15 @@ pub const TOKEN: &str = "agents";
 /// Space whose project is not a git repository loses the `branch`/`git_status`
 /// row and renders one line shorter than its neighbours. `$pad` gives that row
 /// a value that paints nothing: a ZERO WIDTH SPACE. It is reported only for
-/// workspaces with no repository above their cwd, and cleared (`null`) for the
-/// rest, so a git Space never grows a trailing ` · ` separator.
+/// workspaces with no repository above their cwd (`-`, so the slot reads as
+/// "no branch"), and cleared (`null`) for the rest, so a git Space never grows a
+/// trailing ` · ` separator.
 pub const PAD_TOKEN: &str = "pad";
 
-/// The value of [`PAD_TOKEN`]: invisible, non-whitespace (Rust's `trim` does
-/// not strip U+200B), and non-empty, which is all herdr needs to keep the row.
-pub const PAD_VALUE: &str = "\u{200B}";
+/// The value of [`PAD_TOKEN`]: a visible dash, i.e. "this space has no
+/// repository". It does double duty — herdr drops a row whose tokens are all
+/// empty, so a non-empty value is also what keeps the row on screen.
+pub const PAD_VALUE: &str = "-";
 
 /// The `agents` value for a space with no agent pane at all.
 ///
@@ -464,7 +466,6 @@ mod tests {
         assert_eq!(value.chars().count(), MAX_VALUE_CHARS);
         assert!(value.chars().all(|c| c == 'é'));
     }
-
 
     #[test]
     fn workspace_ids_are_deduped_and_sorted() {

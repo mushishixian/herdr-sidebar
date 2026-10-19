@@ -250,8 +250,7 @@ reads `pi` for a single-agent space and
 `pi · codex` for one running two agents, busy ones first. `plugins/herdr-sidebar`
 sends it every 5 s from each sidebar pane's heartbeat (`src/agent_tokens.rs`,
 source `herdr-sidebar`, `ttl_ms` 20 s), so it expires on its own when the last
-sidebar of a session goes away, and a space with no agent pane reports a lone `-`
-(the empty slot looked like a rendering glitch, user-reported).
+sidebar of a session goes away, and it clears a space that has no agent pane.
 Agents are read from `pane.list`, so this needs no extra configuration. Toggling
 herdr's own sidebar (`prefix+b`, "agent sidebar") shows or hides the whole rail,
 these per-space agent lines included.
