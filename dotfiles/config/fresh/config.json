@@ -11,6 +11,10 @@
   "plugins": {
     "orchestrator": { "settings": { "autoOpenDock": "never" }, "enabled": true },
     "welcome_screen": { "enabled": true, "settings": { "showOnStartup": true } },
+    // 0.5.3 的 git_statusbar 在每次状态栏刷新时 spawn 一次 `git rev-parse`，
+    // 实测 ~40 次/秒/编辑器（日志 spawn_process_start: plugin='git_statusbar'），
+    // 是空转 CPU 和 900 MB 级日志的主要来源。关掉只少一个状态栏分支名。
+    "git_statusbar": { "enabled": false },
   },
 
   "editor": {
