@@ -77,6 +77,7 @@
     { "key": "q", "modifiers": ["alt", "shift"], "action": "lsp_goto_definition", "when": "normal" },
     { "key": "w", "modifiers": ["alt", "shift"], "action": "lsp_references", "when": "normal" },
     { "key": "o", "modifiers": ["alt"], "action": "goto_lsp_symbol", "when": "normal" },
+    { "key": "f12", "modifiers": ["shift"], "action": "lsp_references", "when": "normal" },
   ],
 
   // Language servers (installed by dotfiles/install-lsp.sh). An entry is merged
