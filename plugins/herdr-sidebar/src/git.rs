@@ -142,6 +142,30 @@ impl Git {
             .unwrap_or_else(|| self.root.display().to_string())
     }
 
+    /// `git init` in `dir`: the Explorer offers this as a button when the
+    /// folder is not in a repository yet. Cheap and local, but callers may run
+    /// it on a worker anyway (a network share can stall).
+    pub fn init(dir: &Path) -> Result<String, String> {
+        run_in(dir, &["init", "-q"])?;
+        Ok("Initialized a git repository".to_string())
+    }
+
+    /// Is `dir` (or any ancestor) inside a git repository? A pure filesystem
+    /// walk — no git process — so the Explorer can ask on every tick. A
+    /// worktree's or submodule's `.git` is a FILE and counts too.
+    pub fn is_initialized(dir: &Path) -> bool {
+        let mut path = dir;
+        loop {
+            if path.join(".git").exists() {
+                return true;
+            }
+            match path.parent() {
+                Some(parent) => path = parent,
+                None => return false,
+            }
+        }
+    }
+
     /// VS Code's Sync Changes: pull (rebase, autostash) then push. Returns a
     /// short human summary; the caller runs this on a background thread.
     pub fn sync(&self) -> Result<String, String> {
@@ -1429,6 +1453,33 @@ mod tests {
                 .unwrap();
         }
         Git { root }
+    }
+
+    /// `is_initialized` is a filesystem walk, so it must see a fresh `git init`
+    /// (and not claim a repository above a nested, unrelated folder).
+    #[test]
+    fn is_initialized_walks_up_and_sees_a_fresh_init() {
+        let base = std::env::temp_dir().join(format!("aa-git-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("project");
+        let nested = project.join("src/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(!Git::is_initialized(&nested));
+
+        Git::init(&project).unwrap();
+        assert!(Git::is_initialized(&project));
+        assert!(
+            Git::is_initialized(&nested),
+            "a subdirectory of an initialized project counts"
+        );
+
+        // A worktree/submodule `.git` is a FILE, not a directory.
+        let linked = base.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(linked.join(".git"), "gitdir: /nowhere\n").unwrap();
+        assert!(Git::is_initialized(&linked));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The views poll this instead of running git, so it must change exactly when

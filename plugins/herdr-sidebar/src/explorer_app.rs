@@ -475,6 +475,14 @@ pub struct App {
     /// background refresh that drives decorations.
     git_footer_status: Option<Status>,
     git_footer_zones: FooterZones,
+    /// Whether the root (or an ancestor) is inside a git repository. A plain
+    /// filesystem walk, refreshed on tick; false means the footer offers
+    /// "Git init".
+    has_repo: bool,
+    /// Click target of that button (empty while it is not drawn).
+    git_init_zone: Rect,
+    /// A `git init` run in flight, collected on tick.
+    git_init_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     git_syncing: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     ignored_cache: HashMap<PathBuf, Vec<String>>,
     /// A failed/busy ignored-file scan is optional decoration data, not a
@@ -562,6 +570,7 @@ impl App {
             Vec::new()
         };
         let repo_sigs: Vec<Option<String>> = repos.iter().map(Git::head_signature).collect();
+        let tree_root_for_presence = tree.root_path();
         let mut app = Self {
             tree,
             rows,
@@ -605,6 +614,9 @@ impl App {
             deco_rx: None,
             git_footer_status: None,
             git_footer_zones: FooterZones::default(),
+            has_repo: Git::is_initialized(&tree_root_for_presence),
+            git_init_zone: Rect::default(),
+            git_init_rx: None,
             git_syncing: None,
             ignored_cache: HashMap::new(),
             deco_backoff_until: HashMap::new(),
@@ -631,6 +643,8 @@ impl App {
     /// on their own. Self-throttling, so the event loop may call it freely.
     pub fn tick(&mut self) {
         self.collect_editor_failures();
+        self.refresh_repo_presence();
+        self.collect_git_init();
         self.poll_branch();
         self.sync_shared_settings();
         self.sync_shared_tree();
@@ -658,6 +672,56 @@ impl App {
     /// popup in its own process or a `git switch` in a terminal rewrites the git
     /// dir's HEAD, and the decorations + footer then refresh at once instead of
     /// waiting out [`DECO_REFRESH`].
+    /// Keep the "Git init" offer honest: a plain filesystem walk with no git
+    /// process, so it is cheap enough for every tick. A `git init` run in another
+    /// pane (or a `rm -rf .git`) flips it within one beat.
+    fn refresh_repo_presence(&mut self) {
+        self.has_repo = Git::is_initialized(&self.tree.root_path());
+    }
+
+    /// Collect a finished `git init` (see [`Self::start_git_init`]).
+    fn collect_git_init(&mut self) {
+        let Some(rx) = &self.git_init_rx else {
+            return;
+        };
+        let outcome = match rx.try_recv() {
+            Ok(outcome) => Some(outcome),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("git init failed".to_string()))
+            }
+        };
+        let Some(outcome) = outcome else {
+            return;
+        };
+        self.git_init_rx = None;
+        match outcome {
+            Ok(message) => {
+                self.notice = Some(message);
+                self.has_repo = true;
+                self.rediscover_repos();
+                self.request_decorations(true);
+            }
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
+    /// Run `git init` in the root on a worker: a network share can stall, and
+    /// the liveness heartbeat must keep beating, so nothing git-shaped runs on
+    /// the event loop.
+    fn start_git_init(&mut self) {
+        if self.git_init_rx.is_some() {
+            return;
+        }
+        let root = self.tree.root_path();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(Git::init(&root));
+        });
+        self.git_init_rx = Some(rx);
+        self.notice = Some("initializing git…".to_string());
+    }
+
     fn poll_branch(&mut self) {
         let mut moved = false;
         for (git, sig) in self.repos.iter().zip(self.repo_sigs.iter_mut()) {
@@ -1438,6 +1502,10 @@ impl App {
             let gear = self.gear;
             if hits(gear, mouse.column, mouse.row) {
                 self.open_settings();
+                return None;
+            }
+            if !self.has_repo && hits(self.git_init_zone, mouse.column, mouse.row) {
+                self.start_git_init();
                 return None;
             }
             if (self.overlay.is_none()
@@ -3687,6 +3755,7 @@ impl App {
     pub fn draw(&mut self, frame: &mut Frame) {
         self.last_width = frame.area().width;
         self.last_height = frame.area().height;
+        self.git_init_zone = Rect::default();
         // No own border/title: herdr already frames the pane and titles it with
         // the pane label ("Explorer"/"Sidebar") — a second border read as a
         // double frame.
@@ -3851,10 +3920,46 @@ impl App {
                 last_line.width.saturating_sub(3),
                 1,
             );
-            frame.render_widget(
-                Paragraph::new(" right-click / m: menu".dim().italic()),
-                hint_area,
-            );
+            if self.has_repo || self.git_init_rx.is_some() {
+                frame.render_widget(
+                    Paragraph::new(" right-click / m: menu".dim().italic()),
+                    hint_area,
+                );
+            } else {
+                // No repository above this folder: the most useful thing the
+                // footer can offer is creating one, so the button takes the
+                // line (a keyboard-free action, like the tree's title buttons).
+                let label = " Git init ";
+                let width = (Span::raw(label).width() as u16).min(hint_area.width);
+                let rect = Rect::new(hint_area.x, hint_area.y, width, 1);
+                self.git_init_zone = rect;
+                let style = if self.mouse_pos.is_some_and(|(x, y)| hits(rect, x, y)) {
+                    Style::default()
+                        .bg(palette().button_focus_bg)
+                        .fg(palette().button_fg)
+                        .bold()
+                } else {
+                    Style::default()
+                        .bg(palette().button_bg)
+                        .fg(palette().button_fg)
+                };
+                frame.render_widget(
+                    Paragraph::new(truncate_to(label.to_string(), usize::from(width)))
+                        .style(style),
+                    rect,
+                );
+                if hint_area.width > width + 2 {
+                    frame.render_widget(
+                        Paragraph::new(" not a git repository".dim().italic()),
+                        Rect::new(
+                            hint_area.x + width,
+                            hint_area.y,
+                            hint_area.width - width,
+                            1,
+                        ),
+                    );
+                }
+            }
         }
 
         match self.overlay {

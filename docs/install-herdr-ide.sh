@@ -124,7 +124,7 @@ for p in selection_share.ts git_line_history.ts; do
 done
 
 fresh_cfg=$(fresh --cmd config show 2>/dev/null || true)
-for k in selection_send_to_agent git_line_history recent_tab conflict_accept_current; do
+for k in selection_send_to_agent git_line_history recent_tab conflict_accept_current lsp_goto_definition lsp_references; do
   if grep -q "$k" <<<"$fresh_cfg"; then
     ok "fresh config mentions $k"
   else

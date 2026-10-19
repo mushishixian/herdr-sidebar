@@ -173,6 +173,21 @@ dotfiles-ide uses `tip` in `lib.sh`; the two `popup` keys run
 | `alt+m` | Merge conflict: accept **both** (current, then incoming) |
 | `alt+d` | Merge conflict: next conflict (past the last: next conflicted file) |
 | `alt+shift+d` | Merge conflict: previous conflict (wraps to the last) |
+| `alt+shift+q` | LSP: go to the definition under the cursor (same as `F12`) |
+| `alt+shift+w` | LSP: find references to the symbol under the cursor (same as `Shift+F12`) |
+| `alt+o` | LSP: list this file's class/method/function symbols and jump (`lsp_navigation`) |
+
+The LSP trio is `alt+shift+q` / `alt+shift+w` / `alt+o` rather than `alt+q` /
+`alt+w`: herdr binds `alt+w` to the lazygit popup and takes keys before the pane's
+program does, so any `alt+w` binding inside Fresh is unreachable. Fresh's own
+`F12` / `Shift+F12` / `Ctrl+F12` (definition / references / implementation) are
+untouched and still work. `Ctrl+Shift+<letter>` is not usable either: without the
+kitty keyboard protocol the terminal sends the same bytes as plain
+`Ctrl+<letter>` — `Ctrl+Shift+O` arrives as `Ctrl+O` and opens the file picker.
+Bare modifiers cannot be bound at all, so "double-tap Shift" is not expressible;
+`alt+o` is the document-symbol list instead. `goto_lsp_symbol` is a plugin action
+from the bundled `lsp_navigation` plugin: bind it by name in `keybindings`, and
+read *Gotchas* before wrapping it.
 
 The first four are also in Fresh's **Selection** menu, and all five in the
 command palette (`ctrl+p`). Ctrl+Tab is bound with `"when": "normal"` (editing
@@ -420,7 +435,8 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | 2c02d3e | **Search popup + line-aware open** | `src/search_popup.rs`; the engine moved to lib `src/content_search.rs` (shared with the sidebar Search view); preview highlighted with `syntax::highlight_lines`; `actions::open_in_editor_inline_at` (`{line}` placeholder, or `file:line` for `fresh` / `fresh-open`). |
 | c5661c3 | **Replace popup + conflict routing** | Replace mode of the search popup (`HERDR_SIDEBAR_SEARCH_MODE=replace`, action `replace-popup`; `content_search::replace_in_text` / `apply_replacements`: engine-identical matching, `$1` expansion in regex mode, line endings / BOM / permissions kept, atomic write, root-confined). Conflicted (`!`) files open in the editor without Live Diff (`editor_live_diff`). |
 | 261bccb | **Dotfiles folded into this repo** | The standalone `~/code/dotfiles` now lives in `dotfiles/`; the upstream patch set was dropped. `dotfiles/herdr-sidebar/build.sh` builds this checkout and points herdr's `herdr-sidebar` registration at it. |
-| *uncommitted* | **Search results open in the editor** | The Search view and Quick Open forced the built-in preview (`open_preview_at`) even with a custom editor configured; they now go through `explorer_app::open_file` → `file_popup::open_file_in_workspace`, i.e. the same routing a tree click uses (Fresh at the hit's line, else the preview). Media still goes to the preview, and the preview path keeps the double-click pin bookkeeping. |
+| *uncommitted* | **"Git init" footer button** | When the root has no repository above it, the Explorer footer shows a clickable `Git init` chip (`Git::is_initialized`, a `.git` walk with no git process, refreshed on tick). It runs `git init` on a worker, then rediscovers repos/decorations: branch strip and `U` markers appear immediately. Mouse-only, the zone is reset every frame. |
+| *uncommitted* | **Search results open in the editor** | The Search view and Quick Open forced the built-in preview (`open_preview_at`) even with a custom editor configured; they now go through `explorer_app::open_file` → `file_popup::open_file_in_workspace`, i.e. the same routing a tree click uses (Fresh at the hit's line, else the preview). Media goes to the editor too (the media exception was dropped later), and the preview path keeps the double-click pin bookkeeping. |
 | *uncommitted* | **Merge popup merges on one key** | The `--git-popup merge` branch list used to ask "Merge X into Y?" on a second screen (`Screen::ConfirmMerge`); picking a branch now merges immediately, and the result/conflict message screen (with `a` for `merge --abort`) is unchanged. `Git::merge_branch` still passes `--no-edit` and never forces. |
 | *uncommitted* | **Commit button offers a pull; both oco token ceilings pinned** | When the branch is behind its upstream AND something is staged, ✓ Commit reads `✓ Commit · N↓` and asks "Pull first?" (`y` = plain `git pull --no-rebase`, then commit; anything else commits at once); a failed pull never commits. The AI-commit path never asks. `Git::pull` must pass `--no-rebase` because this machine's `dotfiles/config/git/dotfiles.gitconfig` sets `pull.rebase=true`, which refuses to run with a staged index. `OCO_TOKENS_MAX_OUTPUT=500` is now pinned next to `OCO_TOKENS_MAX_INPUT=24000`, since oco subtracts it from the input budget. |
 | *uncommitted* | **New branch popup** | `--git-popup[-open] new` (`Op::New`, `ctrl+alt+n`): an input-only popup that creates the branch from HEAD and switches to it (`git switch -c`, name judged by `git check-ref-format --branch`, no stash/force), with the error in the footer instead of a toast. Manifest pane `git-new-branch`, action `git-new-branch`. |
@@ -586,6 +602,32 @@ popups, and conflict routing.
 
 ## Gotchas (verified)
 
+- **Never wrap a Fresh command in a plugin that calls it by its own registered
+  name.** `plugins/goto_symbol.ts` (removed) bound `alt+o` to an action whose
+  handler did `editor.runCommand("Go to LSP Symbol")` — the name that same plugin
+  had registered, so `runCommand` → handler → `runCommand`, forever. It is async,
+  so it never overflows a stack: the daemon just spins at 20 %+ CPU around the
+  clock, focused or not. Signature in `~/.local/state/fresh/logs/fresh-server-<pid>.log`:
+  thousands of `start_action: <handler> is a function, invoking...` lines per
+  second plus `no registered command named ...` for the earlier candidates in the
+  lookup list. `goto_lsp_symbol` is bindable directly; a wrapper is never needed.
+- **`fresh --cmd config show` filters plugin actions out of its output.** An entry
+  whose `action` is a plugin action (e.g. `goto_lsp_symbol`, `git_line_history`)
+  is missing from the dump even though the binding works — do not read that as
+  "the entry was dropped". Verify plugin-action bindings by pressing the key, or
+  grep the config file, not `config show`.
+- **Idle Fresh daemons are not free.** Each daemon carries its own plugins, LSP
+  servers and timers, and herdr keeps one daemon per workspace alive even after
+  its pane is replaced. Baseline is ~2-3 % CPU per daemon; two things push one
+  daemon far above it: the recursion above, and orphaned daemons nobody is
+  attached to (they keep polling git and re-rendering). Audit with
+  `ps -eo pid,pcpu,args | grep 'fresh-editor/fresh --server'` (lifetime average;
+  `%CPU` from `/proc/<pid>/stat` sampled twice gives the live number), then
+  `fresh --cmd daemon list` and `fresh --cmd daemon kill <name>` for the ones no
+  pane reports a `fresh_daemon` token for. `fresh-restart --all` only covers the
+  `ide-*` panes herdr-ide knows about, not strays. Also worth knowing: the
+  per-daemon DEBUG logs in `~/.local/state/fresh/logs/` grow ~20 MB/hour while a
+  loop like that runs.
 - **Fresh replaces symlinked `config.json`** when its settings UI saves, turning
   the dotfiles symlink into a plain copy; later dotfiles edits then silently do
   nothing. Check `ls -la ~/.config/fresh`, merge the copy's changes into
@@ -628,6 +670,8 @@ popups, and conflict routing.
 |---|---|
 | Preview still splits a new pane in the IDE tab | Restart Fresh with `fresh-restart --all` (a Fresh pane started before the host loop has no host). `herdr pane list` should show `hs-preview-host` in the Fresh pane's tokens |
 | A Fresh key does nothing | `fresh --cmd config show \| grep selection_` (config linked?), `ls -la ~/.config/fresh/plugins`, restart the daemon |
+| Fresh burns CPU while unfocused, a daemon sits at 15-25 % | `ps -eo pid,pcpu,args \| grep 'fresh-editor/fresh --server'`, then sample `/proc/<pid>/stat` twice for the live number. Two known causes: a plugin recursing into its own command (*Gotchas*), and a stray daemon with no pane attached — `fresh --cmd daemon list`, `fresh --cmd daemon kill <name>`. Baseline is ~2-3 % per editor daemon (plugins + LSP + timers). `tail -200 ~/.local/state/fresh/logs/fresh-server-<pid>.log` names the looping handler |
+| An LSP key does nothing | `alt+shift+q` / `alt+shift+w` / `alt+o` need a trusted workspace and a running server (status bar `LSP (on)`; `F12` works too). If `alt+w` opened lazygit, herdr still owns it — `herdr server reload-config`, then compare `dotfiles/config/herdr/config.toml` |
 | `ctrl+shift+a` does nothing | Windows Terminal's Select-all binding; `herdr plugin action invoke herdr-sidebar.git-commit-ai` to test without the key |
 | "OpenCommit is not configured" toast | run `oco setup` |
 | Agent pane title stays "Agent" | the pane's shell must be zsh with the hook sourced (`. …/shell/agent-title.zsh`, or rebuild with `ctrl+b i`); check the title with `herdr pane list \| jq '.result.panes[] \| select(.label=="Agent") \| .title'` |

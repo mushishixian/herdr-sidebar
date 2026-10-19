@@ -60,6 +60,19 @@
     { "key": "m", "modifiers": ["alt"], "action": "conflict_accept_both", "when": "normal" },
     { "key": "d", "modifiers": ["alt"], "action": "conflict_next", "when": "normal" },
     { "key": "d", "modifiers": ["alt", "shift"], "action": "conflict_prev", "when": "normal" },
+
+    // LSP navigation: Alt+Shift+Q definition, Alt+Shift+W references, Alt+O the
+    // document-symbol list ("Go to LSP Symbol", bundled plugin lsp_navigation).
+    // alt+shift, not alt+q/w: herdr owns alt+w (lazygit popup) and hands keys out
+    // before the pane's program sees them. F12 / Shift+F12 / Ctrl+F12 stay as
+    // Fresh's built-ins (definition / references / implementation).
+    // Ctrl+Shift+<letter> is not an option: without the kitty protocol the
+    // terminal sends the same bytes as plain Ctrl+<letter> (Ctrl+Shift+O == Ctrl+O).
+    // `goto_lsp_symbol` is a plugin action and binds directly — never wrap it in a
+    // plugin that runCommands it by name (see docs/herdr-ide.md, Gotchas).
+    { "key": "q", "modifiers": ["alt", "shift"], "action": "lsp_goto_definition", "when": "normal" },
+    { "key": "w", "modifiers": ["alt", "shift"], "action": "lsp_references", "when": "normal" },
+    { "key": "o", "modifiers": ["alt"], "action": "goto_lsp_symbol", "when": "normal" },
   ],
 
   // Language servers (installed by dotfiles/install-lsp.sh). An entry is merged

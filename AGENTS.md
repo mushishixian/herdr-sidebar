@@ -937,6 +937,14 @@ HACKING.md — budget time for that before promising a patched build.
   fits a ~34-col pane.
 - Gotcha: after the ✧ suggestion lands, panel focus moves to the message box — letter keys
   then type text instead of triggering actions (Esc returns to the list).
+- **"Git init" in the Explorer footer** appears only when the root has no repository above it
+  (`Git::is_initialized`: a plain `.git` walk with no git process, refreshed every tick).
+  Clicking it runs `git init` on a worker (a network share can stall; the heartbeat must keep
+  beating), then rediscovers repos and decorations, so the branch strip and the `U` markers
+  appear at once. It takes the footer's last line only when that line would otherwise be the
+  empty `right-click / m: menus` hint — a notice or the git footer wins — and the click zone is
+  reset every frame, so an invisible button is never clickable. Mouse-only by design: the
+  footer has no focus of its own, like the tree's title buttons.
 - Explorer Quick Open is `Ctrl+P` and reuses the normal preview client rather than inventing
   a second open path. Its in-process filename index is capped at 20,000 files, never descends
   into `.git`, follows the Explorer dotfile toggle, does not follow directory symlinks, honors
