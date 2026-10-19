@@ -180,6 +180,25 @@ if [ "$with_oco" = 1 ]; then
   fi
 fi
 
+# CodeBuddy is not a herdr integration target, so its agent state comes from its
+# own hooks (dotfiles/config/codebuddy/hooks/herdr-agent-state.sh, merged into
+# ~/.codebuddy/settings.json by install.sh).
+if command -v codebuddy >/dev/null 2>&1 || [ -d "$HOME/.codebuddy" ]; then
+  cb_hook=$HOME/.codebuddy/hooks/herdr-agent-state.sh
+  if [ -x "$cb_hook" ]; then
+    ok "codebuddy hook script $cb_hook"
+  else
+    bad "codebuddy hook script missing or not executable ($cb_hook)"
+  fi
+  if jq -e --arg h "$cb_hook" \
+       '[.hooks[]?[]? | .hooks[]? | select(.command == $h)] | length >= 5' \
+       "$HOME/.codebuddy/settings.json" >/dev/null 2>&1; then
+    ok "codebuddy settings run the agent-state hook"
+  else
+    bad "codebuddy settings do not run the agent-state hook (rerun dotfiles/install.sh)"
+  fi
+fi
+
 plugin_root() {
   herdr plugin list --json 2>/dev/null |
     jq -r --arg id "$1" '.result.plugins[]? | select(.plugin_id==$id) | .plugin_root' 2>/dev/null || true

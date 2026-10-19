@@ -540,6 +540,25 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   Neither `pane.report_agent` nor an agent-state hook is involved: a name needs nothing but
   the metadata field, and an agent herdr never detects keeps `agent_status` unknown (the rail
   glyph shows `·`) while its name shows correctly.
+- **A name is all `display_agent` gives: the STATE still needs a hook, and herdr ships none
+  for codebuddy.** `dotfiles/config/codebuddy/hooks/herdr-agent-state.sh` is therefore the
+  carrier: `dotfiles/install.sh` links it to `~/.codebuddy/hooks/` and merges hook entries into
+  `~/.codebuddy/settings.json` (CodeBuddy's hook system is Claude-Code compatible;
+  `SessionStart`→idle + session ref, `UserPromptSubmit`/`PreToolUse`→working, `Stop`→idle,
+  `PermissionRequest` and a `Notification` matcher on
+  `permission_prompt|agent_needs_input|elicitation_dialog`→blocked, `SessionEnd`→release).
+  Only entries whose command ends in that script's name are replaced, so the user's model,
+  permissions, own hooks and plugins survive a rerun; the script prints nothing and exits 0
+  (stdout is fed to the model, exit 2 blocks the tool). Four herdr rules, all verified live:
+  a `--source` starting with `herdr:` is RESERVED (herdr's own integrations) and the report is
+  answered `{"type":"ok"}` and silently dropped; `pane report-agent` only lands on a pane that
+  really hosts an agent process (same call on a bare shell → dropped, `agent` stays null), which
+  a hook always satisfies; `--seq` must strictly increase forever, so the script keeps a
+  per-pane nanosecond counter under `~/.local/state/herdr-codebuddy/`; and herdr 0.9.5 does NOT
+  surface `agent_session` for a third-party source, so restore-after-restart is not available
+  this way (the ref is still reported, harmlessly). Because the hook reports
+  `--agent codebuddy`, the rail gets the name AND the state without the zsh agent-title hook;
+  CodeBuddy snapshots settings at startup, so a new hook applies to the NEXT `codebuddy`.
 - **A row with no values disappears, so `$pad` keeps the non-git branch row alive**
   (`src/agent_tokens.rs`). herdr drops a Space rail row when none of its tokens have a value
   ("a row disappears when none of its tokens have a value", `configuration.mdx`), and

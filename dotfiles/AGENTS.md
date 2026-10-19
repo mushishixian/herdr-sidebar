@@ -26,6 +26,7 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 | A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; the verify list in `docs/install-herdr-ide.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
 | A sidebar setting default | `dotfiles/herdr-sidebar/state.json`, and the *Sidebar defaults* paragraph in `docs/herdr-ide.md` (*herdr-sidebar fork*) |
 | Anything the sidebar (Rust) and the dotfiles scripts share (env vars such as `HERDR_SIDEBAR_OPEN_DIFF`, `HERDR_SIDEBAR_PREVIEW_HOSTED`, `FRESH_IDE_DAEMON`, `DOTFILES_IDE_BIN`; pane tokens such as `fresh_daemon`, `hs-preview-host`; request files such as the AI-commit request, the live-diff request, `preview-host/<pane>.req` and the dock-suppression stamp `<herdr-sidebar state dir>/dock/restore.stamp` that `ide-save-sizes` reads; `editor-command.txt`; the sidebar's `state.json` read at build time for `terminal_height` and `agent_width`) | Both sides in the same change. Document the contract in the root `AGENTS.md` (Rust side) and in `docs/herdr-ide.md` |
+| The CodeBuddy hook (`config/codebuddy/hooks/herdr-agent-state.sh`, the `codebuddy_hooks` merge in `install.sh`, the hook events it installs) | The *Which space's agent is busy* section and the Troubleshooting row of `docs/herdr-ide.md`; the verify list in `docs/install-herdr-ide.sh`; the `codebuddy` bullet in the repo `AGENTS.md`. Keep the merge limited to entries naming that script: everything else in `~/.codebuddy/settings.json` belongs to the user |
 | Pane labels `Fresh`, `Terminal`, `Agent`, or the plugin id `dotfiles-ide` | Do not rename them: scripts, state dirs and key bindings look them up. Show new display text through a metadata title (`pane report-metadata --title`) |
 | Any user-visible behaviour | `docs/herdr-ide.md`: the feature section, *Keys* and *Troubleshooting*; the fork commit table (*herdr-sidebar fork*): its `*uncommitted*` row until the user commits, then the hash |
 | Install, upgrade or migration behaviour | `docs/install-herdr-ide.sh` (and its `--help` text, the `sed -n '2,11p'` header) and `dotfiles/install.sh` (its `--help` header, `sed -n '2,14p'`); the *Install*, *Migrating* and *Updating* sections of `docs/herdr-ide.md` |
@@ -126,6 +127,18 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   with `herdr pane report-metadata <pane> --source dotfiles-ide-agent --display-agent <name>
   --title "◆ NAME"` fixes a live pane immediately (verified). Do not add a second table or a
   process-name detector elsewhere.
+- **CodeBuddy's agent state comes from ITS hooks; herdr has no integration for it.** herdr's
+  `integration install` targets stop at its own 18 agents, and it never detects the `codebuddy`
+  process, so a pane running it was `·` unknown forever. `config/codebuddy/hooks/herdr-agent-state.sh`
+  reports `idle` / `working` / `blocked` / release through `herdr pane report-agent`, and
+  `install.sh`'s `codebuddy_hooks` merges the seven hook entries into
+  `~/.codebuddy/settings.json` (Claude-Code-compatible schema: `hooks.<Event>[].hooks[].command`,
+  `timeout` in SECONDS). Three rules bit us live: `--source` must NOT start with `herdr:` (reserved;
+  the report is answered `ok` and dropped), `pane report-agent` is dropped on a pane that does not
+  actually host an agent process, and `--seq` must strictly increase forever (the script keeps a
+  nanosecond counter per pane under `~/.local/state/herdr-codebuddy/`). Hooks must print nothing and
+  exit 0 — stdout is fed to the model and exit 2 blocks the tool — and CodeBuddy snapshots settings
+  at startup, so reinstalling the hook needs a NEW `codebuddy`, not a `/reload`.
 - **`~/.config/herdr/config.toml` must stay the installer's symlink, or the rail and the key
   table silently stop applying.** `install.sh` links it to `dotfiles/config/herdr/config.toml`;
   a user (or an editor) that replaces it with their own file leaves herdr on its defaults —

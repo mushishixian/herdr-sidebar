@@ -302,6 +302,28 @@ Two things that surprise people:
   every sidebar freezes their indicator until pi restarts. Subagent
   activity inside a *nested* child (a workflow's agents) is covered by the top-level
   agent's run, which is what the transcript records.
+- **An agent herdr has no integration for reports its own state.** herdr ships
+  integrations for 18 agents and detects only those; CodeBuddy (`codebuddy`, npm
+  `@tencent-ai/codebuddy-code`) is none of them, so its panes stayed `·` unknown and the
+  rail could only ever name it through the agent-title hook. `dotfiles/config/codebuddy/hooks/herdr-agent-state.sh`
+  plugs into CodeBuddy's OWN hook system, which is Claude-Code compatible: `install.sh`
+  links the script to `~/.codebuddy/hooks/` and merges seven entries into
+  `~/.codebuddy/settings.json` — `SessionStart` → idle (with the session ref),
+  `UserPromptSubmit` / `PreToolUse` → working, `Stop` → idle, `PermissionRequest` and a
+  `Notification` matcher on `permission_prompt|agent_needs_input|elicitation_dialog` →
+  blocked (`idle_prompt` is idle, not blocked), `SessionEnd` → release. Only entries
+  whose command ends in that script's name are replaced, so the user's model,
+  permissions, own hooks and plugins survive a rerun, and the script prints nothing and
+  always exits 0 (stdout would be fed to the model, exit 2 would block the tool).
+  Three things make or break it, all verified live: `--source` must NOT start with
+  `herdr:` (that prefix belongs to herdr's own integrations — such a report is answered
+  `ok` and silently dropped), `pane report-agent` only lands on a pane that really hosts
+  an agent process (a hook always runs inside one; the same call on a bare shell is
+  dropped), and `--seq` must strictly increase forever, so the script keeps a per-pane
+  nanosecond counter under `~/.local/state/herdr-codebuddy/`. Because it reports
+  `--agent codebuddy`, the rail gets the name AND the state without the zsh
+  agent-title hook. CodeBuddy snapshots its settings at startup: a freshly installed
+  hook applies to the next `codebuddy`, not to a running one.
 
 ### IDE layout: `dotfiles-ide` plugin
 
@@ -467,6 +489,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | *uncommitted* | **New branch popup** | `--git-popup[-open] new` (`Op::New`, `ctrl+alt+n`): an input-only popup that creates the branch from HEAD and switches to it (`git switch -c`, name judged by `git check-ref-format --branch`, no stash/force), with the error in the footer instead of a toast. Manifest pane `git-new-branch`, action `git-new-branch`. |
 | *uncommitted* | **Instant branch reaction** | `Git::head_signature` (the git dir's `HEAD`; resolves a worktree's `.git` FILE) is compared a few times a second by both views, so a checkout / create / rename from a popup or a terminal refreshes the SCM header and the Explorer's footer/decorations at once instead of waiting for the 1.5 s status poll or `DECO_REFRESH`. Measured: ~65 ms (SCM), ~0.5 s (Explorer), both were 2-3 s. |
 | *uncommitted* | **Inline editor failures are reported** | A click only reports the SPAWN, and the editor runs with null stdio, so a command that died on the spot looked like a successful open. `spawn_inline_editor` now reaps the child on a thread and `actions::take_editor_failures` hands a non-zero exit within 30 s to Explorer's notice / Source Control's flash (`custom editor failed: <program> exited with <status>`). |
+| *uncommitted* | **CodeBuddy reports its own agent state** | herdr has no `codebuddy` integration (its list stops at 18 agents) and never detects the process, so the space stayed `·`. `dotfiles/config/codebuddy/hooks/herdr-agent-state.sh` plus `install.sh`'s `codebuddy_hooks` merge seven Claude-Code-compatible hook entries into `~/.codebuddy/settings.json` (SessionStart→idle, UserPromptSubmit/PreToolUse→working, Stop→idle, PermissionRequest/Notification→blocked, SessionEnd→release); only entries naming our script are replaced. herdr rules found live: a `herdr:` source is reserved and silently dropped, `pane report-agent` needs a real agent process in the pane, and `--seq` must increase forever (per-pane nanosecond counter). |
 | *uncommitted* | **IDE layer: every market CLI is named in the rail** | herdr only detects the agents it ships an integration for (`herdr integration status`), so a pane running CodeBuddy or any other newer CLI had `agent: null` and herdr-sidebar's `$agents` fell back to `-` while the agent was clearly working (user-reported with `codebuddy`). `bin/ide-agent-title` already reported `--display-agent`, which `src/agent_tokens.rs` prefers — the only gap was its name table. `AGENT_OF` now covers the herdr ids (pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, cursor, mastracode, antigravity-cli, grok, letta) plus codebuddy, cline, roo, amp, auggie, crush, goose, pi, plandex, codebuff, octofriend, gptme, sweep, smol, mods, openhands, continue, iflow, kiro, trae, vibe, jules, lingma, aider and their `-cli`/package spellings. Neither `pane.report_agent` nor an agent-state hook is involved: the name needs only the metadata field (verified live — the running CodeBuddy pane's space reads `codebuddy`). |
 | *uncommitted* | **IDE layer: a label-only Fresh pane is healed in place** | A herdr server restart resumes panes as plain shells, keeping labels but dropping metadata tokens, so `herdr-ide`'s label-only check treated a dead `Fresh` pane as a working editor: it focused it, printed nothing, and `fresh-open` died with "could not start the IDE editor" (exit 1, surfaced by the sidebar as `custom editor failed: …/fresh-open exited with exit status: 1`). `lib.sh` adds `pane_fresh_daemon` and `fresh_editor_ok` (token AND live daemon); `herdr-ide` reuses a corpse pane as the editor (relabel + `fresh-ide` in place, no new splits) and prints the editor pane id on the already-built path, which is how `fresh-open` gets it. |
 | *uncommitted* | **IDE layer: jq ≥ 1.6 keyword fix** | `lib.sh`, `ide-save-sizes` and `fresh-to-agent` named a jq variable `label`, which jq 1.6+ parses as its `label` keyword (`$label` → "syntax error, unexpected label"), so EVERY pane lookup failed on Linux/WSL and a file click built no editor. Variables are `$lbl` now; `fresh-open` also reports a failed `herdr-ide` instead of exiting 3 silently. |
@@ -697,6 +720,7 @@ popups, and conflict routing.
 |---|---|
 | Preview still splits a new pane in the IDE tab | Restart Fresh with `fresh-restart --all` (a Fresh pane started before the host loop has no host). `herdr pane list` should show `hs-preview-host` in the Fresh pane's tokens |
 | Spaces rail shows no agent name for a CLI that is clearly running | Add its command word to `AGENT_OF` at the top of `dotfiles/herdr-plugins/ide/bin/ide-agent-title` (then run the agent again — the hook fires per typed command). herdr only auto-detects the agents in `herdr integration status`; everything else is named solely by this table's `--display-agent` |
+| Spaces rail shows no state for CodeBuddy (`·` instead of `◐`/`○`) | its hooks must be installed AND codebuddy restarted (it snapshots settings at startup): `jq -r '.hooks \| keys[]' ~/.codebuddy/settings.json` should list SessionStart, UserPromptSubmit, PreToolUse, Stop, PermissionRequest, Notification and SessionEnd, each pointing at `~/.codebuddy/hooks/herdr-agent-state.sh` (rerun `dotfiles/install.sh` to restore them). `herdr pane list` shows `agent: codebuddy` once a hook has reported |
 | After a herdr restart (or a reboot) the IDE is empty shells and a file click reports `fresh-open` exiting 1 | `herdr pane list` shows the `Fresh` pane with **no** `fresh_daemon` token: herdr restored it without metadata and nothing runs in it. Press `ctrl+b i` (or click a file again) — `herdr-ide` heals that pane in place, so no rebuild and no lost layout. `fresh-restart` deliberately skips tokenless panes |
 | A Fresh key does nothing | `fresh --cmd config show \| grep selection_` (config linked?), `ls -la ~/.config/fresh/plugins`, restart the daemon |
 | Fresh burns CPU while unfocused, a daemon sits at 15-25 % | `ps -eo pid,pcpu,args \| grep 'fresh-editor/fresh --server'`, then sample `/proc/<pid>/stat` twice for the live number. Two known causes: a plugin recursing into its own command (*Gotchas*), and a stray daemon with no pane attached — `fresh --cmd daemon list`, `fresh --cmd daemon kill <name>`. Baseline is ~2-3 % per editor daemon (plugins + LSP + timers). `tail -200 ~/.local/state/fresh/logs/fresh-server-<pid>.log` names the looping handler |

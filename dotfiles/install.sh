@@ -55,6 +55,65 @@ link() {
   info "linked $dest"
 }
 
+# codebuddy_hooks SETTINGS HOOK — merge this repo's hook entries into CodeBuddy's
+# user settings, leaving every other key and hook alone.
+#
+# herdr has no CodeBuddy integration (`herdr integration install codebuddy` does
+# not exist; 0.9.5's target list stops at its own agents) and never detects the
+# `codebuddy` process, so the pane's agent state can only come from CodeBuddy's
+# own hook system, which is Claude-Code compatible: `hooks.<Event>[]` entries
+# whose `hooks[].command` runs our script. Entries are matched BY THAT COMMAND,
+# so a rerun replaces only ours — the user's model, permissions, plugins and own
+# hooks survive. A settings file whose JSON we cannot parse is left untouched
+# and reported instead of being clobbered.
+codebuddy_hooks() {
+  local settings=$1 hook=$2 tmp
+  if [ ! -s "$settings" ]; then
+    mkdir -p "$(dirname "$settings")"
+    printf '{}\n' >"$settings"
+  fi
+  tmp=$(mktemp "$settings.XXXXXX") || return 1
+  # jq notes: `ours` matches an entry by OUR command, so a rerun replaces only
+  # the entries this repo installed; `strip` removes just those hook objects and
+  # then drops entries left empty, which keeps any other command sharing one.
+  # (No apostrophes anywhere below: this program sits inside shell single
+  # quotes, and one would end the string.)
+  if jq --arg cmd "$hook" '
+    def ours: .type == "command" and ((.command // "") | test("herdr-agent-state\\.sh$"));
+    def strip:
+      map(.hooks = ((.hooks // []) | map(select(ours | not))))
+      | map(select((.hooks | length) > 0));
+    def entry($matcher):
+      (if $matcher then { matcher: $matcher } else {} end)
+      + { hooks: [{ type: "command", command: $cmd, timeout: 5 }] };
+    def add($event; $matcher):
+      .[$event] = (((.[$event] // []) + [entry($matcher)]));
+    .hooks = ((.hooks // {})
+      | with_entries(.value |= strip)
+      | add("SessionStart"; "startup|resume|clear|compact")
+      | add("UserPromptSubmit"; null)
+      | add("PreToolUse"; null)
+      | add("Stop"; null)
+      | add("PermissionRequest"; null)
+      | add("Notification"; "permission_prompt|agent_needs_input|elicitation_dialog")
+      | add("SessionEnd"; null))
+  ' "$settings" >"$tmp" 2>/dev/null; then
+    :
+  else
+    rm -f "$tmp"
+    info "could not merge the CodeBuddy hooks into $settings (left untouched)"
+    return 1
+  fi
+  if cmp -s "$tmp" "$settings"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  mkdir -p "$BACKUP"
+  cp -p "$settings" "$BACKUP/settings.json.codebuddy" 2>/dev/null || true
+  mv -f "$tmp" "$settings"
+  info "merged the agent-state hooks into $settings (backup in $BACKUP)"
+}
+
 [ "$(id -u)" -ne 0 ] || { echo "run as your user, not root" >&2; exit 1; }
 grep -qi microsoft /proc/version 2>/dev/null || echo "note: not WSL; Windows bridging (wsl-open) will be inert"
 
@@ -168,6 +227,19 @@ fi
 # integration the spaces rail shows pi idle forever. Rerun after a pi upgrade.
 if [ -d "$HOME/.pi" ]; then
   herdr integration install pi >/dev/null && info "pi agent-state hook installed (herdr integration status)"
+fi
+
+# CodeBuddy is NOT one of herdr's integration targets (0.9.5 stops at its own
+# agents) and herdr never detects its process, so its pane state comes from
+# CodeBuddy's own hooks. The script is linked like the other dotfiles and only
+# OUR entries in ~/.codebuddy/settings.json are rewritten, so the user's model,
+# permissions and plugins survive a rerun. It also names the agent
+# (`--agent codebuddy`) — with a name reported to herdr, the spaces rail gets
+# the state AND the label, even without the zsh agent-title hook.
+if command -v codebuddy >/dev/null 2>&1 || [ -d "$HOME/.codebuddy" ]; then
+  link config/codebuddy/hooks/herdr-agent-state.sh "$HOME/.codebuddy/hooks/herdr-agent-state.sh"
+  codebuddy_hooks "$HOME/.codebuddy/settings.json" "$HOME/.codebuddy/hooks/herdr-agent-state.sh" &&
+    info "codebuddy agent-state hook installed (idle/working/blocked in herdr)"
 fi
 
 herdr server reload-config >/dev/null 2>&1 && info "reloaded the running herdr server" || true
