@@ -957,7 +957,11 @@ HACKING.md — budget time for that before promising a patched build.
   shifted chord still reach the same action. It uses the bundled `ignore` walker on a worker,
   follows the Explorer hidden-file setting, skips `.git`, binary files, and files over 1 MiB,
   and caps both indexed files and returned matches. Results are grouped by relative file path;
-  selecting a match sends a line-bearing file request through the existing preview client.
+  selecting a match (or a Quick Open result) goes through `explorer_app::open_file`, i.e. the
+  SAME routing a tree click uses: the custom editor (Fresh, with the hit's line) when an editor
+  is configured, the preview pane otherwise (`file_popup::open_file_in_workspace`). It used to
+  force the preview even with an editor configured, which made search results open somewhere
+  else than a click on the same file.
   Search is a persistent first-class activity view, not a popup: it updates after a 300 ms typing
   debounce and exposes VS Code-style match-case, whole-word, and regex toggles. `1`, `2`, and `3`
   select Explorer, Search, and Source Control — the SAME left-to-right order as the activity bar
@@ -994,17 +998,19 @@ HACKING.md — budget time for that before promising a patched build.
   their workspace, and heartbeat every 5s against the common 20s stale limit; clicking that file
   again focuses the live pane through `focus_tab_for_client` instead of launching a duplicate. The
   token is cleared when the editor exits. The saved command wins over `HERDR_SIDEBAR_EDITOR`,
-  `VISUAL`, and `EDITOR` fallbacks. Pictures and videos (`viewer::is_media_file`) never go to the
-  custom editor on click: Explorer clicks and the Ctrl+Q file popup open them in the preview, which
-  renders them, and the explicit "Open in Editor" menu item still uses the editor.
+  `VISUAL`, and `EDITOR` fallbacks. **Every open goes to the editor, pictures and videos
+  included** (user-requested 2026-10-19: the old "media always opens in the terminal preview"
+  rule made the same file open in different places depending on how you clicked it). The preview
+  still RENDERS media when something routes there — no editor configured, the diff viewer, or the
+  explicit "Open Diff Preview" — so the two paths do not conflict.
 - **SCM changed-file routing** (`scm_app.rs` `open_diff` / `diff_opens_in_editor`): with the custom
   editor opted in (`custom_editor_on_click` AND `custom_editor_inline`, re-read on SCM tick), a
   configured editor, a non-`D` status and an existing path, clicking/Enter/hover-open/`o` on a staged
   or unstaged file runs `actions::open_in_editor_inline_env(root, file, [HERDR_SIDEBAR_OPEN_DIFF=1])`
   instead of the preview pane. `HERDR_SIDEBAR_OPEN_DIFF=1` is the contract with the editor: open the
   file and show its diff against HEAD. Launch failure flashes the error and falls back to the viewer.
-  Media files are excluded from this routing too (`diff_opens_in_editor`'s `media` flag, from
-  `viewer::is_media_file`), so a changed picture opens the diff viewer.
+  There is no media exclusion any more (`diff_opens_in_editor`'s `media` parameter is gone), so a
+  changed picture opens in the editor like any other file.
   Context menu "Open Diff Preview" always uses `open_diff_viewer`; drawer refs keep the viewer.
   **Conflicted files (`!`) never send `HERDR_SIDEBAR_OPEN_DIFF`** (`editor_live_diff`): they still
   open in the editor, but without the live-diff request. Fresh's live diff overlays would paint over

@@ -1040,6 +1040,34 @@ impl App {
         }
     }
 
+    /// Open a file the way a tree click does — the custom editor (Fresh) when it
+    /// is opted in, otherwise the preview. Search results and Quick Open go
+    /// through here too, so every "open this file" surface in the sidebar agrees
+    /// (they used to force the preview even with an editor configured).
+    fn open_file(&mut self, path: &Path, line: Option<usize>) {
+        // Only the editor side needs the shared helper; a preview keeps going
+        // through `open_preview_at`, which records the tab a double click pins.
+        let to_editor =
+            self.sidebar_state.custom_editor_on_click && actions::configured_editor().is_some();
+        if !to_editor {
+            self.open_preview_at(path, line);
+            return;
+        }
+        let caller = self
+            .pane_ctl
+            .as_ref()
+            .map(|control| control.pane_id.clone())
+            .filter(|id| !id.is_empty());
+        if let Err(error) = herdr_sidebar::file_popup::open_file_in_workspace(
+            caller.as_deref(),
+            &self.tree.root_path(),
+            path,
+            line,
+        ) {
+            self.notice = Some(format!("open failed: {error}"));
+        }
+    }
+
     /// Hide the sidebar: snooze this tab (so the quiet ensure hook doesn't
     /// immediately re-dock a fresh one) and close our own pane. The herdr
     /// prefix+b keybinding (→ the toggle action) brings it back.
@@ -1481,8 +1509,6 @@ impl App {
                     }
                 } else if self.sidebar_state.custom_editor_on_click
                     && actions::configured_editor().is_some()
-                    // Pictures and videos always open in the preview, which can draw them.
-                    && !herdr_sidebar::viewer::is_media_file(&path)
                 {
                     if !double {
                         self.open_custom_editor(&path);
@@ -1990,11 +2016,11 @@ impl App {
             Cmd::ConfirmPrompt => self.confirm_prompt(),
             Cmd::OpenQuick(path) => {
                 self.overlay = None;
-                self.open_preview(&path);
+                self.open_file(&path, None);
             }
             Cmd::StartContentSearch => self.start_content_search(),
             Cmd::OpenContent(path, line) => {
-                self.open_preview_at(&path, Some(line));
+                self.open_file(&path, Some(line));
             }
             Cmd::ToggleSetting(index) => self.toggle_setting(index),
             Cmd::AdjustWidth(wider) => self.adjust_sidebar_width(wider),
@@ -2530,7 +2556,7 @@ impl App {
         match cmd {
             Cmd::Nothing => {}
             Cmd::Search => self.start_content_search(),
-            Cmd::Open(path, line) => self.open_preview_at(&path, Some(line)),
+            Cmd::Open(path, line) => self.open_file(&path, Some(line)),
             Cmd::Scroll(delta) => {
                 self.search_snap = false;
                 self.search_scroll = if delta < 0 {

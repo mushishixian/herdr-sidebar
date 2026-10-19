@@ -510,8 +510,7 @@ pub fn open_file_in_workspace(
         return Err("No active pane found to open file".into());
     };
 
-    // Pictures and videos always open in the preview, which can draw them.
-    if state.custom_editor_on_click && !crate::viewer::is_media_file(file) {
+    if state.custom_editor_on_click {
         if state.custom_editor_inline {
             // The popup pane belongs to no tab, so the editor must be given the
             // CALLER pane's tab/workspace or it cannot find the current tab.

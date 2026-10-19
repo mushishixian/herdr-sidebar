@@ -420,6 +420,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | 2c02d3e | **Search popup + line-aware open** | `src/search_popup.rs`; the engine moved to lib `src/content_search.rs` (shared with the sidebar Search view); preview highlighted with `syntax::highlight_lines`; `actions::open_in_editor_inline_at` (`{line}` placeholder, or `file:line` for `fresh` / `fresh-open`). |
 | c5661c3 | **Replace popup + conflict routing** | Replace mode of the search popup (`HERDR_SIDEBAR_SEARCH_MODE=replace`, action `replace-popup`; `content_search::replace_in_text` / `apply_replacements`: engine-identical matching, `$1` expansion in regex mode, line endings / BOM / permissions kept, atomic write, root-confined). Conflicted (`!`) files open in the editor without Live Diff (`editor_live_diff`). |
 | 261bccb | **Dotfiles folded into this repo** | The standalone `~/code/dotfiles` now lives in `dotfiles/`; the upstream patch set was dropped. `dotfiles/herdr-sidebar/build.sh` builds this checkout and points herdr's `herdr-sidebar` registration at it. |
+| *uncommitted* | **Search results open in the editor** | The Search view and Quick Open forced the built-in preview (`open_preview_at`) even with a custom editor configured; they now go through `explorer_app::open_file` → `file_popup::open_file_in_workspace`, i.e. the same routing a tree click uses (Fresh at the hit's line, else the preview). Media still goes to the preview, and the preview path keeps the double-click pin bookkeeping. |
 | *uncommitted* | **Merge popup merges on one key** | The `--git-popup merge` branch list used to ask "Merge X into Y?" on a second screen (`Screen::ConfirmMerge`); picking a branch now merges immediately, and the result/conflict message screen (with `a` for `merge --abort`) is unchanged. `Git::merge_branch` still passes `--no-edit` and never forces. |
 | *uncommitted* | **Commit button offers a pull; both oco token ceilings pinned** | When the branch is behind its upstream AND something is staged, ✓ Commit reads `✓ Commit · N↓` and asks "Pull first?" (`y` = plain `git pull --no-rebase`, then commit; anything else commits at once); a failed pull never commits. The AI-commit path never asks. `Git::pull` must pass `--no-rebase` because this machine's `dotfiles/config/git/dotfiles.gitconfig` sets `pull.rebase=true`, which refuses to run with a staged index. `OCO_TOKENS_MAX_OUTPUT=500` is now pinned next to `OCO_TOKENS_MAX_INPUT=24000`, since oco subtracts it from the input budget. |
 | *uncommitted* | **New branch popup** | `--git-popup[-open] new` (`Op::New`, `ctrl+alt+n`): an input-only popup that creates the branch from HEAD and switches to it (`git switch -c`, name judged by `git check-ref-format --branch`, no stash/force), with the error in the footer instead of a toast. Manifest pane `git-new-branch`, action `git-new-branch`. |
@@ -467,12 +468,14 @@ exactly like a successful open.
 precedence (remembered project ratio, else 70%). `Agent width` is not seeded either (else the
 historical 0.6, i.e. a 40% Agent column).
 
-Pictures and videos never open in Fresh. An Explorer click, Enter, or a pick in the Ctrl+Q popup
-opens them in the sidebar's preview, which draws them in the terminal; `q` or Esc closes it.
+Every open goes to Fresh once an editor is configured — pictures and videos included (the old
+"media always opens in the terminal preview" rule is gone; it made the same file open in different
+places depending on the gesture). The preview still DRAWS media whenever something sends it there:
+no editor configured, the diff viewer, `Open Diff Preview`, or the preview pane opened directly.
 Pictures: png, jpg/jpeg, gif, webp, bmp, ico, tif/tiff. Videos (avi, flv, m4v, mkv, mov, mp4, mpeg,
 mpg, webm, wmv) show their first frame and need `ffmpeg`. For the full-resolution file, use `m` →
 "Open with Default App" (runs `xdg-open`; on WSL, `dotfiles/bin/wsl-open <file>` hands it to Windows).
-A changed picture in Source Control opens the diff preview, not Fresh. The explicit "Open in Editor"
+A changed picture in Source Control opens in Fresh too (no media special case). The explicit "Open in Editor"
 menu item still sends a picture to Fresh.
 
 ### Search / replace popups
@@ -486,7 +489,10 @@ menu item still sends a picture to Fresh.
 - The preview window hits ±300 lines and is highlighted with `syntax::highlight_lines`, which returns one
   line per input line. (The old join-and-check code dropped ALL colors whenever the window ended on a blank
   line.)
-- Enter opens the match at its line in THIS workspace's Fresh (`fresh-open` with `file:line`).
+- Enter opens the match at its line in THIS workspace's Fresh (`fresh-open` with `file:line`),
+  and the sidebar's own Search view / Quick Open now do the same (`explorer_app::open_file` →
+  `file_popup::open_file_in_workspace`, the routing a tree click uses) instead of always
+  forcing the built-in preview.
 - Replace safety: Alt+Enter (replace all) and Ctrl+R on a file header ask `y/N` first. A single replace
   re-verifies that its line still matches at that byte range. Writes are atomic (temp file, rename), keep
   permissions, CRLF and BOM, and never leave the project root (symlinks are canonicalized).

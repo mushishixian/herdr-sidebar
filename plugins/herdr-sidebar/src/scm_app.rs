@@ -3943,7 +3943,6 @@ impl App {
             editor_configured,
             entry.letter,
             exists,
-            herdr_sidebar::viewer::is_media_file(Path::new(&entry.path)),
         ) {
             self.open_diff_in_editor(repo, &root, entry, staged);
         } else {
@@ -6560,9 +6559,8 @@ fn diff_opens_in_editor(
     editor_configured: bool,
     letter: char,
     exists: bool,
-    media: bool,
 ) -> bool {
-    on_click && inline && editor_configured && letter != 'D' && exists && !media
+    on_click && inline && editor_configured && letter != 'D' && exists
 }
 
 /// Whether the editor is asked for a live diff vs HEAD (`OPEN_DIFF_ENV`). A
@@ -6633,27 +6631,30 @@ mod tests {
 
     #[test]
     fn diff_routes_to_editor_only_when_every_condition_holds() {
-        assert!(diff_opens_in_editor(true, true, true, 'M', true, false));
-        assert!(diff_opens_in_editor(true, true, true, 'U', true, false));
+        assert!(diff_opens_in_editor(true, true, true, 'M', true));
+        assert!(diff_opens_in_editor(true, true, true, 'U', true));
         // Each condition alone breaks the route.
-        assert!(!diff_opens_in_editor(false, true, true, 'M', true, false));
-        assert!(!diff_opens_in_editor(true, false, true, 'M', true, false));
-        assert!(!diff_opens_in_editor(true, true, false, 'M', true, false));
-        assert!(!diff_opens_in_editor(true, true, true, 'M', false, false));
+        assert!(!diff_opens_in_editor(false, true, true, 'M', true));
+        assert!(!diff_opens_in_editor(true, false, true, 'M', true));
+        assert!(!diff_opens_in_editor(true, true, false, 'M', true));
+        assert!(!diff_opens_in_editor(true, true, true, 'M', false));
         // A deletion, on either side, keeps the viewer.
-        assert!(!diff_opens_in_editor(true, true, true, 'D', true, false));
+        assert!(!diff_opens_in_editor(true, true, true, 'D', true));
     }
 
+    /// A changed picture USED to be routed to the diff viewer (it can draw
+    /// media). Every open now goes to the editor, so the decision no longer
+    /// looks at the file type at all.
     #[test]
-    fn media_file_opens_diff_viewer_not_editor() {
-        assert!(!diff_opens_in_editor(true, true, true, 'M', true, true));
-        assert!(!diff_opens_in_editor(true, true, true, '!', true, true));
+    fn a_changed_picture_opens_in_the_editor_too() {
+        assert!(diff_opens_in_editor(true, true, true, 'M', true));
+        assert!(diff_opens_in_editor(true, true, true, '!', true));
     }
 
     #[test]
     fn conflicted_file_opens_in_editor_without_live_diff() {
         // Conflicts (`!`) still route to the editor...
-        assert!(diff_opens_in_editor(true, true, true, '!', true, false));
+        assert!(diff_opens_in_editor(true, true, true, '!', true));
         // ...but must not request the live diff, which would fight the
         // inline conflict resolver. Ordinary changes still do.
         assert!(!editor_live_diff('!'));
