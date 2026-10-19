@@ -1831,6 +1831,11 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
 - Fresh's settings UI replaces the symlinked `config.json` with a plain copy. Merge the copy into `dotfiles/config/fresh/config.json`, then rerun the installer to re-link.
 - `fresh-ide` exports `FRESH_IDE_DAEMON` and `DOTFILES_IDE_BIN`; the Fresh daemon inherits both.
 - `dotfiles/.gitattributes` pins LF. User docs: `docs/herdr-ide.md`.
+- **`jq` ≥ 1.6 reserves `label` as a keyword, so a `$label` jq variable is a parse error** — it
+  broke every pane lookup in the IDE layer's `lib.sh` on Linux/WSL (jq 1.6), where a file click in
+  the sidebar reported "opened in custom editor" and then did nothing at all. The variables are
+  `$lbl`/`$tab`/`$ws` now; see `dotfiles/AGENTS.md` for the full failure chain and the other
+  reserved names to avoid.
 
 ## Herdr workspace
 

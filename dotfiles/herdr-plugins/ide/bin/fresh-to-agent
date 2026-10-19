@@ -27,8 +27,8 @@ fi
 
 fresh_tab=$(jq -r --arg p "$fresh" '.result.panes[] | select(.pane_id == $p) | .tab_id' <<<"$panes")
 
-agent=$(jq -r --arg tab "$fresh_tab" --arg label "$AGENT_LABEL" \
-  '[.result.panes[] | select(.tab_id == $tab and .label == $label)][0].pane_id // empty' <<<"$panes")
+agent=$(jq -r --arg tab "$fresh_tab" --arg lbl "$AGENT_LABEL" \
+  '[.result.panes[] | select(.tab_id == $tab and .label == $lbl)][0].pane_id // empty' <<<"$panes")
 [ -n "$agent" ] || die "No Agent pane in this tab — open the IDE layout first"
 
 params=$(jq -nc --arg p "$agent" --arg t "$text" '{pane_id: $p, text: $t, keys: []}')

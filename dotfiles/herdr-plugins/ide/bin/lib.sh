@@ -55,10 +55,10 @@ ide_daemon_for() { # root ws
   if [ -z "${2:-}" ] || ! panes=$("$HERDR" pane list 2>/dev/null); then
     printf '%s\n' "$base"; return 0
   fi
-  used=$(jq -r --arg ws "$2" --arg label "$FRESH_LABEL" '.result.panes[]
-    | select(.label == $label and .workspace_id != $ws) | .tokens.fresh_daemon // empty' <<<"$panes")
-  mine=$(jq -r --arg ws "$2" --arg label "$FRESH_LABEL" '.result.panes[]
-    | select(.label == $label and .workspace_id == $ws) | .tokens.fresh_daemon // empty' <<<"$panes")
+  used=$(jq -r --arg ws "$2" --arg lbl "$FRESH_LABEL" '.result.panes[]
+    | select(.label == $lbl and .workspace_id != $ws) | .tokens.fresh_daemon // empty' <<<"$panes")
+  mine=$(jq -r --arg ws "$2" --arg lbl "$FRESH_LABEL" '.result.panes[]
+    | select(.label == $lbl and .workspace_id == $ws) | .tokens.fresh_daemon // empty' <<<"$panes")
   while read -r cand; do
     [[ $cand == "$base" || $cand == "$base"-s[0-9]* ]] || continue
     grep -qxF -- "$cand" <<<"$used" || { printf '%s\n' "$cand"; return 0; }
@@ -78,16 +78,16 @@ panes_json() {
 # Print "pane_id<TAB>workspace_id<TAB>daemon<TAB>cwd" for every Fresh pane,
 # current tab first, then current workspace, then everything else.
 fresh_panes() {
-  panes_json "" | jq -r --arg tab "$cur_tab" --arg ws "$cur_ws" --arg label "$FRESH_LABEL" '
-    [.result.panes[] | select(.label == $label)]
+  panes_json "" | jq -r --arg tab "$cur_tab" --arg ws "$cur_ws" --arg lbl "$FRESH_LABEL" '
+    [.result.panes[] | select(.label == $lbl)]
     | sort_by(if .tab_id == $tab then 0 elif .workspace_id == $ws then 1 else 2 end)
     | .[] | [.pane_id, .workspace_id, (.tokens.fresh_daemon // ""), (.foreground_cwd // .cwd // "")] | @tsv'
 }
 
 # First pane in tab $1 carrying label $2.
 pane_with_label() {
-  "$HERDR" pane list | jq -r --arg tab "$1" --arg label "$2" '
-    first(.result.panes[] | select(.tab_id == $tab and .label == $label) | .pane_id) // empty'
+  "$HERDR" pane list | jq -r --arg tab "$1" --arg lbl "$2" '
+    first(.result.panes[] | select(.tab_id == $tab and .label == $lbl) | .pane_id) // empty'
 }
 
 pane_field() {
@@ -314,8 +314,8 @@ TERM_COLLAPSED_ROWS=5
 
 # Token of the Fresh pane in tab $1 (the project's daemon name), if any.
 tab_fresh_daemon() {
-  "$HERDR" pane list | jq -r --arg tab "$1" --arg label "$FRESH_LABEL" '
-    first(.result.panes[] | select(.tab_id == $tab and .label == $label
+  "$HERDR" pane list | jq -r --arg tab "$1" --arg lbl "$FRESH_LABEL" '
+    first(.result.panes[] | select(.tab_id == $tab and .label == $lbl
       and (.tokens.fresh_daemon // "") != "") | .tokens.fresh_daemon) // empty'
 }
 
@@ -384,14 +384,14 @@ save_sizes() {
   # and the focus events it emits; the next real focus change saves again.
   recent_dock_reorder && return 0
   [ -n "$panes" ] || panes=$("$HERDR" pane list)
-  read -r fresh daemon < <(jq -r --arg tab "$tab" --arg label "$FRESH_LABEL" '
-    first(.result.panes[] | select(.tab_id == $tab and .label == $label
+  read -r fresh daemon < <(jq -r --arg tab "$tab" --arg lbl "$FRESH_LABEL" '
+    first(.result.panes[] | select(.tab_id == $tab and .label == $lbl
       and (.tokens.fresh_daemon // "") != "") | "\(.pane_id) \(.tokens.fresh_daemon)") // " "' <<<"$panes")
   [ -n "$fresh" ] && [ -n "$daemon" ] || return 0
-  term=$(jq -r --arg tab "$tab" --arg label "$TERM_LABEL" '
-    first(.result.panes[] | select(.tab_id == $tab and .label == $label) | .pane_id) // empty' <<<"$panes")
-  agent=$(jq -r --arg tab "$tab" --arg label "$AGENT_LABEL" '
-    first(.result.panes[] | select(.tab_id == $tab and .label == $label) | .pane_id) // empty' <<<"$panes")
+  term=$(jq -r --arg tab "$tab" --arg lbl "$TERM_LABEL" '
+    first(.result.panes[] | select(.tab_id == $tab and .label == $lbl) | .pane_id) // empty' <<<"$panes")
+  agent=$(jq -r --arg tab "$tab" --arg lbl "$AGENT_LABEL" '
+    first(.result.panes[] | select(.tab_id == $tab and .label == $lbl) | .pane_id) // empty' <<<"$panes")
   layout=$("$HERDR" pane layout --pane "$fresh") || return 0
   splits=$(ide_splits "$agent" "$fresh" "$term" <<<"$layout") || return 0
   term_rows=$(jq -r --arg t "$term" '.result.layout.panes[] | select(.pane_id == $t) | .rect.height' <<<"$layout" | head -n1) || true
@@ -421,16 +421,16 @@ save_sizes() {
 restore_sizes() {
   local tab=$1 entry=${2:-} panes fresh daemon agent term layout splits kind path ratio
   panes=$("$HERDR" pane list)
-  read -r fresh daemon < <(jq -r --arg tab "$tab" --arg label "$FRESH_LABEL" '
-    first(.result.panes[] | select(.tab_id == $tab and .label == $label
+  read -r fresh daemon < <(jq -r --arg tab "$tab" --arg lbl "$FRESH_LABEL" '
+    first(.result.panes[] | select(.tab_id == $tab and .label == $lbl
       and (.tokens.fresh_daemon // "") != "") | "\(.pane_id) \(.tokens.fresh_daemon)") // " "' <<<"$panes")
   [ -n "$fresh" ] && [ -n "$daemon" ] || return 0
   [ -n "$entry" ] || entry=$(saved_entry "$daemon")
   [ "$entry" != '{}' ] || return 0
-  term=$(jq -r --arg tab "$tab" --arg label "$TERM_LABEL" '
-    first(.result.panes[] | select(.tab_id == $tab and .label == $label) | .pane_id) // empty' <<<"$panes")
-  agent=$(jq -r --arg tab "$tab" --arg label "$AGENT_LABEL" '
-    first(.result.panes[] | select(.tab_id == $tab and .label == $label) | .pane_id) // empty' <<<"$panes")
+  term=$(jq -r --arg tab "$tab" --arg lbl "$TERM_LABEL" '
+    first(.result.panes[] | select(.tab_id == $tab and .label == $lbl) | .pane_id) // empty' <<<"$panes")
+  agent=$(jq -r --arg tab "$tab" --arg lbl "$AGENT_LABEL" '
+    first(.result.panes[] | select(.tab_id == $tab and .label == $lbl) | .pane_id) // empty' <<<"$panes")
   layout=$("$HERDR" pane layout --pane "$fresh") || return 0
   splits=$(ide_splits "$agent" "$fresh" "$term" <<<"$layout") || return 0
   for kind in agent editor; do

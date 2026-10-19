@@ -15,8 +15,8 @@ here=$(dirname "$(readlink -f "$0")")
   panes=$("$HERDR" pane list) || exit 0
   while read -r tab; do
     [ -n "$tab" ] && save_sizes "$tab" "$panes"
-  done < <(jq -r --arg label "$FRESH_LABEL" '
-    .result.panes[] | select(.label == $label and (.tokens.fresh_daemon // "") != "")
+  done < <(jq -r --arg lbl "$FRESH_LABEL" '
+    .result.panes[] | select(.label == $lbl and (.tokens.fresh_daemon // "") != "")
     | .tab_id' <<<"$panes" | sort -u)
 } >/dev/null 2>&1 || true
 exit 0

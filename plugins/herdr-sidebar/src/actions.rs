@@ -904,12 +904,58 @@ fn spawn_inline_editor(
         Some(line) => editor_argv_at(&command, &editor_file, line)?,
         None => editor_argv(&command, &editor_file)?,
     };
-    let mut child = inline_command_from_argv(argv, root, env).spawn()?;
-    // Reap it in the background so finished editors don't linger as zombies.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
+    let program = argv[0].clone();
+    let child = inline_command_from_argv(argv, root, env).spawn()?;
+    // Reap it in the background so finished editors don't linger as zombies. The
+    // child's stdio is null and this call already reported success, so an editor
+    // command that dies on the spot (a helper script whose own tool is missing,
+    // a bad path) would otherwise look exactly like a successful open.
+    std::thread::spawn(move || report_editor_exit(child, program));
     Ok(())
+}
+
+/// How long after the launch an editor's failure is still worth reporting. A
+/// long-lived inline editor that exits non-zero when the user quits it must not
+/// pop a notice an hour later.
+const EDITOR_REPORT_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Most failures kept for a view that has not polled yet; the oldest go first.
+const EDITOR_FAILURES_MAX: usize = 8;
+
+static EDITOR_FAILURES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Wait for an inline editor and, when it died right away, leave a message for
+/// the view to show. Runs on the reaping thread.
+fn report_editor_exit(mut child: std::process::Child, program: String) {
+    let started = std::time::Instant::now();
+    if let Ok(status) = child.wait()
+        && !status.success()
+        && started.elapsed() < EDITOR_REPORT_WINDOW
+    {
+        push_editor_failure(format!(
+            "custom editor failed: {program} exited with {status}"
+        ));
+    }
+}
+
+fn push_editor_failure(message: String) {
+    let mut queue = EDITOR_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if queue.len() >= EDITOR_FAILURES_MAX {
+        queue.remove(0);
+    }
+    queue.push(message);
+}
+
+/// Inline editor launches that already failed, oldest first, as messages a view
+/// can show. Drains the queue, so each failure is reported once. Both views
+/// poll this from their tick.
+pub fn take_editor_failures() -> Vec<String> {
+    let mut queue = EDITOR_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::take(&mut *queue)
 }
 
 /// The inline editor process, unspawned: argv already resolved from the
@@ -1190,6 +1236,48 @@ mod tests {
         assert_eq!(cmd.get_current_dir(), Some(root));
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, ["--wait", "/repo/src/main.rs"]);
+    }
+
+    /// The click path only reports a successful SPAWN, and the child's stdio is
+    /// null: an editor command that dies immediately (a helper script whose own
+    /// tool is missing) used to look exactly like a successful open.
+    #[cfg(unix)]
+    #[test]
+    fn inline_editor_that_dies_immediately_is_reported_once() {
+        let _ = take_editor_failures();
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 3"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sh");
+        report_editor_exit(child, "fresh-open".into());
+        let failures = take_editor_failures();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            failures[0].contains("fresh-open") && failures[0].contains("exited with"),
+            "{failures:?}"
+        );
+        // Drained: the view shows each failure once.
+        assert!(take_editor_failures().is_empty());
+    }
+
+    /// The queue is bounded and keeps the newest, so a view that never polls
+    /// cannot grow it forever while the failure the user just caused survives.
+    #[test]
+    fn editor_failures_skip_success_and_stay_bounded() {
+        let _ = take_editor_failures();
+        for n in 0..(EDITOR_FAILURES_MAX + 3) {
+            push_editor_failure(format!("fail {n}"));
+        }
+        let failures = take_editor_failures();
+        assert_eq!(failures.len(), EDITOR_FAILURES_MAX);
+        assert_eq!(
+            failures.last().unwrap(),
+            &format!("fail {}", EDITOR_FAILURES_MAX + 2)
+        );
+        assert!(take_editor_failures().is_empty());
     }
 
     fn tmp(tag: &str) -> PathBuf {

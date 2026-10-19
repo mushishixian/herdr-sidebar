@@ -1612,6 +1612,7 @@ impl App {
     /// Periodic timer tick: retry repo discovery if we started outside one,
     /// pick up external changes, and collect finished ✧ suggestion / sync runs.
     pub fn tick(&mut self) {
+        self.collect_editor_failures();
         let shared = sidebar::load_state();
         self.sidebar_state.custom_editor_on_click = shared.custom_editor_on_click;
         self.sidebar_state.custom_editor_inline = shared.custom_editor_inline;
@@ -1684,6 +1685,15 @@ impl App {
             }
         }
         self.refresh();
+    }
+
+    /// An inline custom editor that died on the spot. Its stdio is null, so
+    /// without this the click reads as a silent success (the launch itself was
+    /// only a spawn: the editor's exit status arrives later).
+    fn collect_editor_failures(&mut self) {
+        if let Some(failure) = actions::take_editor_failures().pop() {
+            self.flash = Some((failure, true));
+        }
     }
 
     pub fn is_syncing(&self) -> bool {
@@ -2081,16 +2091,12 @@ impl App {
             return;
         };
         match key.code {
-            KeyCode::Backspace => {
-                if repo.cursor > 0 {
-                    repo.cursor -= 1;
-                    repo.message.remove(repo.cursor);
-                }
+            KeyCode::Backspace if repo.cursor > 0 => {
+                repo.cursor -= 1;
+                repo.message.remove(repo.cursor);
             }
-            KeyCode::Delete => {
-                if repo.cursor < repo.message.len() {
-                    repo.message.remove(repo.cursor);
-                }
+            KeyCode::Delete if repo.cursor < repo.message.len() => {
+                repo.message.remove(repo.cursor);
             }
             KeyCode::Left => repo.cursor = repo.cursor.saturating_sub(1),
             KeyCode::Right => repo.cursor = (repo.cursor + 1).min(repo.message.len()),

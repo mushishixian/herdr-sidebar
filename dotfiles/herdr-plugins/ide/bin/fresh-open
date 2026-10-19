@@ -129,7 +129,12 @@ if [ -n "${HERDR_SIDEBAR_EDITOR_FILE:-}" ]; then
 fi
 
 if [ -z "$editor" ]; then
-  editor=$("$here/herdr-ide" | tail -n1)
+  # herdr-ide prints the editor pane id as its last line. Check its status: under
+  # `set -e -o pipefail` a command failing inside it used to abort fresh-open on
+  # this bare assignment, with null stdio and exit 3 — the sidebar saw a
+  # successful spawn and the click did nothing, with no hint why.
+  ide=$("$here/herdr-ide") || die "could not build the IDE layout (run herdr-ide to see why)"
+  editor=$(tail -n1 <<<"$ide")
   daemon=$("$HERDR" pane list | jq -r --arg p "$editor" \
     'first(.result.panes[] | select(.pane_id == $p) | .tokens.fresh_daemon) // empty')
   [ -n "$daemon" ] || die "could not start the IDE editor"

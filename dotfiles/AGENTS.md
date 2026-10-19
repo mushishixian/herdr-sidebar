@@ -94,6 +94,17 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   itself; this guard only stops the shell layer from persisting the intermediate state. A
   missing or garbled stamp never suppresses a save.
 
+- **jq ≥ 1.6 reserves `label` as a keyword, so `$label` is a PARSE ERROR** ("unexpected
+  label") — Ubuntu/WSL ship jq 1.6. Every pane lookup in `lib.sh`, `ide-save-sizes` and
+  `fresh-to-agent` used `--arg label … $label`, so on such a host the whole IDE layer failed:
+  clicking a file in the sidebar showed "opened in custom editor: <file>" and then nothing
+  happened, because `fresh-open` saw no Fresh pane and `herdr-ide` could not start one. It is
+  invisible by design — the sidebar spawns the editor with NULL stdio and only reports the
+  SPAWN, `$( … )` swallows the jq exit status, and a hook that ran a broken jq still logs
+  "succeeded". The variables are `$lbl`/`$tab`/`$ws`/… now; never name a jq variable
+  `label`, `break`, `def`, `as`, `if`, `then`, `else`, `end`, `reduce`, `foreach`, `try`,
+  `catch`, `import`, `include`, `and`, `or` or `not`.
+
 ## Commits
 
 Never commit unless the user asks. The user makes the commits. When they do, fill in the `*uncommitted*`

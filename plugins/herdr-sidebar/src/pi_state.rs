@@ -292,19 +292,18 @@ pub fn summarise(jsonl: &str) -> Transcript {
                     _ => {}
                 }
             }
-            Some("custom_message") => {
+            Some("custom_message")
                 if record.get("customType").and_then(|kind| kind.as_str())
-                    == Some("subagent-notification")
+                    == Some("subagent-notification") =>
+            {
+                if let Some(id) = record
+                    .pointer("/details/id")
+                    .and_then(|id| id.as_str())
+                    .filter(|id| !id.is_empty())
                 {
-                    if let Some(id) = record
-                        .pointer("/details/id")
-                        .and_then(|id| id.as_str())
-                        .filter(|id| !id.is_empty())
-                    {
-                        done.insert(id.to_string());
-                    }
-                    turn_active = true;
+                    done.insert(id.to_string());
                 }
+                turn_active = true;
             }
             Some("custom") => {
                 let custom_type = record

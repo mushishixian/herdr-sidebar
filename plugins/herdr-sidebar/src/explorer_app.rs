@@ -625,6 +625,7 @@ impl App {
     /// the sidebar (an agent editing files, a commit in another pane) show up
     /// on their own. Self-throttling, so the event loop may call it freely.
     pub fn tick(&mut self) {
+        self.collect_editor_failures();
         self.sync_shared_settings();
         self.sync_shared_tree();
         self.collect_quick_index();
@@ -636,6 +637,15 @@ impl App {
             return;
         }
         self.request_decorations(false);
+    }
+
+    /// An inline custom editor that died on the spot. Its stdio is null, so
+    /// without this the click reads as a silent success (the launch itself was
+    /// only a spawn: the editor's exit status arrives later).
+    fn collect_editor_failures(&mut self) {
+        if let Some(failure) = actions::take_editor_failures().pop() {
+            self.notice = Some(failure);
+        }
     }
 
     pub fn is_syncing(&self) -> bool {

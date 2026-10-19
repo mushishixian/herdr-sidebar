@@ -282,10 +282,8 @@ impl App {
             KeyCode::PageUp => self.select_page_up(),
             KeyCode::PageDown => self.select_page_down(),
             KeyCode::Home => self.selected = 0,
-            KeyCode::End => {
-                if !self.matches.is_empty() {
-                    self.selected = self.matches.len().saturating_sub(1);
-                }
+            KeyCode::End if !self.matches.is_empty() => {
+                self.selected = self.matches.len().saturating_sub(1);
             }
             KeyCode::Backspace => {
                 self.query.pop();
