@@ -150,6 +150,28 @@ impl Git {
         Ok("synced with remote".to_string())
     }
 
+    /// The commit button's "pull first": a plain `git pull` (merge, no rebase),
+    /// as asked for that button. Returns the footer summary on success. Fails
+    /// fast instead of waiting on a credential prompt — this runs on a worker,
+    /// so a hang would leave a stray process behind.
+    pub fn pull(&self) -> Result<String, String> {
+        // `--no-rebase` is not cosmetic: a machine-global `pull.rebase=true`
+        // (this repo's own dotfiles set it) turns a bare `pull` into a REBASE
+        // that refuses to run while anything is staged — exactly the state the
+        // commit button is in when it offers this pull.
+        let out = git_command(&self.root, &["pull", "--no-rebase", "--no-edit"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("git: {e}"))?;
+        let text = command_result(out.status, out.stdout, out.stderr)?;
+        Ok(if text.contains("Already up to date") {
+            "Already up to date.".to_string()
+        } else {
+            "Pulled.".to_string()
+        })
+    }
+
     pub fn status(&self) -> Result<Status, String> {
         let out = run_read_in(
             &self.root,
@@ -607,6 +629,32 @@ impl Git {
             return Err("enter the branch name without a refs/ prefix".into());
         }
         Ok(name)
+    }
+
+    /// Cheap identity of the checked-out branch: the content of the git dir's
+    /// `HEAD` (`ref: refs/heads/<branch>`, or a detached hash). A checkout,
+    /// branch creation or rename rewrites it, so comparing two readings shows
+    /// that the branch moved WITHOUT starting a git process — which is what lets
+    /// the views react within a few hundred ms to a popup (another process) or a
+    /// `git switch` typed in a terminal.
+    pub fn head_signature(&self) -> Option<String> {
+        std::fs::read_to_string(self.git_dir()?.join("HEAD")).ok()
+    }
+
+    /// The repository's git directory. In a worktree or a submodule `.git` is a
+    /// FILE holding `gitdir: <path>`, not a directory.
+    fn git_dir(&self) -> Option<PathBuf> {
+        let dot_git = self.root.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git);
+        }
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let path = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+        Some(if path.is_absolute() {
+            path
+        } else {
+            self.root.join(path)
+        })
     }
 
     /// The checked-out branch; `None` on a detached HEAD.
@@ -1381,6 +1429,119 @@ mod tests {
                 .unwrap();
         }
         Git { root }
+    }
+
+    /// The views poll this instead of running git, so it must change exactly when
+    /// the branch does.
+    #[test]
+    fn head_signature_tracks_create_switch_and_rename() {
+        let git = repo_with_head("head-signature");
+        let initial = git.head_signature().expect("HEAD readable");
+        assert!(initial.starts_with("ref: refs/heads/"), "{initial}");
+
+        git.create_branch("feature/x").unwrap();
+        let created = git.head_signature().expect("HEAD readable");
+        assert!(created.contains("refs/heads/feature/x"), "{created}");
+        assert_ne!(created, initial);
+
+        git.rename_branch("feature/x", "feature/y").unwrap();
+        let renamed = git.head_signature().expect("HEAD readable");
+        assert!(renamed.contains("refs/heads/feature/y"), "{renamed}");
+        assert_ne!(renamed, created);
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    /// A worktree's `.git` is a FILE holding `gitdir: <path>`; a plain
+    /// `root/.git/HEAD` read would find nothing there.
+    #[test]
+    fn head_signature_resolves_a_worktree_git_file() {
+        let git = repo_with_head("head-signature-worktree");
+        let worktree = std::env::temp_dir().join(format!("aa-git-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&worktree);
+        let path = worktree.to_str().unwrap().to_string();
+        run_in(&git.root, &["worktree", "add", "-q", &path]).unwrap();
+
+        let linked = Git {
+            root: worktree.clone(),
+        };
+        let signature = linked.head_signature().expect("worktree HEAD");
+        assert!(signature.starts_with("ref: refs/heads/"), "{signature}");
+
+        let _ = run_in(&git.root, &["worktree", "remove", "--force", &path]);
+        let _ = std::fs::remove_dir_all(&worktree);
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    /// The commit button's pull is a real upstream merge, so this uses a bare
+    /// origin and two clones rather than the single-repo fixture.
+    #[test]
+    fn pull_brings_in_an_upstream_commit_and_says_so() {
+        let base = std::env::temp_dir().join(format!("aa-git-pull-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let origin = base.join("origin.git");
+        let one = base.join("one");
+        let two = base.join("two");
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "--bare"]);
+        git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        std::fs::create_dir_all(&one).unwrap();
+        git(&one, &["init", "-q"]);
+        git(&one, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        git(&one, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        std::fs::write(one.join("a.txt"), "a\n").unwrap();
+        git(&one, &["add", "."]);
+        git(
+            &one,
+            &[
+                "-c", "user.email=t@t.dev", "-c", "user.name=t", "commit", "-q", "-m", "a",
+            ],
+        );
+        git(&one, &["push", "-q", "-u", "origin", "HEAD"]);
+        git(
+            &base,
+            &["clone", "-q", origin.to_str().unwrap(), two.to_str().unwrap()],
+        );
+
+        // A second commit lands upstream after the clone.
+        std::fs::write(one.join("b.txt"), "b\n").unwrap();
+        git(&one, &["add", "."]);
+        git(
+            &one,
+            &[
+                "-c", "user.email=t@t.dev", "-c", "user.name=t", "commit", "-q", "-m", "b",
+            ],
+        );
+        git(&one, &["push", "-q"]);
+
+        // The exact runtime shape: a machine-global `pull.rebase=true` (this
+        // repo's own dotfiles set it) plus something staged. A bare `git pull`
+        // refuses that — "cannot pull with rebase: Your index contains uncommitted
+        // changes" — which is what `--no-rebase` is there for.
+        git(&two, &["config", "pull.rebase", "true"]);
+        std::fs::write(two.join("c.txt"), "c\n").unwrap();
+        git(&two, &["add", "c.txt"]);
+
+        let clone = Git {
+            root: two.clone(),
+        };
+        assert_eq!(clone.pull(), Ok("Pulled.".to_string()));
+        assert!(two.join("b.txt").is_file(), "the upstream commit landed");
+        // Second pull: nothing new.
+        assert_eq!(clone.pull(), Ok("Already up to date.".to_string()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

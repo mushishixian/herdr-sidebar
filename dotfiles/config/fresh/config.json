@@ -70,7 +70,7 @@
     "go": { "auto_start": true },
     "rust": { "auto_start": true },
     "dart": { "auto_start": true },
-    "php": { "auto_start": true },
+    "php": { "command": "phpactor-lsp", "auto_start": true },
     "javascript": { "auto_start": true },
     "typescript": { "auto_start": true },
   },

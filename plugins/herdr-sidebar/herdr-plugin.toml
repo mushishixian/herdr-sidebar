@@ -75,6 +75,13 @@ placement = "popup"
 command = ["./target/release/herdr-sidebar", "--git-popup", "merge"]
 platforms = ["linux", "macos"]
 
+[[panes]]
+id = "git-new-branch"
+title = "New branch"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--git-popup", "new"]
+platforms = ["linux", "macos"]
+
 # Git history of a line range. No action: the Fresh editor plugin opens it
 # directly, passing HERDR_SIDEBAR_HISTORY_FILE / HERDR_SIDEBAR_HISTORY_LINES.
 [[panes]]
@@ -197,6 +204,13 @@ platforms = ["linux", "macos"]
 title = "Merge branch into current"
 description = "Popup: pick a branch and merge it into the current branch."
 command = ["./target/release/herdr-sidebar", "--git-popup-open", "merge"]
+
+[[actions]]
+id = "git-new-branch"
+platforms = ["linux", "macos"]
+title = "New branch"
+description = "Popup: create a branch from HEAD and switch to it."
+command = ["./target/release/herdr-sidebar", "--git-popup-open", "new"]
 
 # Toggle the sidebar: open at the configured dock edge / focus / close.
 [[actions]]

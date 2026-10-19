@@ -122,10 +122,15 @@ fn button_label(
         return ai_button_label(phase, elapsed);
     }
     if sync_is_primary(status) {
-        sync_label_for_status(status, syncing).unwrap_or_else(|| "⟳ Sync Changes".to_string())
-    } else {
-        "✓ Commit".to_string()
+        return sync_label_for_status(status, syncing)
+            .unwrap_or_else(|| "⟳ Sync Changes".to_string());
     }
+    // Behind the upstream with something staged: clicking asks whether to pull
+    // first, so the button says so.
+    if status.behind > 0 {
+        return format!("✓ Commit · {}↓", status.behind);
+    }
+    "✓ Commit".to_string()
 }
 
 /// `width` cells of `label` (centered, truncated like the static button) with
@@ -639,6 +644,9 @@ struct Repo {
     git: Git,
     name: String,
     status: Status,
+    /// The git dir's `HEAD` as last seen; a change means the branch moved (see
+    /// [`Git::head_signature`]).
+    head_sig: Option<String>,
     collapsed: bool,
     staged_collapsed: bool,
     changes_collapsed: bool,
@@ -658,6 +666,7 @@ impl Repo {
     fn new(git: Git) -> Self {
         Self {
             name: git.name(),
+            head_sig: git.head_signature(),
             git,
             status: Status::default(),
             collapsed: false,
@@ -879,6 +888,13 @@ enum Overlay {
         title: String,
         prompt: String,
         args: Vec<String>,
+    },
+    /// The commit button's "pull first?" question: the branch is `behind` its
+    /// upstream and there is something staged. `y` pulls (plain `git pull`) and
+    /// then commits; any other key commits right away, as before.
+    ConfirmPullThenCommit {
+        repo: usize,
+        behind: usize,
     },
     /// The ⚙ settings modal: mouse-toggleable panel settings.
     Settings {
@@ -1192,6 +1208,9 @@ pub struct App {
     suggesting: Option<Receiver<String>>,
     /// Pending Sync Changes run, polled from tick().
     syncing: Option<(usize, Receiver<Result<String, String>>)>,
+    /// Pending "pull, then commit" run, polled from tick(); holds the repo to
+    /// commit in once the pull lands.
+    pulling: Option<(usize, Receiver<Result<String, String>>)>,
     /// AI commit claimed from this tab's request file: the repo index and the
     /// worker's outcome (see [`herdr_sidebar::ai_commit`]).
     ai_commit: Option<(usize, std::sync::mpsc::Receiver<AiOutcome>)>,
@@ -1369,6 +1388,7 @@ impl App {
             flash: None,
             suggesting: None,
             syncing: None,
+            pulling: None,
             ai_commit: None,
             ai_commit_due: None,
             ai_commit_checked: None,
@@ -1523,6 +1543,25 @@ impl App {
         self.rebuild();
     }
 
+    /// The branch-moved probe: cheap (one small file per repo), so the event
+    /// loop can run it several times a second. A popup (own process) or a
+    /// `git switch` in a terminal rewrites the git dir's HEAD, and the view then
+    /// refreshes at once instead of waiting for the next [`crate::REFRESH_EVERY`]
+    /// status poll. Returns true when it triggered a refresh.
+    pub fn poll_branch(&mut self) -> bool {
+        let mut moved = false;
+        for repo in &mut self.repos {
+            let now = repo.git.head_signature();
+            if now != repo.head_sig {
+                repo.head_sig = now;
+                moved = true;
+            }
+        }
+        if moved {
+            self.refresh();
+        }
+        moved
+    }
     /// Re-stamp the identity tokens so launchers know this pane is alive.
     pub fn heartbeat(&mut self) {
         self.poll_unified_close();
@@ -1672,6 +1711,29 @@ impl App {
                 }
             }
         }
+        if let Some((_, rx)) = &self.pulling {
+            let landed = match rx.try_recv() {
+                Ok(outcome) => Some(outcome),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("pull failed".to_string()))
+                }
+            };
+            if let Some(outcome) = landed
+                && let Some((index, _)) = self.pulling.take()
+            {
+                match outcome {
+                    Ok(summary) => {
+                        self.flash = Some((summary, false));
+                        // The commit the button was clicked for, now on top of
+                        // the pulled branch.
+                        self.refresh();
+                        self.commit_repo(index);
+                    }
+                    Err(error) => self.flash = Some((error, true)),
+                }
+            }
+        }
         if !self.background_refresh && !self.pane_is_focused() {
             return;
         }
@@ -1697,7 +1759,7 @@ impl App {
     }
 
     pub fn is_syncing(&self) -> bool {
-        self.syncing.is_some()
+        self.syncing.is_some() || self.pulling.is_some()
     }
 
     /// AI commit is generating, or its message is waiting to be committed; the
@@ -2691,6 +2753,8 @@ impl App {
             DiscardConfirmed(usize, FileEntry),
             DiscardAllConfirmed(usize),
             GitConfirmed(usize, Vec<String>),
+            PullThenCommit(usize),
+            CommitNow(usize),
             Picker(PickerAction),
             PaneRenameConfirmed,
         }
@@ -2785,6 +2849,12 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Char('Y') => Cmd::GitConfirmed(*repo, args.clone()),
                 _ => Cmd::Close,
             },
+            Some(Overlay::ConfirmPullThenCommit { repo, .. }) => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Cmd::PullThenCommit(*repo),
+                // Not a refusal to commit: the answer is "not now", and the
+                // click/key press was a commit request.
+                _ => Cmd::CommitNow(*repo),
+            },
             None => Cmd::Nothing,
         };
         match cmd {
@@ -2804,6 +2874,14 @@ impl App {
                         self.run_git(repo, &strs);
                     }
                 }
+            }
+            Cmd::PullThenCommit(repo) => {
+                self.overlay = None;
+                self.pull_then_commit(repo);
+            }
+            Cmd::CommitNow(repo) => {
+                self.overlay = None;
+                self.commit_repo(repo);
             }
             Cmd::DiscardConfirmed(repo, entry) => {
                 self.overlay = None;
@@ -2847,6 +2925,7 @@ impl App {
             Some(Overlay::ConfirmDiscard { .. })
                 | Some(Overlay::ConfirmDiscardAll { .. })
                 | Some(Overlay::ConfirmGit { .. })
+                | Some(Overlay::ConfirmPullThenCommit { .. })
         ) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if hits(self.zones.confirm_yes, mouse.column, mouse.row) {
@@ -4506,6 +4585,25 @@ impl App {
         }
     }
 
+    /// `git pull` (plain merge), then the commit that was waiting on it: see
+    /// [`Self::commit_with_pull_offer`]. The pull runs on a worker, since it may
+    /// talk to the network. A failure flashes and does NOT commit — the branch
+    /// is not where the user thinks it is.
+    fn pull_then_commit(&mut self, index: usize) {
+        if self.pulling.is_some() {
+            return;
+        }
+        let Some(repo) = self.repos.get(index) else {
+            return;
+        };
+        let git = repo.git.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(git.pull());
+        });
+        self.pulling = Some((index, rx));
+        self.flash = Some(("Pulling…".to_string(), false));
+    }
     /// VS Code's Sync Changes (pull --rebase, then push) on a background
     /// thread; tick() collects the outcome.
     fn sync_changes(&mut self) {
@@ -4580,6 +4678,26 @@ impl App {
             .map(|at| at.elapsed())
             .unwrap_or_default();
         Some((phase, elapsed))
+    }
+
+    /// A user-initiated commit while the branch is BEHIND its upstream offers a
+    /// plain `git pull` first ([`Overlay::ConfirmPullThenCommit`]). The AI-commit
+    /// path calls `commit_repo` directly — it must not stop to ask — and a pull
+    /// that fails never commits.
+    fn commit_with_pull_offer(&mut self, index: usize) {
+        let Some(repo) = self.repos.get(index) else {
+            return;
+        };
+        if repo.status.behind > 0 && !repo.status.staged.is_empty() {
+            let behind = repo.status.behind;
+            self.active = index;
+            self.overlay = Some(Overlay::ConfirmPullThenCommit {
+                repo: index,
+                behind,
+            });
+            return;
+        }
+        self.commit_repo(index);
     }
 
     /// True, with a flash, while repo `index`'s AI commit is still running:
@@ -4697,7 +4815,7 @@ impl App {
     }
 
     fn commit(&mut self) {
-        self.commit_repo(self.active);
+        self.commit_with_pull_offer(self.active);
     }
 
     fn run_primary_action(&mut self) {
@@ -5017,6 +5135,7 @@ impl App {
             Some(Overlay::ConfirmDiscard { .. })
             | Some(Overlay::ConfirmDiscardAll { .. })
             | Some(Overlay::ConfirmGit { .. }) => self.draw_confirm(frame),
+            Some(Overlay::ConfirmPullThenCommit { .. }) => self.draw_confirm(frame),
             _ => {}
         }
     }
@@ -5037,6 +5156,17 @@ impl App {
                 "Discard all unstaged changes?".to_string(),
             ),
             Some(Overlay::ConfirmGit { title, prompt, .. }) => (title.clone(), prompt.clone()),
+            Some(Overlay::ConfirmPullThenCommit { repo, behind }) => {
+                let branch = self
+                    .repos
+                    .get(*repo)
+                    .map(|r| r.status.branch.clone())
+                    .unwrap_or_default();
+                (
+                    "Pull before committing".to_string(),
+                    format!("{branch} is {behind} commit(s) behind its upstream. Pull first?"),
+                )
+            }
             _ => return,
         };
         let (yes, no) =
@@ -7193,6 +7323,47 @@ mod ai_commit_button_tests {
         assert_eq!(button_label(&ahead, false, ai), "⠋ AI generating…");
         assert_eq!(button_label(&ahead, false, None), "⟳ Sync Changes 43↑");
         assert_eq!(button_label(&Status::default(), false, None), "✓ Commit");
+    }
+
+    /// Behind the upstream AND with changes staged (so the button is a Commit,
+    /// not a Sync): the label says a pull is on offer.
+    #[test]
+    fn commit_button_says_how_far_behind_when_it_offers_a_pull() {
+        let behind = Status {
+            behind: 2,
+            has_upstream: true,
+            // Staged work is what makes this a Commit button rather than Sync.
+            staged: vec![FileEntry {
+                path: "a.txt".into(),
+                orig: None,
+                letter: 'M',
+            }],
+            ..Status::default()
+        };
+        assert!(!sync_is_primary(&behind));
+        assert_eq!(button_label(&behind, false, None), "✓ Commit · 2↓");
+
+        // Nothing staged: still Sync Changes, which pulls AND pushes.
+        let clean = Status {
+            behind: 2,
+            has_upstream: true,
+            ..Status::default()
+        };
+        assert_eq!(button_label(&clean, false, None), "⟳ Sync Changes 2↓");
+
+        // Not behind: the plain label, unchanged.
+        let ahead_only = Status {
+            ahead: 1,
+            behind: 0,
+            has_upstream: true,
+            staged: vec![FileEntry {
+                path: "a.txt".into(),
+                orig: None,
+                letter: 'M',
+            }],
+            ..Status::default()
+        };
+        assert_eq!(button_label(&ahead_only, false, None), "✓ Commit");
     }
 
     #[test]

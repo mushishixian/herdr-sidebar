@@ -104,6 +104,15 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   "succeeded". The variables are `$lbl`/`$tab`/`$ws`/… now; never name a jq variable
   `label`, `break`, `def`, `as`, `if`, `then`, `else`, `end`, `reduce`, `foreach`, `try`,
   `catch`, `import`, `include`, `and`, `or` or `not`.
+- **`~/.config/herdr/config.toml` must stay the installer's symlink, or the rail and the key
+  table silently stop applying.** `install.sh` links it to `dotfiles/config/herdr/config.toml`;
+  a user (or an editor) that replaces it with their own file leaves herdr on its defaults —
+  `status_indicators = "dots"` (working/blocked/done all one `●`, colour only, which reads as
+  "the indicator never changes") and the two-row `[ui.sidebar.spaces]` default with no
+  `state_text` word line. Nothing errors: `herdr workspace list` still reports
+  `agent_status = working`. Symptom to recognise: "左上角不显示 agent 在 working". Merge the
+  `[ui]` + `[ui.sidebar.spaces]` block into the personal file, then
+  `herdr server reload-config` (applies to a LIVE client).
 
 ## Commits
 

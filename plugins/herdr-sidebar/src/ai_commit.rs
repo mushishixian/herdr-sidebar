@@ -47,6 +47,14 @@ const KEEP_LINES: usize = 40;
 /// so oco never takes its chunk-and-join path.
 const MAX_INPUT_TOKENS: u32 = 24_000;
 
+/// Token ceiling for oco's ANSWER (`OCO_TOKENS_MAX_OUTPUT`), also pinned over
+/// `~/.opencommit` and set to oco's own default. It is not only the message
+/// budget: oco SUBTRACTS it from the input ceiling when it decides how much
+/// diff it may send, so a machine whose config asks for a big output limit
+/// silently gets a smaller diff budget — i.e. the chunk-and-join path, one
+/// message per chunk — and oco rejects values "much higher" than this default.
+const MAX_OUTPUT_TOKENS: u32 = 500;
+
 /// Path substrings oco drops from the diff itself. Files matching these never
 /// reach the model, so they cost nothing against the budgets.
 const OCO_EXCLUDED: &[&str] = &[
@@ -180,14 +188,12 @@ fn run_hook(work: &Path, cli: &Path, root: &Path, index: Option<&Path>) -> Resul
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", "core.hooksPath")
         .env("GIT_CONFIG_VALUE_0", &hooks)
-        .env("OCO_GITPUSH", "false")
-        .env("OCO_TOKENS_MAX_INPUT", MAX_INPUT_TOKENS.to_string())
-        .env("NO_COLOR", "1")
-        .env("FORCE_COLOR", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (key, value) in pinned_oco_env() {
+        cmd.env(key, value);
+    }
 
     #[cfg(windows)]
     {
@@ -241,6 +247,23 @@ fn run_hook(work: &Path, cli: &Path, root: &Path, index: Option<&Path>) -> Resul
             }
         }
     }
+}
+
+/// The oco knobs the sidebar pins, whatever `~/.opencommit` says. Both token
+/// ceilings are here on purpose: `OCO_TOKENS_MAX_INPUT` is what stops oco from
+/// chunking the diff, and `OCO_TOKENS_MAX_OUTPUT` is subtracted from that
+/// budget, so a machine asking for a big output limit would shrink it right
+/// back. Everything else (provider, model, language, emoji, description) stays
+/// the user's configuration.
+fn pinned_oco_env() -> Vec<(&'static str, String)> {
+    vec![
+        ("OCO_GITPUSH", "false".to_string()),
+        ("OCO_TOKENS_MAX_INPUT", MAX_INPUT_TOKENS.to_string()),
+        ("OCO_TOKENS_MAX_OUTPUT", MAX_OUTPUT_TOKENS.to_string()),
+        ("NO_COLOR", "1".to_string()),
+        ("FORCE_COLOR", "0".to_string()),
+        ("GIT_TERMINAL_PROMPT", "0".to_string()),
+    ]
 }
 
 /// Read what oco wrote into the hook's message file.
@@ -888,6 +911,31 @@ fn link_script(target: &Path, link: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Both ceilings are pinned over `~/.opencommit`; the output one matters
+    /// because oco subtracts it from the input budget, so an un-pinned value
+    /// re-opens the chunk-and-join path on that machine only.
+    #[test]
+    fn both_token_ceilings_are_pinned_over_the_user_config() {
+        let env = pinned_oco_env();
+        let get = |key: &str| {
+            env.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("OCO_TOKENS_MAX_INPUT"), Some("24000"));
+        assert_eq!(get("OCO_TOKENS_MAX_OUTPUT"), Some("500"));
+        assert_eq!(get("OCO_GITPUSH"), Some("false"));
+        // Nothing that is the user's own choice may be overridden.
+        for key in [
+            "OCO_AI_PROVIDER",
+            "OCO_MODEL",
+            "OCO_LANGUAGE",
+            "OCO_EMOJI",
+            "OCO_DESCRIPTION",
+        ] {
+            assert_eq!(get(key), None, "{key} must stay the user's");
+        }
+    }
 
     #[test]
     fn commented_single_line_message() {

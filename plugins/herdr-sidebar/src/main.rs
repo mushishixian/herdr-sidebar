@@ -23,6 +23,10 @@ use state::{Exit, View};
 
 /// How often the source-control view re-reads `git status` while idle.
 const REFRESH_EVERY: Duration = Duration::from_millis(1500);
+/// How often to look for a MOVED branch (one small `HEAD` read per repo, no git
+/// process): a checkout coming from a branch popup or a terminal lands on screen
+/// within a few hundred ms instead of at the next full status poll.
+const BRANCH_POLL: Duration = Duration::from_millis(300);
 const ANIMATION_FRAME: Duration = Duration::from_millis(120);
 /// While a popup is open, how often to check the pane still has focus.
 const POPUP_FOCUS_POLL: Duration = Duration::from_millis(200);
@@ -215,7 +219,7 @@ fn main() -> std::io::Result<()> {
         Some(other) => {
             eprintln!("herdr-sidebar: unknown argument `{other}`");
             eprintln!(
-                "usage: herdr-sidebar [--view explorer|git|--preview [ctl]|--run-custom-editor|--git-popup[-open] switch|rename|merge|history|--file-popup[-open]|--search-popup[-open]|--replace-popup-open|--ensure|--toggle|--toggle-git|--show-explorer|--show-search|--show-git|--quick-open|--launch-decision [git]|--focused-pane|--pane-has-token <id>|--open-plan|--focused-tab|--auto-open|--focus-on-open|--dock-right]"
+                "usage: herdr-sidebar [--view explorer|git|--preview [ctl]|--run-custom-editor|--git-popup[-open] switch|new|rename|merge|history|--file-popup[-open]|--search-popup[-open]|--replace-popup-open|--ensure|--toggle|--toggle-git|--show-explorer|--show-search|--show-git|--quick-open|--launch-decision [git]|--focused-pane|--pane-has-token <id>|--open-plan|--focused-tab|--auto-open|--focus-on-open|--dock-right]"
             );
             std::process::exit(2);
         }
@@ -572,6 +576,10 @@ fn run_explorer(
             ANIMATION_FRAME
         } else if app.has_transient_popup() {
             POPUP_FOCUS_POLL
+        } else if app.is_refreshing_decorations() {
+            // A refresh kicked by a moved branch is in flight on a worker: come
+            // back for its result quickly instead of waiting out the idle poll.
+            BRANCH_POLL
         } else {
             Duration::from_millis(500)
         };
@@ -619,7 +627,9 @@ fn run_scm(
     let mut last_tick = std::time::Instant::now();
     loop {
         terminal.draw(|frame| app.draw(frame))?;
-        let mut timeout = REFRESH_EVERY.saturating_sub(last_tick.elapsed());
+        let mut timeout = REFRESH_EVERY
+            .saturating_sub(last_tick.elapsed())
+            .min(BRANCH_POLL);
         if app.is_syncing() || app.is_ai_commit_busy() {
             timeout = timeout.min(ANIMATION_FRAME);
         }
@@ -660,6 +670,7 @@ fn run_scm(
         app.flush_pending_width();
         app.poll_picker();
         app.dismiss_popups_if_unfocused();
+        app.poll_branch();
         if last_tick.elapsed() >= REFRESH_EVERY {
             app.tick();
             last_tick = std::time::Instant::now();

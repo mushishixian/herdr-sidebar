@@ -127,6 +127,7 @@ moves the copy aside.
 | `ctrl+alt+f` | Search in files popup (file contents, live preview; opens at the matching line) |
 | `ctrl+alt+e` | Replace in files popup (the search popup with a Replace row: Ctrl+R replaces the selected item, Alt+Enter replaces all, after a y/N prompt) |
 | `ctrl+alt+c` | Git: switch branch (popup; type a new name to create) |
+| `ctrl+alt+n` | Git: new branch — name prompt (popup), branched from HEAD and switched to |
 | `ctrl+alt+r` | Git: rename current branch (popup) |
 | `ctrl+alt+x` | Git: merge a branch into the current one (popup) |
 | `ctrl+alt+p` | Git: pull (background, progress toasts) |
@@ -219,6 +220,16 @@ workspace's status (symbols style: `◐` working, `×` blocked, `✓` done, `○
 cell, so `dotfiles/config/herdr/config.toml` adds a **bold stand-alone word line**
 for busy spaces only (`[ui.sidebar.spaces]` rows with `state_text` plus `hide`
 rules for idle/unknown), keeping the usual branch/git line underneath.
+
+**That block only reaches the rail if `~/.config/herdr/config.toml` is the installer's
+symlink.** Replace that file with your own config (a personal keymap file is the common
+case) and herdr silently falls back to its defaults: `status_indicators = "dots"`, where
+working / blocked / done are all a `●` and only the colour differs, plus two rows
+(`["state_icon", "workspace"]`, `["branch", "git_status"]`) with no word line. The status
+data is still correct — `herdr workspace list` reports `agent_status = working` — it is
+just unreadable. Merge `[ui] status_indicators = "symbols"` and the
+`[ui.sidebar.spaces] rows` table into your file, then `herdr server reload-config`
+(applies to a LIVE client, no restart).
 
 That word line also names the agents in the space, because a bare `◐` does not say
 *what* is running. herdr has no built-in "agent name" token, but it renders any
@@ -395,6 +406,9 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | 2c02d3e | **Search popup + line-aware open** | `src/search_popup.rs`; the engine moved to lib `src/content_search.rs` (shared with the sidebar Search view); preview highlighted with `syntax::highlight_lines`; `actions::open_in_editor_inline_at` (`{line}` placeholder, or `file:line` for `fresh` / `fresh-open`). |
 | c5661c3 | **Replace popup + conflict routing** | Replace mode of the search popup (`HERDR_SIDEBAR_SEARCH_MODE=replace`, action `replace-popup`; `content_search::replace_in_text` / `apply_replacements`: engine-identical matching, `$1` expansion in regex mode, line endings / BOM / permissions kept, atomic write, root-confined). Conflicted (`!`) files open in the editor without Live Diff (`editor_live_diff`). |
 | 261bccb | **Dotfiles folded into this repo** | The standalone `~/code/dotfiles` now lives in `dotfiles/`; the upstream patch set was dropped. `dotfiles/herdr-sidebar/build.sh` builds this checkout and points herdr's `herdr-sidebar` registration at it. |
+| *uncommitted* | **Commit button offers a pull; both oco token ceilings pinned** | When the branch is behind its upstream AND something is staged, ✓ Commit reads `✓ Commit · N↓` and asks "Pull first?" (`y` = plain `git pull --no-rebase`, then commit; anything else commits at once); a failed pull never commits. The AI-commit path never asks. `Git::pull` must pass `--no-rebase` because this machine's `dotfiles/config/git/dotfiles.gitconfig` sets `pull.rebase=true`, which refuses to run with a staged index. `OCO_TOKENS_MAX_OUTPUT=500` is now pinned next to `OCO_TOKENS_MAX_INPUT=24000`, since oco subtracts it from the input budget. |
+| *uncommitted* | **New branch popup** | `--git-popup[-open] new` (`Op::New`, `ctrl+alt+n`): an input-only popup that creates the branch from HEAD and switches to it (`git switch -c`, name judged by `git check-ref-format --branch`, no stash/force), with the error in the footer instead of a toast. Manifest pane `git-new-branch`, action `git-new-branch`. |
+| *uncommitted* | **Instant branch reaction** | `Git::head_signature` (the git dir's `HEAD`; resolves a worktree's `.git` FILE) is compared a few times a second by both views, so a checkout / create / rename from a popup or a terminal refreshes the SCM header and the Explorer's footer/decorations at once instead of waiting for the 1.5 s status poll or `DECO_REFRESH`. Measured: ~65 ms (SCM), ~0.5 s (Explorer), both were 2-3 s. |
 | *uncommitted* | **Inline editor failures are reported** | A click only reports the SPAWN, and the editor runs with null stdio, so a command that died on the spot looked like a successful open. `spawn_inline_editor` now reaps the child on a thread and `actions::take_editor_failures` hands a non-zero exit within 30 s to Explorer's notice / Source Control's flash (`custom editor failed: <program> exited with <status>`). |
 | *uncommitted* | **IDE layer: jq ≥ 1.6 keyword fix** | `lib.sh`, `ide-save-sizes` and `fresh-to-agent` named a jq variable `label`, which jq 1.6+ parses as its `label` keyword (`$label` → "syntax error, unexpected label"), so EVERY pane lookup failed on Linux/WSL and a file click built no editor. Variables are `$lbl` now; `fresh-open` also reports a failed `herdr-ide` instead of exiting 3 silently. |
 | *uncommitted* | **Media opens in the preview; previews cover Fresh; Agent pane title** | `viewer::is_media_file` keeps pictures and videos out of the custom editor (Explorer click, Ctrl+Q popup; Source Control's `diff_opens_in_editor` media flag). Preview host: `fresh-ide` runs a host loop in the Fresh pane (token `hs-preview-host`); the sidebar writes `<sidebar state dir>/preview-host/<pane>.req`, the host claims it by rename, and the viewer runs there with `HERDR_SIDEBAR_PREVIEW_HOSTED=1`; `viewer::uncover_host` runs before the editor launches. Agent pane title: `ide-agent-title` + `shell/agent-title.zsh` (zsh preexec/precmd) → `pane report-metadata --title "◆ CLAUDE"`; language servers: `dotfiles/install-lsp.sh` (default in the installer) + Fresh `lsp` auto_start. |
@@ -416,8 +430,10 @@ On failure the changes stay staged and the message box is left alone.
 
 Big or generated files are shortened for the AI only: the first 40 lines of a new file, or the
 first hunks of a changed one, and generated/vendored paths (`*.min.js`, `*.map`, `dist/`, …) or
-anything over about 12 KB. The commit still contains every change. The sidebar also sends oco
-`OCO_TOKENS_MAX_INPUT=24000` whatever `~/.opencommit` says, so oco never splits the diff into
+anything over about 12 KB. The commit still contains every change. The sidebar also sends oco BOTH
+token ceilings whatever `~/.opencommit` says — `OCO_TOKENS_MAX_INPUT=24000` so oco never splits
+the diff into several messages, and `OCO_TOKENS_MAX_OUTPUT=500` (oco's own default) because oco
+subtracts the output ceiling from that input budget.
 several messages. When a file was shortened the flash says how many ("N large file(s)
 summarised for the AI").
 

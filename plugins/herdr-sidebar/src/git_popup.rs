@@ -45,6 +45,7 @@ pub enum Op {
     Switch,
     Rename,
     Merge,
+    New,
     History,
 }
 
@@ -55,6 +56,7 @@ impl Op {
             "rename" => Some(Op::Rename),
             "merge" => Some(Op::Merge),
             "history" => Some(Op::History),
+            "new" => Some(Op::New),
             _ => None,
         }
     }
@@ -66,20 +68,21 @@ impl Op {
             Op::Rename => "git-rename",
             Op::Merge => "git-merge",
             Op::History => "git-line-history",
+            Op::New => "git-new-branch",
         }
     }
 
     /// Outer popup size: list popups get room, rename is one input line.
     fn popup_size(self) -> (serde_json::Value, serde_json::Value) {
         match self {
-            Op::Rename => (serde_json::json!("60%"), serde_json::json!(8)),
+            Op::Rename | Op::New => (serde_json::json!("60%"), serde_json::json!(8)),
             Op::History => (serde_json::json!("90%"), serde_json::json!("90%")),
             _ => (serde_json::json!("70%"), serde_json::json!("70%")),
         }
     }
 }
 
-const USAGE: &str = "expected switch, rename, merge or history";
+const USAGE: &str = "expected switch, new, rename, merge or history";
 
 // ── action side ─────────────────────────────────────────────────────────
 
@@ -264,6 +267,7 @@ impl App {
                 Err(error) => app.error = Some(error),
             },
             Op::History => {}
+            Op::New => {}
         }
         if op == Op::Merge && app.current.is_none() {
             app.message(
@@ -331,7 +335,7 @@ impl App {
     }
 
     fn edit_key(&mut self, key: KeyEvent, ctrl: bool) {
-        let rows = if self.op == Op::Rename {
+        let rows = if matches!(self.op, Op::Rename | Op::New) {
             0
         } else {
             self.rows().len()
@@ -365,7 +369,7 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) {
-        if !matches!(self.screen, Screen::Edit) || self.op == Op::Rename {
+        if !matches!(self.screen, Screen::Edit) || matches!(self.op, Op::Rename | Op::New) {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                 && !matches!(self.screen, Screen::Edit)
                 && !matches!(
@@ -407,6 +411,25 @@ impl App {
     // ── operations ──────────────────────────────────────────────────────
     fn activate(&mut self, index: usize) {
         let Some(git) = self.git.clone() else { return };
+        if self.op == Op::New {
+            let name = match new_branch_name(&self.input) {
+                Ok(name) => name,
+                Err(error) => {
+                    self.error = Some(error);
+                    return;
+                }
+            };
+            // Branches from HEAD and switches to it, like the switch popup's
+            // "+ <name>" row; git judges the name (create_branch validates).
+            match git.create_branch(&name) {
+                Ok(()) => {
+                    self.toast = Some(("Branch created".into(), format!("switched to {name}")));
+                    self.done = true;
+                }
+                Err(error) => self.error = Some(error),
+            }
+            return;
+        }
         if self.op == Op::Rename {
             let Some(old) = self.current.clone() else {
                 return;
@@ -522,6 +545,7 @@ impl App {
 
         let title = match self.op {
             Op::Switch => "Switch branch",
+            Op::New => "New branch",
             Op::Rename => "Rename branch",
             Op::Merge => "Merge into current branch",
             Op::History => "Line history",
@@ -600,10 +624,10 @@ impl App {
         }
 
         // Input line.
-        let prompt = if self.op == Op::Rename {
-            " new name › "
-        } else {
-            " › "
+        let prompt = match self.op {
+            Op::Rename => " new name › ",
+            Op::New => " new branch name › ",
+            _ => " › ",
         };
         let room = width.saturating_sub(prompt.len() + 2);
         let mut input = vec![
@@ -611,7 +635,7 @@ impl App {
             Span::raw(input_tail(&self.input, room)),
             Span::styled("█", dim),
         ];
-        if self.input.is_empty() && self.op != Op::Rename {
+        if self.input.is_empty() && !matches!(self.op, Op::Rename | Op::New) {
             let placeholder = if self.op == Op::Switch {
                 "type to filter, or a new branch name"
             } else {
@@ -628,6 +652,7 @@ impl App {
             Op::Switch => " ↑↓ select · ⏎ switch · esc cancel",
             Op::Merge => " ↑↓ select · ⏎ merge… · esc cancel",
             Op::Rename => " ⏎ rename · esc cancel",
+            Op::New => " ⏎ create and switch · esc cancel",
             Op::History => "",
         };
         let footer_line = match &self.error {
@@ -639,7 +664,7 @@ impl App {
         };
         frame.render_widget(Paragraph::new(footer_line), footer);
 
-        if self.op == Op::Rename {
+        if matches!(self.op, Op::Rename | Op::New) {
             return;
         }
 
@@ -741,6 +766,18 @@ fn parse_history_target(file: Option<&str>, lines: Option<&str>) -> Result<Histo
         _ => Err(format!(
             "{HISTORY_LINES_ENV} must be 1-based START,END with START <= END (got {lines:?})"
         )),
+    }
+}
+
+/// The name typed into the new-branch popup, trimmed. A blank name is refused
+/// here (with a message the footer can show) instead of asking git about an
+/// empty ref; everything else is git's own `check-ref-format` verdict.
+fn new_branch_name(input: &str) -> Result<String, String> {
+    let name = input.trim();
+    if name.is_empty() {
+        Err("type a branch name".into())
+    } else {
+        Ok(name.to_string())
     }
 }
 
@@ -1325,11 +1362,31 @@ mod tests {
             ("switch", "git-switch"),
             ("rename", "git-rename"),
             ("merge", "git-merge"),
+            ("new", "git-new-branch"),
             ("history", "git-line-history"),
         ] {
             assert_eq!(Op::from_flag(flag).unwrap().entrypoint(), entry);
         }
         assert!(Op::from_flag("push").is_none());
         assert_eq!(Op::History.popup_size().1, serde_json::json!("90%"));
+    }
+
+    #[test]
+    fn new_branch_name_is_trimmed_and_never_blank() {
+        assert_eq!(new_branch_name("  feature/x "), Ok("feature/x".to_string()));
+        assert_eq!(new_branch_name(""), Err("type a branch name".to_string()));
+        assert_eq!(new_branch_name("   "), Err("type a branch name".to_string()));
+    }
+
+    /// The new-branch popup is an input, not a picker: it takes the rename
+    /// popup's one-line size, and typing only records text (the branch is made
+    /// on Enter, through `Git::create_branch`).
+    #[test]
+    fn new_branch_popup_is_input_only() {
+        assert_eq!(Op::New.popup_size(), Op::Rename.popup_size());
+        let mut new = app(Op::New);
+        new.input = "feature/x".into();
+        assert!(matches!(new.screen, Screen::Edit));
+        assert!(new.toast.is_none(), "typing must not act");
     }
 }

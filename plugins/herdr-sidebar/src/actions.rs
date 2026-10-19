@@ -1241,9 +1241,13 @@ mod tests {
     /// The click path only reports a successful SPAWN, and the child's stdio is
     /// null: an editor command that dies immediately (a helper script whose own
     /// tool is missing) used to look exactly like a successful open.
+    ///
+    /// ONE test for the whole (process-global) failure queue: the cases share it,
+    /// so separate `#[test]`s race each other under the parallel test runner and
+    /// fail intermittently.
     #[cfg(unix)]
     #[test]
-    fn inline_editor_that_dies_immediately_is_reported_once() {
+    fn inline_editor_failures_are_reported_once_and_the_queue_is_bounded() {
         let _ = take_editor_failures();
         let child = std::process::Command::new("sh")
             .args(["-c", "exit 3"])
@@ -1261,13 +1265,9 @@ mod tests {
         );
         // Drained: the view shows each failure once.
         assert!(take_editor_failures().is_empty());
-    }
 
-    /// The queue is bounded and keeps the newest, so a view that never polls
-    /// cannot grow it forever while the failure the user just caused survives.
-    #[test]
-    fn editor_failures_skip_success_and_stay_bounded() {
-        let _ = take_editor_failures();
+        // Bounded and newest-kept: a view that never polls cannot grow it
+        // forever while the failure the user just caused survives.
         for n in 0..(EDITOR_FAILURES_MAX + 3) {
             push_editor_failure(format!("fail {n}"));
         }

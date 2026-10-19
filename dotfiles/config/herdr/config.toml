@@ -134,6 +134,12 @@ type = "plugin_action"
 command = "herdr-sidebar.git-merge-branch"
 description = "git: merge a branch into current"
 
+[[keys.command]]
+key = "ctrl+alt+n"
+type = "plugin_action"
+command = "herdr-sidebar.git-new-branch"
+description = "git: new branch from HEAD (popup)"
+
 # ── Git remote operations (with async progress toast) ──────────────────
 [[keys.command]]
 key = "ctrl+alt+p"

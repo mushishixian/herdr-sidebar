@@ -101,8 +101,13 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   (`truncate_hunks`, reset to HEAD then `git apply --cached`); any other shrunk file (deleted, single-hunk
   modified, rename, copy) is hidden. If nothing is left to diff, the largest hidden modified file is
   staged shortened; if that still gives nothing, oco reads the real index. The real index is never
-  written. The sidebar always passes `OCO_TOKENS_MAX_INPUT=24000` (`MAX_INPUT_TOKENS`, env beats
-  `~/.opencommit`), well above `TOTAL_BYTES`'s token count, so oco never chunks. `Generated.summarised`
+  written. **Both** token ceilings are pinned (`pinned_oco_env`, env beats `~/.opencommit`):
+  `OCO_TOKENS_MAX_INPUT=24000` (`MAX_INPUT_TOKENS`, well above `TOTAL_BYTES`'s token count, so
+  oco never chunks) and `OCO_TOKENS_MAX_OUTPUT=500` (`MAX_OUTPUT_TOKENS`, oco's own default)
+  because oco SUBTRACTS the output ceiling from the input budget — a machine whose
+  `~/.opencommit` asks for a big output limit re-shrinks the diff budget right back and takes
+  the chunk path, and oco rejects values "much higher" than 500 anyway. Everything else
+  (provider, model, language, emoji, description) stays the user's. `Generated.summarised`
   lists the affected files; the flash reads "N large file(s) summarised for the AI". The commit message
   itself is never changed. Measured: the 1.8 MB case 111 s → 2.7 s (one message); a 146 KB real diff
   (7 files shortened) 4.4 s.
@@ -1074,6 +1079,17 @@ HACKING.md — budget time for that before promising a patched build.
 - **Sync Changes** (`S` or the ⇅ button, shown only when ahead/behind ≠ 0): `pull --rebase
   --autostash` then `push`, on a background thread polled from tick(). Ahead/behind parse
   from the porcelain `## branch...upstream [ahead N, behind M]` header.
+- **The ✓ Commit button offers a pull when the branch is behind.** Behind ≠ 0 AND something
+  staged (so the button reads `✓ Commit · N↓` rather than Sync Changes) makes a click / ⏎ open
+  `Overlay::ConfirmPullThenCommit` ("&lt;branch&gt; is N commit(s) behind its upstream. Pull
+  first?"): `y` runs a plain `git pull` on a worker and then commits, anything else commits
+  immediately. `commit_with_pull_offer` is the only entry point that asks — the AI-commit path
+  and `Cmd::CommitNow` call `commit_repo` directly — and a failed pull never commits (the branch
+  is not where the user thinks it is). `Git::pull` MUST pass `--no-rebase`: this repo's own
+  `dotfiles/config/git/dotfiles.gitconfig` sets `pull.rebase=true` machine-wide, and a rebase
+  pull REFUSES to run while anything is staged — exactly this state (found live). The behind
+  count comes from git's remote-tracking refs, so it is only as fresh as the last `git fetch`
+  (Sync, or a drawer's fetch); the button does not fetch on its own.
 - Branch labels are actions, not decoration: clicking the Source Control panel header, a
   multi-repo header's branch label, or either view's Git footer opens the shared `BranchPicker`.
   Local choices use a normal checkout; a remote choice creates its local tracking branch.
@@ -1167,6 +1183,22 @@ button only fires on the hovered row (a tap folds instead); keyboard parity is
 ←/→ fold and `m` for a Stage/Unstage Folder menu.
 The branch picker supports New branch (#77); branch deletion first uses `-d`
 and asks separately before `-D` (#78). Keep `--` before branch names in both paths.
+- Branch popups are ONE op registry: `Op` in `src/git_popup.rs` (switch / new / rename /
+  merge / history), each with an `entrypoint()` that MUST equal its `[[panes]]` id in
+  `herdr-plugin.toml`. `--git-popup-open <op>` resolves the focused pane's cwd, passes it in
+  `HERDR_SIDEBAR_SPAWN_CWD`, and opens the pane via `plugin.pane.open` placement `popup`.
+  `new` (`ctrl+alt+n`) is the input-only creation popup: a name, `git switch -c` from HEAD,
+  the failure in the footer instead of a toast. The switch popup's "+ type a new name" row
+  uses the same `Git::create_branch`, so the two cannot drift.
+- **A moved branch is detected by reading the git dir's `HEAD`, never by polling git.** The
+  branch popups are separate processes, so they cannot tell the sidebar; `Git::head_signature`
+  (one small file, and it resolves a worktree's `.git` FILE too) is compared by both views:
+  `scm_app::App::poll_branch` on the SCM loop, `explorer_app::App::poll_branch` from its tick.
+  A change refreshes at once — the SCM loop waits `BRANCH_POLL` (300 ms) instead of
+  `REFRESH_EVERY` (1.5 s), and the Explorer's 500 ms idle poll drops to `BRANCH_POLL` while a
+  decoration refresh is on its worker (`is_refreshing_decorations`). Measured live: SCM header
+  ~65 ms, Explorer footer ~0.5 s (both were 2-3 s). Never put a `git` process on that fast
+  path: it runs several times a second per repo.
 Preview Space/`b` page down/up (#73); Shift+Space is indistinguishable in legacy
 terminal keyboard mode and must not be used as the sole page-up gesture.
 

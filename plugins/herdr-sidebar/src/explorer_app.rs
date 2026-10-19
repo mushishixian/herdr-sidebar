@@ -458,6 +458,9 @@ pub struct App {
     /// Every repository the tree can see — the containing one plus child
     /// repos, exactly the set the Source Control view shows.
     repos: Vec<Git>,
+    /// Each repo's git dir `HEAD` as last seen, parallel to [`Self::repos`]: a
+    /// change means the branch moved (popup, terminal `git switch`).
+    repo_sigs: Vec<Option<String>>,
     /// Git status decorations for the visible rows (issue #19).
     deco: Decorations,
     /// Last decoration refresh, throttling the git polling.
@@ -558,6 +561,7 @@ impl App {
         } else {
             Vec::new()
         };
+        let repo_sigs: Vec<Option<String>> = repos.iter().map(Git::head_signature).collect();
         let mut app = Self {
             tree,
             rows,
@@ -593,6 +597,7 @@ impl App {
             picking: None,
             cwd_follower,
             repos,
+            repo_sigs,
             deco: Decorations::empty(),
             // Overwritten when the first background refresh is queued below.
             last_deco: std::time::Instant::now(),
@@ -626,6 +631,7 @@ impl App {
     /// on their own. Self-throttling, so the event loop may call it freely.
     pub fn tick(&mut self) {
         self.collect_editor_failures();
+        self.poll_branch();
         self.sync_shared_settings();
         self.sync_shared_tree();
         self.collect_quick_index();
@@ -645,6 +651,24 @@ impl App {
     fn collect_editor_failures(&mut self) {
         if let Some(failure) = actions::take_editor_failures().pop() {
             self.notice = Some(failure);
+        }
+    }
+
+    /// Cheap branch-moved probe (one small file per repo, no git process). A
+    /// popup in its own process or a `git switch` in a terminal rewrites the git
+    /// dir's HEAD, and the decorations + footer then refresh at once instead of
+    /// waiting out [`DECO_REFRESH`].
+    fn poll_branch(&mut self) {
+        let mut moved = false;
+        for (git, sig) in self.repos.iter().zip(self.repo_sigs.iter_mut()) {
+            let now = git.head_signature();
+            if now != *sig {
+                *sig = now;
+                moved = true;
+            }
+        }
+        if moved {
+            self.request_decorations(true);
         }
     }
 
@@ -881,6 +905,7 @@ impl App {
         } else {
             Vec::new()
         };
+        self.repo_sigs = self.repos.iter().map(Git::head_signature).collect();
     }
 
     /// The decoration letter for a row, if any (see [`Decorations::letter`]).
@@ -1203,6 +1228,13 @@ impl App {
                     | Overlay::ConfirmDelete { .. }
             )
         )
+    }
+
+    /// A decoration refresh is on a worker right now. The event loop then waits
+    /// much less between ticks, so a branch the user just switched lands on
+    /// screen without waiting out a full idle poll interval.
+    pub fn is_refreshing_decorations(&self) -> bool {
+        self.deco_rx.is_some()
     }
 
     /// Fallback for hosts that don't forward focus reports: while a popup is

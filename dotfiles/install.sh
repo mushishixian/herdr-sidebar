@@ -110,6 +110,7 @@ for script in fresh-open fresh-ide fresh-restart herdr-ide herdr-ide-term herdr-
   link "herdr-plugins/ide/bin/$script" "$BIN/$script"
 done
 link bin/wsl-open "$BIN/wsl-open"
+link bin/phpactor-lsp "$BIN/phpactor-lsp"
 if ! command -v xdg-open >/dev/null || [ "$(readlink -f "$(command -v xdg-open)")" = "$DOTFILES/bin/wsl-open" ]; then
   link bin/wsl-open "$BIN/xdg-open"
 fi

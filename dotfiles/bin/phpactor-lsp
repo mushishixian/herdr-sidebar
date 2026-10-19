@@ -1,0 +1,14 @@
+#!/bin/sh
+# phpactor 要求 PHP ^8.2，但系统默认的 `php` 是 7.2（老项目还在用），
+# 而 phar 的 shebang 是 `#!/usr/bin/env php`，所以直接跑会立刻退出。
+# 这里挑一个 >=8.2 且带 mbstring 的 CLI 来跑 phar，绕开默认 php。
+PHAR="$HOME/.local/bin/phpactor"
+
+for cand in php8.4 php8.5 php8.3 php8.2; do
+  command -v "$cand" >/dev/null 2>&1 || continue
+  "$cand" -m 2>/dev/null | grep -qx mbstring || continue
+  exec "$cand" "$PHAR" "$@"
+done
+
+echo "phpactor-lsp: 没有找到可用的 PHP >= 8.2 (需要 mbstring/tokenizer/posix)" >&2
+exit 127
