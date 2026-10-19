@@ -44,6 +44,39 @@ daemon_alive() {
   fresh --cmd daemon list 2>/dev/null | sed -n 's/^  //p' | grep -qx -- "$1"
 }
 
+# Where the explicit Agent-column choice lives (first line = the command).
+agent_config_file() {
+  local dir=''
+  dir=$("$HERDR" plugin config-dir dotfiles-ide 2>/dev/null) || dir=''
+  [ -n "$dir" ] || dir=${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/dotfiles-ide
+  printf '%s/agent\n' "$dir"
+}
+
+# The IDE's Agent column command. Precedence: the plugin's `agent` file (the
+# user's explicit choice), then $IDE_AGENT, then the first agent that is
+# actually INSTALLED — pi before claude, because claude is not a given on a new
+# machine and typing a missing binary into a pane just leaves a dead shell that
+# looks like the IDE failed. Nothing installed → "none": no Agent column.
+agent_command() {
+  local file candidate
+  file=$(agent_config_file)
+  if [ -s "$file" ]; then
+    head -n1 "$file"
+    return 0
+  fi
+  if [ -n "${IDE_AGENT:-}" ]; then
+    printf '%s\n' "$IDE_AGENT"
+    return 0
+  fi
+  for candidate in pi claude; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf 'none\n'
+}
+
 # Daemon for project root $1 in workspace $2. Each workspace gets its own
 # editor: the project's daemon, unless a Fresh pane in another workspace
 # already uses it, then the first free "<daemon>-sN" (N = 2, 3, ...). A

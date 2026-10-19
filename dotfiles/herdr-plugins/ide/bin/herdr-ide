@@ -15,7 +15,9 @@
 # Running it again just focuses the editor.
 #
 # Agent command: first line of $(herdr plugin config-dir dotfiles-ide)/agent,
-# else $IDE_AGENT, else "claude". "none" leaves the right column out.
+# else $IDE_AGENT, else the first INSTALLED agent (pi before claude — claude is
+# not a given on a new machine). "none" leaves the right column out; that is
+# also what you get when neither agent is installed.
 set -euo pipefail
 here=$(dirname "$(readlink -f "$0")")
 . "$here/lib.sh"
@@ -45,9 +47,7 @@ name=$(ide_daemon_for "$root" "$cur_ws")
 # Read now: the hooks save the default layout while this one is being built.
 saved=$(saved_entry "$name")
 
-agent_cmd=${IDE_AGENT:-claude}
-agent_file="$HOME/.config/herdr/plugins/config/dotfiles-ide/agent"
-[ -s "$agent_file" ] && agent_cmd=$(head -n1 "$agent_file")
+agent_cmd=$(agent_command)
 
 split() { # pane direction ratio -> new pane id
   "$HERDR" pane split "$1" --direction "$2" --ratio "$3" --cwd "$root" \

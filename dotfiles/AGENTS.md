@@ -113,6 +113,13 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   `agent_status = working`. Symptom to recognise: "左上角不显示 agent 在 working". Merge the
   `[ui]` + `[ui.sidebar.spaces]` block into the personal file, then
   `herdr server reload-config` (applies to a LIVE client).
+- **The Agent column does not assume `claude`.** `lib.sh`'s `agent_command()` resolves the
+  command in this order: the plugin's `agent` file (`$(herdr plugin config-dir dotfiles-ide)/agent`,
+  the user's explicit choice) → `$IDE_AGENT` → the first agent that is actually INSTALLED,
+  **pi before claude** — typing a missing binary into a pane leaves a dead shell that reads as
+  "the IDE is broken" (user-reported on a fresh machine). Neither installed → `none`, so no
+  Agent column. Get the config dir from the CLI, not a hardcoded `~/.config/herdr`: a user
+  with `XDG_CONFIG_HOME` set has a different path.
 
 ## Commits
 
