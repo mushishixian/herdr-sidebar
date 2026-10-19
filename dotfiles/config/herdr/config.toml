@@ -32,16 +32,20 @@ status_indicators = "symbols"
 # comes from herdr's agent-state hooks (`herdr integration status`; the
 # installer installs the pi and Claude Code ones).
 [ui.sidebar.spaces]
+# Two lines per space and no blank line between spaces: the project name carries
+# the space's agents right beside it, the branch line stays underneath. (The old
+# three-line form put the agents + state word on a row of their own, which is
+# what made the rail tall; the state icon still says busy/idle.)
+row_gap = 0
 rows = [
-  ["state_icon", "workspace"],
-  ["$agents", { token = "state_text", bold = true, rules = [
-      { equals = "idle", hide = true },
-      { equals = "unknown", hide = true },
-      { equals = "working", fg = "#f5c542" },
-      { equals = "blocked", fg = "#ff5f5f" },
-      { equals = "done", fg = "#5fd7c4" },
-  ] }],
-  ["branch", "git_status"],
+  # The state glyph is one terminal cell — there is no "bigger"; bold is the
+  # strongest emphasis the terminal gives a single character.
+  [{ token = "state_icon", bold = true }, { token = "workspace", bold = true, fg = "#e6edf3" }, "$agents"],
+  # $pad = 零宽空格，由 herdr-sidebar 每 5s 上报（src/agent_tokens.rs）：herdr 会
+  # 把"所有 token 都没值"的行整行丢掉，非 git 的 space 因此比邻居矮一行、很乱。
+  # 只在仓库外（cwd 向上找不到 .git）的 space 上报，git 项目上报 null，
+  # 所以不会给它们多出尾部的 " · " 分隔符。
+  ["branch", "git_status", "$pad"],
 ]
 
 [ui.toast]

@@ -10,23 +10,52 @@
 //! one `agents` token per space. The dotfiles config renders it as
 //! `["$agents", <styled state_text>]`, i.e. `claude` (idle) or `pi · working`.
 //!
+//! The same heartbeat also reports a `pad` token, rendered as `$pad` on the
+//! `branch`/`git_status` row. herdr drops a row whose tokens are all empty, so
+//! a Space whose project is not a git repository would otherwise be one line
+//! shorter than its neighbours; `$pad` holds the row open with an invisible
+//! zero-width space and is cleared (`null`) wherever a repository exists.
+//!
 //! Public surface:
 //!
 //! - [`describe_agents`] — pure: `pane.list` JSON → workspace id → value.
-//! - [`report_params`] — pure: the `workspace.report_metadata` params object.
+//! - [`describe_pads`] — pure: `pane.list` JSON → workspace id → `$pad` value.
+//! - [`report_params`] — pure: the `workspace.report_metadata` params object (both tokens).
 //! - [`AgentTokens::report_if_due`] — the 5 s-throttled reporter both sidebar
 //!   apps call from their heartbeat. Only the sidebar apps report; the ensure
 //!   sidecar and the preview viewer never do.
 //!
 //! Contract (also documented in the root `AGENTS.md`): token key `agents`,
-//! `source = "herdr-sidebar"`, `ttl_ms` 20 s, cleared with an explicit `null`,
-//! value format `label · label` with busy agents first.
+//! `source = "herdr-sidebar"`, `ttl_ms` 20 s, value format `label · label` with
+//! busy agents first, and [`NO_AGENT`] (`-`) for a space with no agent pane.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// Metadata token key the rail renders as `$agents`.
 pub const TOKEN: &str = "agents";
+
+/// Metadata token key the rail renders as `$pad`.
+///
+/// herdr drops a rail row when none of its tokens have a value ("a row
+/// disappears when none of its tokens have a value", configuration.mdx), so a
+/// Space whose project is not a git repository loses the `branch`/`git_status`
+/// row and renders one line shorter than its neighbours. `$pad` gives that row
+/// a value that paints nothing: a ZERO WIDTH SPACE. It is reported only for
+/// workspaces with no repository above their cwd, and cleared (`null`) for the
+/// rest, so a git Space never grows a trailing ` · ` separator.
+pub const PAD_TOKEN: &str = "pad";
+
+/// The value of [`PAD_TOKEN`]: invisible, non-whitespace (Rust's `trim` does
+/// not strip U+200B), and non-empty, which is all herdr needs to keep the row.
+pub const PAD_VALUE: &str = "\u{200B}";
+
+/// The `agents` value for a space with no agent pane at all.
+///
+/// Reporting `null` (the pre-2026-10 behaviour) leaves the slot after the
+/// project name empty, which reads as a rendering glitch rather than as "no
+/// agent here"; a lone dash says it on purpose.
+pub const NO_AGENT: &str = "-";
 
 /// `workspace.report_metadata` source id (herdr shows it nowhere, but tokens
 /// from different sources merge into the same workspace map).
@@ -110,14 +139,67 @@ pub fn describe_agents(pane_list_json: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// `pane.list` JSON → workspace id → the `$pad` value for that workspace.
+///
+/// Only workspaces with NO git repository above their cwd are included; the
+/// caller reports `null` for the others. The cwd is the first pane's
+/// `foreground_cwd` (where the user actually is) falling back to `cwd`, and the
+/// repository test is the same upward `.git` walk git itself does — a directory
+/// or the `gitdir:` file a worktree checkout uses both count.
+pub fn describe_pads(pane_list_json: &str) -> BTreeMap<String, String> {
+    let Some(parsed) = parse(pane_list_json) else {
+        return BTreeMap::new();
+    };
+    // workspace → cwd of its first pane (None when no pane reported one)
+    let mut by_workspace: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for pane in panes(&parsed) {
+        let Some(workspace_id) = non_empty(pane.get("workspace_id")) else {
+            continue;
+        };
+        let cwd = non_empty(pane.get("foreground_cwd"))
+            .or_else(|| non_empty(pane.get("cwd")))
+            .map(str::to_string);
+        by_workspace.entry(workspace_id.to_string()).or_insert(cwd);
+    }
+
+    by_workspace
+        .into_iter()
+        .filter(|(_, cwd)| cwd.as_deref().is_none_or(|cwd| !in_git_repo(cwd)))
+        .map(|(workspace, _)| (workspace, PAD_VALUE.to_string()))
+        .collect()
+}
+
+/// Does `cwd` or any ancestor hold a `.git` entry?
+fn in_git_repo(cwd: &str) -> bool {
+    let mut path = std::path::Path::new(cwd);
+    loop {
+        if path.join(".git").exists() {
+            return true;
+        }
+        match path.parent() {
+            Some(parent) => path = parent,
+            None => return false,
+        }
+    }
+}
+
+/// The `agents` token value for `workspace`: its agent labels, or [`NO_AGENT`].
+fn agents_or_dash<'a>(agents: &'a BTreeMap<String, String>, workspace: &str) -> &'a str {
+    agents.get(workspace).map_or(NO_AGENT, String::as_str)
+}
+
 /// The exact `workspace.report_metadata` params object for one workspace.
-/// `None` clears the token (`"agents": null`) — the API MERGES token maps, so
-/// an empty map is a no-op and a stale value would survive.
-pub fn report_params(workspace_id: &str, value: Option<&str>) -> serde_json::Value {
+/// Both tokens are always sent: `report_metadata` MERGES the map, so a stale
+/// value only goes away when it is re-sent as `null`.
+pub fn report_params(
+    workspace_id: &str,
+    agents: Option<&str>,
+    pad: Option<&str>,
+) -> serde_json::Value {
     serde_json::json!({
         "workspace_id": workspace_id,
         "source": SOURCE,
-        "tokens": { TOKEN: value },
+        "tokens": { TOKEN: agents, PAD_TOKEN: pad },
         "ttl_ms": TTL_MS,
     })
 }
@@ -137,7 +219,7 @@ impl AgentTokens {
     /// beat (or any other sidebar's) fixes a transient error.
     ///
     /// EVERY workspace seen in `pane.list` is (re)reported each beat, with
-    /// `null` for the ones that have no agent. Reporting instead of diffing
+    /// [`NO_AGENT`] for the ones that have no agent pane. Reporting instead of diffing
     /// keeps the 20 s TTL alive, so a killed sidebar's value can never outlive
     /// the TTL; and duplicate reports from the several sidebar processes of one
     /// session are harmless because the values are identical and the API merges
@@ -153,15 +235,20 @@ impl AgentTokens {
         let Ok(json) = crate::ipc::call_text("pane.list", serde_json::json!({})) else {
             return;
         };
-        let values = describe_agents(&json);
+        let agents = describe_agents(&json);
+        let pads = describe_pads(&json);
         for workspace_id in workspace_ids(&json) {
-            let value = values.get(&workspace_id);
+            let pad = pads.get(&workspace_id);
             // One failure means the socket is in trouble: stop here instead of
             // stacking another bounded-timeout round trip per workspace on the
             // event loop. The next beat re-reports every workspace anyway.
             if crate::ipc::call_text(
                 "workspace.report_metadata",
-                report_params(&workspace_id, value.map(String::as_str)),
+                report_params(
+                    &workspace_id,
+                    Some(agents_or_dash(&agents, &workspace_id)),
+                    pad.map(String::as_str),
+                ),
             )
             .is_err()
             {
@@ -289,6 +376,66 @@ mod tests {
         assert!(workspace_ids("not json").is_empty());
     }
 
+    /// A space with no agent pane says so with a dash instead of leaving an
+    /// empty slot after the project name (user-requested).
+    #[test]
+    fn an_agent_less_space_reports_a_dash() {
+        let with = describe_agents(
+            r#"{"result":{"panes":[
+                {"pane_id":"w4:p1","workspace_id":"w4","agent":"pi"},
+                {"pane_id":"w5:p1","workspace_id":"w5"}
+            ]}}"#,
+        );
+        assert_eq!(agents_or_dash(&with, "w4"), "pi");
+        assert_eq!(agents_or_dash(&with, "w5"), NO_AGENT);
+        assert_eq!(agents_or_dash(&with, "w9"), NO_AGENT);
+        assert_eq!(NO_AGENT, "-");
+        // The rail renders whatever string arrives, so the dash is what shows.
+        let params = report_params("w5", Some(agents_or_dash(&with, "w5")), None);
+        assert_eq!(params["tokens"]["agents"], "-");
+    }
+
+    #[test]
+    fn report_params_sets_and_clears_both_tokens() {
+        let set = report_params("w4", Some("claude · pi"), None);
+        assert_eq!(set["workspace_id"], "w4");
+        assert_eq!(set["source"], "herdr-sidebar");
+        assert_eq!(set["tokens"]["agents"], "claude · pi");
+        assert!(set["tokens"]["pad"].is_null());
+        assert_eq!(set["ttl_ms"], 20_000);
+
+        // Both keys are always present: report_metadata merges, so only an
+        // explicit null removes a value an earlier beat left behind.
+        let pad = report_params("w4", None, Some(PAD_VALUE));
+        assert!(pad["tokens"]["agents"].is_null());
+        assert_eq!(pad["tokens"]["pad"], PAD_VALUE);
+        assert_eq!(pad["tokens"].as_object().map(|map| map.len()), Some(2));
+    }
+
+    /// A workspace whose panes sit in a directory (or under one) with a `.git`
+    /// entry gets no pad; one with no repository above it is padded.
+    #[test]
+    fn pads_only_workspaces_without_a_repository() {
+        let root = std::env::temp_dir().join(format!("herdr-pad-test-{}", std::process::id()));
+        let repo = root.join("repo");
+        let nested = repo.join("src").join("deep");
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::create_dir_all(&plain).expect("mkdir");
+        std::fs::create_dir_all(repo.join(".git")).expect("mkdir");
+
+        let pane_at = |workspace: &str, cwd: &std::path::Path| {
+            let mut pane = pane(workspace, None, None, "idle");
+            pane["cwd"] = cwd.to_string_lossy().to_string().into();
+            pane
+        };
+        let json = list(&[pane_at("git", &nested), pane_at("plain", &plain)]);
+        let pads = describe_pads(&json);
+        assert!(!pads.contains_key("git"), "a repository must not be padded");
+        assert_eq!(pads.get("plain").map(String::as_str), Some(PAD_VALUE));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
     #[test]
     fn value_is_capped_at_48_chars() {
         let names: Vec<String> = (0..12).map(|index| format!("agent-{index:02}")).collect();
@@ -318,19 +465,6 @@ mod tests {
         assert!(value.chars().all(|c| c == 'é'));
     }
 
-    #[test]
-    fn report_params_sets_value_and_null() {
-        let set = report_params("w4", Some("claude · pi"));
-        assert_eq!(set["workspace_id"], "w4");
-        assert_eq!(set["source"], "herdr-sidebar");
-        assert_eq!(set["tokens"]["agents"], "claude · pi");
-        assert_eq!(set["ttl_ms"], 20_000);
-
-        let clear = report_params("w4", None);
-        assert!(clear["tokens"]["agents"].is_null());
-        assert_eq!(clear["ttl_ms"], 20_000);
-        assert_eq!(clear["tokens"].as_object().map(|map| map.len()), Some(1));
-    }
 
     #[test]
     fn workspace_ids_are_deduped_and_sorted() {

@@ -203,8 +203,6 @@ enum Row {
 enum Screen {
     /// Filter + list (switch, merge) or the name field (rename).
     Edit,
-    /// Merge only: the chosen branch, waiting for a second Enter.
-    ConfirmMerge(Branch),
     /// A final message; any key closes the popup. `conflicts` offers `a`.
     Message {
         lines: Vec<Line<'static>>,
@@ -323,13 +321,6 @@ impl App {
                     self.done = true;
                 }
             }
-            Screen::ConfirmMerge(branch) => match key.code {
-                KeyCode::Enter | KeyCode::Char('y') => {
-                    let branch = branch.clone();
-                    self.merge(&branch);
-                }
-                _ => self.screen = Screen::Edit,
-            },
             Screen::Edit => self.edit_key(key, ctrl),
         }
     }
@@ -469,7 +460,7 @@ impl App {
                     Err(error) => self.error = Some(error),
                 }
             }
-            (Op::Merge, Row::Branch(branch)) => self.screen = Screen::ConfirmMerge(branch),
+            (Op::Merge, Row::Branch(branch)) => self.merge(&branch),
             _ => {}
         }
     }
@@ -575,7 +566,7 @@ impl App {
             area.width,
             area.height.saturating_sub(3),
         );
-        // Messages and the merge question line up with the title's indent.
+        // Messages line up with the title's indent.
         let text = Rect::new(
             body.x + 1,
             body.y,
@@ -593,31 +584,6 @@ impl App {
                     " any key to close"
                 };
                 frame.render_widget(Paragraph::new(Span::styled(hint, dim)), footer);
-                return;
-            }
-            Screen::ConfirmMerge(branch) => {
-                let into = self.current.clone().unwrap_or_default();
-                frame.render_widget(
-                    Paragraph::new(vec![
-                        Line::from(vec![
-                            Span::raw("Merge "),
-                            Span::styled(branch.name.clone(), accent.add_modifier(Modifier::BOLD)),
-                            Span::raw(" into "),
-                            Span::styled(into, Style::default().add_modifier(Modifier::BOLD)),
-                            Span::raw("?"),
-                        ]),
-                        Line::default(),
-                        Line::from(Span::styled(
-                            "git merge --no-edit: fast-forwards when it can, else makes a merge commit.",
-                            dim,
-                        )),
-                    ]),
-                    text,
-                );
-                frame.render_widget(
-                    Paragraph::new(Span::styled(" ⏎ merge · esc back", dim)),
-                    footer,
-                );
                 return;
             }
             Screen::Edit => {}
@@ -650,7 +616,7 @@ impl App {
 
         let hint = match self.op {
             Op::Switch => " ↑↓ select · ⏎ switch · esc cancel",
-            Op::Merge => " ↑↓ select · ⏎ merge… · esc cancel",
+            Op::Merge => " ↑↓ select · ⏎ merge · esc cancel",
             Op::Rename => " ⏎ rename · esc cancel",
             Op::New => " ⏎ create and switch · esc cancel",
             Op::History => "",

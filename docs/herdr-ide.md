@@ -217,9 +217,11 @@ herdr aggregates every pane's agent state into a per-workspace `agent_status`
 (`workspace list`), and the top-left rail draws it: row 1's `state_icon` is the
 workspace's status (symbols style: `◐` working, `×` blocked, `✓` done, `○` idle,
 `·` unknown — colours yellow / red / teal / green / grey). That glyph is a single
-cell, so `dotfiles/config/herdr/config.toml` adds a **bold stand-alone word line**
-for busy spaces only (`[ui.sidebar.spaces]` rows with `state_text` plus `hide`
-rules for idle/unknown), keeping the usual branch/git line underneath.
+cell, so `dotfiles/config/herdr/config.toml` keeps **two lines per space, no blank
+line between spaces** (`row_gap = 0`): row 1 is the bold project name with the
+space's agent names beside it, row 2 is the branch/git line. The busy/idle *word*
+is not drawn — the icon and its colour carry it; adding `state_text` back is one
+config line (`rows` is a plain list).
 
 **That block only reaches the rail if `~/.config/herdr/config.toml` is the installer's
 symlink.** Replace that file with your own config (a personal keymap file is the common
@@ -231,14 +233,25 @@ just unreadable. Merge `[ui] status_indicators = "symbols"` and the
 `[ui.sidebar.spaces] rows` table into your file, then `herdr server reload-config`
 (applies to a LIVE client, no restart).
 
-That word line also names the agents in the space, because a bare `◐` does not say
+**The agent list under the spaces cannot be hidden.** `[ui.sidebar.agents]` accepts only
+`row_gap`, `rows` and `rows_by_agent` — there is no enable/visibility switch — and the
+`agents … grouped` header is drawn unconditionally. `rows = []` does NOT remove the section: it
+degrades to **one line per agent holding just the state dot** (verified live: 9 agent panes →
+9 bare `○` lines), i.e. the same height as the one-line form but with no information. The floor
+is one row per detected agent pane, so the section is as tall as your agent count. Give those
+rows content (`rows = [["state_icon", "agent"]]`) instead of leaving them empty, and reclaim the
+space by collapsing the rail (`prefix+b`; `sidebar_collapsed_mode = "compact"` keeps a narrow
+status strip, `"hidden"` uses zero width, `sidebar_start_collapsed = true` starts collapsed).
+
+The agents are named beside the project name, because a bare `◐` does not say
 *what* is running. herdr has no built-in "agent name" token, but it renders any
 `$custom` token in those rows, so the sidebar reports one per space: `$agents`
-(next to the bold state word) reads `claude` for an idle Claude space and
+reads `pi` for a single-agent space and
 `pi · codex` for one running two agents, busy ones first. `plugins/herdr-sidebar`
 sends it every 5 s from each sidebar pane's heartbeat (`src/agent_tokens.rs`,
 source `herdr-sidebar`, `ttl_ms` 20 s), so it expires on its own when the last
-sidebar of a session goes away, and it clears a space that has no agent pane.
+sidebar of a session goes away, and a space with no agent pane reports a lone `-`
+(the empty slot looked like a rendering glitch, user-reported).
 Agents are read from `pane.list`, so this needs no extra configuration. Toggling
 herdr's own sidebar (`prefix+b`, "agent sidebar") shows or hides the whole rail,
 these per-space agent lines included.
@@ -408,6 +421,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | 2c02d3e | **Search popup + line-aware open** | `src/search_popup.rs`; the engine moved to lib `src/content_search.rs` (shared with the sidebar Search view); preview highlighted with `syntax::highlight_lines`; `actions::open_in_editor_inline_at` (`{line}` placeholder, or `file:line` for `fresh` / `fresh-open`). |
 | c5661c3 | **Replace popup + conflict routing** | Replace mode of the search popup (`HERDR_SIDEBAR_SEARCH_MODE=replace`, action `replace-popup`; `content_search::replace_in_text` / `apply_replacements`: engine-identical matching, `$1` expansion in regex mode, line endings / BOM / permissions kept, atomic write, root-confined). Conflicted (`!`) files open in the editor without Live Diff (`editor_live_diff`). |
 | 261bccb | **Dotfiles folded into this repo** | The standalone `~/code/dotfiles` now lives in `dotfiles/`; the upstream patch set was dropped. `dotfiles/herdr-sidebar/build.sh` builds this checkout and points herdr's `herdr-sidebar` registration at it. |
+| *uncommitted* | **Merge popup merges on one key** | The `--git-popup merge` branch list used to ask "Merge X into Y?" on a second screen (`Screen::ConfirmMerge`); picking a branch now merges immediately, and the result/conflict message screen (with `a` for `merge --abort`) is unchanged. `Git::merge_branch` still passes `--no-edit` and never forces. |
 | *uncommitted* | **Commit button offers a pull; both oco token ceilings pinned** | When the branch is behind its upstream AND something is staged, ✓ Commit reads `✓ Commit · N↓` and asks "Pull first?" (`y` = plain `git pull --no-rebase`, then commit; anything else commits at once); a failed pull never commits. The AI-commit path never asks. `Git::pull` must pass `--no-rebase` because this machine's `dotfiles/config/git/dotfiles.gitconfig` sets `pull.rebase=true`, which refuses to run with a staged index. `OCO_TOKENS_MAX_OUTPUT=500` is now pinned next to `OCO_TOKENS_MAX_INPUT=24000`, since oco subtracts it from the input budget. |
 | *uncommitted* | **New branch popup** | `--git-popup[-open] new` (`Op::New`, `ctrl+alt+n`): an input-only popup that creates the branch from HEAD and switches to it (`git switch -c`, name judged by `git check-ref-format --branch`, no stash/force), with the error in the footer instead of a toast. Manifest pane `git-new-branch`, action `git-new-branch`. |
 | *uncommitted* | **Instant branch reaction** | `Git::head_signature` (the git dir's `HEAD`; resolves a worktree's `.git` FILE) is compared a few times a second by both views, so a checkout / create / rename from a popup or a terminal refreshes the SCM header and the Explorer's footer/decorations at once instead of waiting for the 1.5 s status poll or `DECO_REFRESH`. Measured: ~65 ms (SCM), ~0.5 s (Explorer), both were 2-3 s. |
@@ -436,7 +450,7 @@ anything over about 12 KB. The commit still contains every change. The sidebar a
 token ceilings whatever `~/.opencommit` says — `OCO_TOKENS_MAX_INPUT=24000` so oco never splits
 the diff into several messages, and `OCO_TOKENS_MAX_OUTPUT=500` (oco's own default) because oco
 subtracts the output ceiling from that input budget.
-several messages. When a file was shortened the flash says how many ("N large file(s)
+When a file was shortened the flash says how many ("N large file(s)
 summarised for the AI").
 
 While it runs, the ✓ Commit button shows a braille spinner with "AI generating…" (then "Committing…")

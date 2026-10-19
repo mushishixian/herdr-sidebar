@@ -88,6 +88,17 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   needs developer mode. Verified headless: `ai_commit::generate` on a staged scratch repo returned
   a message and left HEAD unchanged (`cargo test -- --ignored e2e_generate` with
   `HS_AI_COMMIT_E2E_REPO`).
+  **A gateway that wraps the completion breaks oco.** oco's openai engine is axios
+  (`response.data.choices[0].message`), i.e. it reads `choices` at the TOP level. Cline's
+  gateway (`https://api.cline.bot/api/v1`, model `cline-pass/…`) answers
+  `{"data":{"choices":[…]}}` — and only in its non-streaming form, which oco uses — so it
+  dies with `TypeError: Cannot read properties of undefined (reading '0')` (verified live
+  2026-10-19; pi reads the same endpoint fine because it streams and unwraps). Point oco at a
+  plain OpenAI-compatible gateway instead; on this machine `happycoding`
+  (`https://happycoding.xyz/v1`, model `deepseek-v4.1-flash`) serves the same model id and
+  returns bare `choices`. Junk keys in `~/.opencommit` from an older provider
+  (`OCO_PROXY=undefined`, `OCO_API_CUSTOM_HEADERS=undefined`) are literal strings — delete
+  them rather than leaving them to be parsed as URLs/JSON.
   **Curation (big or generated files).** oco diffs everything staged (minus its own excludes), and
   when the diff exceeds its token limit it splits the diff per chunk, asks the model once per chunk and
   joins the answers. A 1.8 MB generated `data.json` staged next to a 3-line change took 111 s (the
@@ -507,20 +518,44 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   it from their existing 5 s heartbeat, and nothing else does — not `ensure.rs`, not the
   viewer, not the sidecar. Value format `label · label`: `display_agent` (else `agent`) per
   agent pane, deduped inside the workspace, agents with a `working` pane first and then
-  alphabetical, capped at 48 chars; a workspace with no agent pane is cleared with an
-  explicit `null`. EVERY workspace in `pane.list` is re-reported each beat instead of
+  alphabetical, capped at 48 chars; a workspace with no agent pane reports `-`
+  (`agent_tokens::NO_AGENT`), because an empty slot after the project name reads as a
+  rendering glitch rather than as "no agent here" — `null` would drop the token and leave
+  the gap. EVERY workspace in `pane.list` is re-reported each beat instead of
   diffing, which is what keeps the TTL alive, so a killed sidebar's value can never
   outlive 20 s; a second reporter is unnecessary, because duplicate reports are identical
   and `report_metadata` merges.
+- **A row with no values disappears, so `$pad` keeps the non-git branch row alive**
+  (`src/agent_tokens.rs`). herdr drops a Space rail row when none of its tokens have a value
+  ("a row disappears when none of its tokens have a value", `configuration.mdx`), and
+  `ui.sidebar.spaces` offers only `rows`/`row_gap` — no `keep_empty_rows`/`min_rows` (checked
+  against the v0.9.5 config reference). A Space whose project is not a git repository is
+  therefore one line shorter than its neighbours and the rail reads ragged. The same 5 s
+  heartbeat reports token key `pad` = one ZERO WIDTH SPACE (U+200B: invisible, non-empty, not
+  stripped by `trim`) for every workspace with no `.git` above its panes'
+  `foreground_cwd`/`cwd`, and `null` for the rest so a git Space never gains a trailing
+  ` · ` separator. It only does anything when the row declares it:
+  `rows = [[...], ["branch", "git_status", "$pad"]]`.
 - **The rail is display-only for plugins.** herdr renders it client-side (`src/client/shell/sidebar.rs`
   `render_workspace_rows`) and handles its mouse input itself; tokens are plain text with no click or
   hover hook, so a plugin cannot add a per-space button (a hover ✕ close was requested and declined as
   needing a herdr fork). Closing a space is herdr's own right-click → Close ("Close workspace?").
+- **The agent list under the spaces cannot be removed by config.** 0.9.5's
+  `[ui.sidebar.agents]` takes only `row_gap`/`rows`/`rows_by_agent`; the `agents … grouped`
+  header is unconditional, and `rows = []` degrades to ONE line per agent containing just the
+  state dot (verified live: 9 agent panes → 9 bare `○`). The floor is one row per detected
+  agent pane — so give it content (`rows = [["state_icon", "agent"]]`) and reclaim space by
+  collapsing the rail (`prefix+b`, `sidebar_collapsed_mode`, `sidebar_start_collapsed`).
+  Workspace-name styling is the same story: only `[ui.sidebar.spaces] rows` inline styles
+  (`{ token = "workspace", bold = true, fg = "#RRGGBB" }`) reach it; a plugin can only report
+  TEXT tokens.
 - Per-token `rules` (≤16, text-valued tokens only) style by value
   (`{ equals = "working", fg = "#f5c542", bold = true }`) or HIDE it
   (`{ equals = "idle", hide = true }`); that is how "only busy spaces get a word line"
-  is built with no reporter of our own. `state_text` renders idle/working/blocked/
-  done/unknown; `fg` is `#RGB`/`#RRGGBB`.
+  is built with no reporter of our own — the SHIPPED layout no longer draws that word
+  line (two lines per space: `["state_icon", {workspace bold}, "$agents"]`, then
+  `["branch", "git_status"]`, `row_gap = 0`); add `state_text` to a row to get it back.
+  `state_text` renders idle/working/blocked/done/unknown; `fg` is `#RGB`/`#RRGGBB`.
 - State arrives through ACTIVE HOOks: `herdr integration install <agent>` / `status`.
   `pi`/`omp`/`mastracode`/`opencode`/`kilo`/`kimi` have full hook authority
   (`src/detect/mod.rs` `full_lifecycle_hook_authority`), so herdr SKIPS screen scanning
@@ -1189,7 +1224,9 @@ and asks separately before `-D` (#78). Keep `--` before branch names in both pat
   `HERDR_SIDEBAR_SPAWN_CWD`, and opens the pane via `plugin.pane.open` placement `popup`.
   `new` (`ctrl+alt+n`) is the input-only creation popup: a name, `git switch -c` from HEAD,
   the failure in the footer instead of a toast. The switch popup's "+ type a new name" row
-  uses the same `Git::create_branch`, so the two cannot drift.
+  uses the same `Git::create_branch`, so the two cannot drift. **Merge merges on the first
+  ⏎** (the old second-Enter "Merge X into Y?" screen is gone, user-requested); the result /
+  conflict message screen stays, and conflicts still offer `a` for `merge --abort`.
 - **A moved branch is detected by reading the git dir's `HEAD`, never by polling git.** The
   branch popups are separate processes, so they cannot tell the sidebar; `Git::head_signature`
   (one small file, and it resolves a worktree's `.git` FILE too) is compared by both views:
