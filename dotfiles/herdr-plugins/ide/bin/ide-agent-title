@@ -9,11 +9,57 @@ here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 SOURCE=dotfiles-ide-agent
 
 # Command word -> agent name. Extend here.
+#
+# This table is the ONLY place an agent becomes visible: the title it sets also
+# carries `--display-agent`, which herdr-sidebar turns into the spaces rail's
+# `$agents` value (`src/agent_tokens.rs`). herdr itself only detects the agents
+# it ships an integration for (`herdr integration status`), so a CLI missing
+# here has no name anywhere — herdr reports no `agent` for the pane and the
+# rail shows nothing until this table names it (verified live with `codebuddy`:
+# `--display-agent codebuddy` alone made the rail read `codebuddy`).
+#
+# Keys are the command/package word as typed (`codebuddy`, `npx @tencent-ai/…`
+# resolves to the package's own binary name); the value is what the border and
+# the rail show, so keep it short and lowercase.
 declare -A AGENT_OF=(
+  # Anthropic / OpenAI / Google
   [claude]=claude [claude-code]=claude
-  [codex]=codex [gemini]=gemini [opencode]=opencode [aider]=aider
-  [pi]=pi [amp]=amp [cursor-agent]=cursor [copilot]=copilot
-  [qwen]=qwen [crush]=crush [goose]=goose [kimi]=kimi [droid]=droid
+  [codex]=codex [codex-cli]=codex [openai-codex]=codex
+  [gemini]=gemini [gemini-cli]=gemini
+  [antigravity]=antigravity [antigravity-cli]=antigravity
+  [jules]=jules
+  # Cursor, GitHub, factory.ai, Devin, Hermes, Letta
+  [cursor]=cursor [cursor-agent]=cursor
+  [copilot]=copilot [gh-copilot]=copilot
+  [droid]=droid [factory]=droid
+  [devin]=devin
+  [hermes]=hermes
+  [letta]=letta [letta-code]=letta
+  # Tencent / Alibaba / Moonshot / xAI / Mistral
+  [codebuddy]=codebuddy [codebuddy-code]=codebuddy
+  [qwen]=qwen [qwen-code]=qwen
+  [qoder]=qoder [qodercli]=qoder [lingma]=lingma
+  [kimi]=kimi [kimi-cli]=kimi [kimi-code]=kimi
+  [grok]=grok [grok-cli]=grok
+  [vibe]=vibe [mistral-vibe]=vibe
+  # Everything else: OSS and smaller CLIs
+  [opencode]=opencode
+  [aider]=aider [aider-chat]=aider
+  [pi]=pi [omp]=omp [oh-my-pi]=omp
+  [amp]=amp [sourcegraph-amp]=amp
+  [crush]=crush [charm-crush]=crush
+  [goose]=goose [block-goose]=goose
+  [kilo]=kilo [kilo-code]=kilo
+  [cline]=cline
+  [roo]=roo [roo-code]=roo
+  [mastracode]=mastracode
+  [openhands]=openhands [open-interpreter]=openhands [interpreter]=openhands
+  [continue]=continue [cn]=continue
+  [auggie]=augment [augment]=augment [augment-code]=augment
+  [plandex]=plandex [codebuff]=codebuff [octofriend]=octofriend
+  [gptme]=gptme [sweep]=sweep [smol]=smol [mods]=mods
+  [iflow]=iflow [iflow-cli]=iflow
+  [kiro]=kiro [kiro-cli]=kiro [trae]=trae
 )
 
 # Print the agent name for command line $1, or nothing. Splits on whitespace

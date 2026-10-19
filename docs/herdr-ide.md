@@ -329,19 +329,33 @@ Two things that surprise people:
   `◆ CODEX`, and so on, taken from the command you type there (`claude -r`,
   `codex resume xxxx`, `npx @openai/codex@latest`, `env X=1 claude`, `~/.local/bin/claude`
   all work). `bin/ide-agent-title` parses the command without `eval` and reports it through
-  `pane report-metadata --title`. A metadata title is drawn in preference to the manual
-  label, so the pane stays labelled `Agent` for the scripts while the border reads
-  `◆ CLAUDE`. When the agent exits back to the shell prompt the title clears and the
-  border reads `Agent` again. The table of known agents (claude, codex, gemini, opencode,
-  aider, pi, amp, cursor-agent, copilot, qwen, crush, goose, kimi, droid) is at the top of
-  `bin/ide-agent-title`; add a line there to teach it another. The clearing needs the
-  zsh hook `shell/agent-title.zsh`, which `herdr-ide` sources into the pane before starting
-  the agent. An agent that was already running when the layout was built gets its title
-  once, with no hook, so that title stays after it exits (clear it with
+  `pane report-metadata --title` **and `--display-agent`**. A metadata title is drawn in
+  preference to the manual label, so the pane stays labelled `Agent` for the scripts while the
+  border reads `◆ CLAUDE`. When the agent exits back to the shell prompt the title clears and
+  the border reads `Agent` again.
+- **That same `--display-agent` is what names the agent in herdr's spaces rail.** herdr only
+  detects the agents it ships an integration for (`herdr integration status`: pi, omp, claude,
+  codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, cursor,
+  mastracode, antigravity-cli, grok, letta), and even then it reports its own id. For every
+  other CLI — CodeBuddy, Cline, Roo, Amp, Kiro, Trae, … — nothing is detected at all, so the
+  NAME can only come from this hook: herdr-sidebar's `$agents` token prefers the pane's
+  `display_agent` field (`src/agent_tokens.rs`). **The `AGENT_OF` table at the top of
+  `bin/ide-agent-title` is therefore the only place an agent becomes visible in the rail**;
+  it covers claude/codex/gemini/antigravity/jules, cursor/copilot/droid/devin/hermes/letta,
+  codebuddy/qwen/qoder/lingma/kimi/grok/vibe, opencode/aider/pi/omp/amp/crush/goose/kilo/
+  cline/roo/mastracode/openhands/continue/auggie/plandex/codebuff/octofriend/gptme/sweep/
+  smol/mods/iflow/kiro/trae (plus the `-cli` spellings and package names), and adding a line
+  there is all that a new CLI needs. Verified live: `pane report-metadata --display-agent
+  codebuddy` alone made that space's rail read `codebuddy` within one 5 s heartbeat, with no
+  herdr detection involved.
+- The title/clear cycle needs the zsh hook `shell/agent-title.zsh`, which `herdr-ide` sources
+  into the pane before starting the agent. An agent that was already running when the layout was
+  built gets its title once, with no hook, so that title stays after it exits (clear it with
   `dotfiles/herdr-plugins/ide/bin/ide-agent-title --clear <pane>`). Panes created before
   this change get the hook after `ctrl+b i` (or by running
   `. ~/code/herdr-sidebar/dotfiles/herdr-plugins/ide/shell/agent-title.zsh` in the Agent
-  pane once).
+  pane once). A command typed BEFORE a CLI was added to the table leaves no name until it runs
+  again (the hook fires per command, not per running process).
 - `bin/fresh-ide DIR` runs `fresh -a ide-<sha1(project root)[:10]>`: **one Fresh
   daemon per project per herdr workspace**. The first workspace on a project
   gets `ide-<hash>`, the next `ide-<hash>-s2`, `-s3`, and so on; a workspace
@@ -681,6 +695,7 @@ popups, and conflict routing.
 | Symptom | Check |
 |---|---|
 | Preview still splits a new pane in the IDE tab | Restart Fresh with `fresh-restart --all` (a Fresh pane started before the host loop has no host). `herdr pane list` should show `hs-preview-host` in the Fresh pane's tokens |
+| Spaces rail shows no agent name for a CLI that is clearly running | Add its command word to `AGENT_OF` at the top of `dotfiles/herdr-plugins/ide/bin/ide-agent-title` (then run the agent again — the hook fires per typed command). herdr only auto-detects the agents in `herdr integration status`; everything else is named solely by this table's `--display-agent` |
 | After a herdr restart (or a reboot) the IDE is empty shells and a file click reports `fresh-open` exiting 1 | `herdr pane list` shows the `Fresh` pane with **no** `fresh_daemon` token: herdr restored it without metadata and nothing runs in it. Press `ctrl+b i` (or click a file again) — `herdr-ide` heals that pane in place, so no rebuild and no lost layout. `fresh-restart` deliberately skips tokenless panes |
 | A Fresh key does nothing | `fresh --cmd config show \| grep selection_` (config linked?), `ls -la ~/.config/fresh/plugins`, restart the daemon |
 | Fresh burns CPU while unfocused, a daemon sits at 15-25 % | `ps -eo pid,pcpu,args \| grep 'fresh-editor/fresh --server'`, then sample `/proc/<pid>/stat` twice for the live number. Two known causes: a plugin recursing into its own command (*Gotchas*), and a stray daemon with no pane attached — `fresh --cmd daemon list`, `fresh --cmd daemon kill <name>`. Baseline is ~2-3 % per editor daemon (plugins + LSP + timers). `tail -200 ~/.local/state/fresh/logs/fresh-server-<pid>.log` names the looping handler |

@@ -114,6 +114,18 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   regressed: the first file click after a restart reported `custom editor failed:
   …/fresh-open exited with exit status: 1` and the `Fresh` pane showed an empty prompt.
   `fresh-restart` deliberately still refuses tokenless panes.
+- **The rail's agent name comes from `ide-agent-title`'s table, not from herdr.** herdr only
+  auto-detects the agents it ships an integration for (`herdr integration status`) and reports
+  its own id for those; every other CLI is invisible until something sets the pane's
+  `display_agent` metadata, which `bin/ide-agent-title` does (`--display-agent`) alongside the
+  border title from the typed command, and which herdr-sidebar's `$agents` token prefers
+  (`src/agent_tokens.rs`). So `AGENT_OF` at the top of `bin/ide-agent-title` is the ONLY place
+  to add an agent — a missing entry means the rail shows nothing (user-reported with
+  CodeBuddy, `codebuddy` / npm `@tencent-ai/codebuddy-code`). It fires per TYPED command, so an
+  agent already running keeps its nameless state until it is run again; naming the pane by hand
+  with `herdr pane report-metadata <pane> --source dotfiles-ide-agent --display-agent <name>
+  --title "◆ NAME"` fixes a live pane immediately (verified). Do not add a second table or a
+  process-name detector elsewhere.
 - **`~/.config/herdr/config.toml` must stay the installer's symlink, or the rail and the key
   table silently stop applying.** `install.sh` links it to `dotfiles/config/herdr/config.toml`;
   a user (or an editor) that replaces it with their own file leaves herdr on its defaults —

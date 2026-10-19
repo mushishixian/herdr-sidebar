@@ -523,6 +523,23 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   diffing, which is what keeps the TTL alive, so a killed sidebar's value can never
   outlive 20 s; a second reporter is unnecessary, because duplicate reports are identical
   and `report_metadata` merges.
+- **A name therefore has only two sources: herdr's own agent detection, or the pane's
+  `display_agent` metadata.** herdr detects only the agents it ships an integration for
+  (`herdr integration status`: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode,
+  kilo, hermes, qodercli, qwen, cursor, mastracode, antigravity-cli, grok, letta) and reports
+  its own id for them; nothing else exists, so a market CLI like CodeBuddy (`codebuddy`, npm
+  `@tencent-ai/codebuddy-code`) has `agent: null` and the rail fell back to `-` while it was
+  clearly running (user-reported). `pane report-metadata --display-agent <name>` is enough on
+  its own — verified live: herdr lists `display_agent` in `pane.list`, the sidebar's next
+  heartbeat turned that space's `$agents` into `codebuddy`, and it works on a pane with NO
+  detected agent at all. The dotfiles hook (`ide-agent-title` + `shell/agent-title.zsh`) sets
+  it from the typed command, so **`AGENT_OF` at the top of `dotfiles/herdr-plugins/ide/bin/
+  ide-agent-title` is the one table to extend** — the sidebar must NOT grow a second name
+  table nor detect processes itself (`pane.process_info` per pane per beat would be expensive
+  and would still miss `node …/codebuddy` argv shapes only the hook sees as typed text).
+  Neither `pane.report_agent` nor an agent-state hook is involved: a name needs nothing but
+  the metadata field, and an agent herdr never detects keeps `agent_status` unknown (the rail
+  glyph shows `·`) while its name shows correctly.
 - **A row with no values disappears, so `$pad` keeps the non-git branch row alive**
   (`src/agent_tokens.rs`). herdr drops a Space rail row when none of its tokens have a value
   ("a row disappears when none of its tokens have a value", `configuration.mdx`), and
