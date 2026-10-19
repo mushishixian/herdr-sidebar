@@ -4,6 +4,9 @@
   "version": 2,
   // Built-in "dark" is VS Code's Dark+ palette (#1e1e1e / #d4d4d4).
   "theme": "dark",
+  // VS Code keymap: Ctrl+D = add next occurrence, Ctrl+/ = toggle comment.
+  // Everything else falls through to Fresh's default map (F12, Shift+F12...).
+  "active_keybinding_map": "vscode",
 
   // herdr is the orchestrator here: no Fresh workspace dock, and the
   // herdr-ide script picks one named daemon per project.
