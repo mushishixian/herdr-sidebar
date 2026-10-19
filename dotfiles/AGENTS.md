@@ -104,6 +104,16 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   "succeeded". The variables are `$lbl`/`$tab`/`$ws`/… now; never name a jq variable
   `label`, `break`, `def`, `as`, `if`, `then`, `else`, `end`, `reduce`, `foreach`, `try`,
   `catch`, `import`, `include`, `and`, `or` or `not`.
+- **A herdr server restart leaves every IDE pane a CORPSE with a label.** Resumed panes are
+  plain shells: `Fresh`/`Terminal`/`Agent` come back, the metadata tokens (`fresh_daemon`,
+  `hs-preview-host`) do not, and no daemon runs. So never treat the label as proof that an
+  editor is up — `lib.sh`'s `fresh_editor_ok` (token AND live daemon) is the check. `herdr-ide`
+  heals a tokenless `Fresh` pane in place (relabel + `fresh-ide` in the SAME pane; splitting a
+  new one would leave the corpse behind and double the middle column) and prints the editor pane
+  id on every path, because `fresh-open` reads that id as its last line. Symptom when this
+  regressed: the first file click after a restart reported `custom editor failed:
+  …/fresh-open exited with exit status: 1` and the `Fresh` pane showed an empty prompt.
+  `fresh-restart` deliberately still refuses tokenless panes.
 - **`~/.config/herdr/config.toml` must stay the installer's symlink, or the rail and the key
   table silently stop applying.** `install.sh` links it to `dotfiles/config/herdr/config.toml`;
   a user (or an editor) that replaces it with their own file leaves herdr on its defaults —

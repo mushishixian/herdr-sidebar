@@ -308,6 +308,17 @@ Two things that surprise people:
 - **Pane identity is by label**, so it survives herdr restarts: `Fresh`,
   `Terminal`, `Agent`; `Sidebar` belongs to herdr-sidebar. The Fresh pane also
   carries a `fresh_daemon=<name>` metadata token.
+- **But a label alone does not mean the editor is up.** A herdr server restart
+  (or a reboot) resumes every pane as a plain SHELL: the labels come back, the
+  metadata tokens do not, and no Fresh daemon runs. Such a pane is a *corpse*.
+  `lib.sh`'s `fresh_editor_ok` therefore asks for the `fresh_daemon` token AND a
+  live daemon. `herdr-ide` treats a tokenless `Fresh` pane as an editor to heal
+  IN PLACE — same pane, relabelled and started again with `fresh-ide`, no extra
+  splits — and prints the editor pane id on every path, which is what
+  `fresh-open` reads. Regression symptom (before this): the first file click
+  after a restart reported `custom editor failed: …/fresh-open exited with exit
+  status: 1` (its `die "could not start the IDE editor"`) while the pane showed
+  an empty prompt.
 - `bin/herdr-ide` (action `layout`) splits the current tab into the layout
   above. Started from an agent pane, that agent becomes the right column; from
   a shell, the shell becomes the Terminal and a new agent opens (agent command:
@@ -442,6 +453,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | *uncommitted* | **New branch popup** | `--git-popup[-open] new` (`Op::New`, `ctrl+alt+n`): an input-only popup that creates the branch from HEAD and switches to it (`git switch -c`, name judged by `git check-ref-format --branch`, no stash/force), with the error in the footer instead of a toast. Manifest pane `git-new-branch`, action `git-new-branch`. |
 | *uncommitted* | **Instant branch reaction** | `Git::head_signature` (the git dir's `HEAD`; resolves a worktree's `.git` FILE) is compared a few times a second by both views, so a checkout / create / rename from a popup or a terminal refreshes the SCM header and the Explorer's footer/decorations at once instead of waiting for the 1.5 s status poll or `DECO_REFRESH`. Measured: ~65 ms (SCM), ~0.5 s (Explorer), both were 2-3 s. |
 | *uncommitted* | **Inline editor failures are reported** | A click only reports the SPAWN, and the editor runs with null stdio, so a command that died on the spot looked like a successful open. `spawn_inline_editor` now reaps the child on a thread and `actions::take_editor_failures` hands a non-zero exit within 30 s to Explorer's notice / Source Control's flash (`custom editor failed: <program> exited with <status>`). |
+| *uncommitted* | **IDE layer: a label-only Fresh pane is healed in place** | A herdr server restart resumes panes as plain shells, keeping labels but dropping metadata tokens, so `herdr-ide`'s label-only check treated a dead `Fresh` pane as a working editor: it focused it, printed nothing, and `fresh-open` died with "could not start the IDE editor" (exit 1, surfaced by the sidebar as `custom editor failed: …/fresh-open exited with exit status: 1`). `lib.sh` adds `pane_fresh_daemon` and `fresh_editor_ok` (token AND live daemon); `herdr-ide` reuses a corpse pane as the editor (relabel + `fresh-ide` in place, no new splits) and prints the editor pane id on the already-built path, which is how `fresh-open` gets it. |
 | *uncommitted* | **IDE layer: jq ≥ 1.6 keyword fix** | `lib.sh`, `ide-save-sizes` and `fresh-to-agent` named a jq variable `label`, which jq 1.6+ parses as its `label` keyword (`$label` → "syntax error, unexpected label"), so EVERY pane lookup failed on Linux/WSL and a file click built no editor. Variables are `$lbl` now; `fresh-open` also reports a failed `herdr-ide` instead of exiting 3 silently. |
 | *uncommitted* | **Media opens in the preview; previews cover Fresh; Agent pane title** | `viewer::is_media_file` keeps pictures and videos out of the custom editor (Explorer click, Ctrl+Q popup; Source Control's `diff_opens_in_editor` media flag). Preview host: `fresh-ide` runs a host loop in the Fresh pane (token `hs-preview-host`); the sidebar writes `<sidebar state dir>/preview-host/<pane>.req`, the host claims it by rename, and the viewer runs there with `HERDR_SIDEBAR_PREVIEW_HOSTED=1`; `viewer::uncover_host` runs before the editor launches. Agent pane title: `ide-agent-title` + `shell/agent-title.zsh` (zsh preexec/precmd) → `pane report-metadata --title "◆ CLAUDE"`; language servers: `dotfiles/install-lsp.sh` (default in the installer) + Fresh `lsp` auto_start. |
 
@@ -669,6 +681,7 @@ popups, and conflict routing.
 | Symptom | Check |
 |---|---|
 | Preview still splits a new pane in the IDE tab | Restart Fresh with `fresh-restart --all` (a Fresh pane started before the host loop has no host). `herdr pane list` should show `hs-preview-host` in the Fresh pane's tokens |
+| After a herdr restart (or a reboot) the IDE is empty shells and a file click reports `fresh-open` exiting 1 | `herdr pane list` shows the `Fresh` pane with **no** `fresh_daemon` token: herdr restored it without metadata and nothing runs in it. Press `ctrl+b i` (or click a file again) — `herdr-ide` heals that pane in place, so no rebuild and no lost layout. `fresh-restart` deliberately skips tokenless panes |
 | A Fresh key does nothing | `fresh --cmd config show \| grep selection_` (config linked?), `ls -la ~/.config/fresh/plugins`, restart the daemon |
 | Fresh burns CPU while unfocused, a daemon sits at 15-25 % | `ps -eo pid,pcpu,args \| grep 'fresh-editor/fresh --server'`, then sample `/proc/<pid>/stat` twice for the live number. Two known causes: a plugin recursing into its own command (*Gotchas*), and a stray daemon with no pane attached — `fresh --cmd daemon list`, `fresh --cmd daemon kill <name>`. Baseline is ~2-3 % per editor daemon (plugins + LSP + timers). `tail -200 ~/.local/state/fresh/logs/fresh-server-<pid>.log` names the looping handler |
 | An LSP key does nothing | `alt+shift+q` / `alt+shift+w` / `alt+o` need a trusted workspace and a running server (status bar `LSP (on)`; `F12` works too). If `alt+w` opened lazygit, herdr still owns it — `herdr server reload-config`, then compare `dotfiles/config/herdr/config.toml` |

@@ -135,9 +135,9 @@ if [ -z "$editor" ]; then
   # successful spawn and the click did nothing, with no hint why.
   ide=$("$here/herdr-ide") || die "could not build the IDE layout (run herdr-ide to see why)"
   editor=$(tail -n1 <<<"$ide")
-  daemon=$("$HERDR" pane list | jq -r --arg p "$editor" \
-    'first(.result.panes[] | select(.pane_id == $p) | .tokens.fresh_daemon) // empty')
-  [ -n "$daemon" ] || die "could not start the IDE editor"
+  daemon=$(pane_fresh_daemon "$editor") || daemon=''
+  [ -n "$editor" ] && [ -n "$daemon" ] ||
+    die "the IDE editor did not start (run herdr-ide to see why)"
   for _ in $(seq 50); do daemon_alive "$daemon" && break; sleep 0.1; done
 fi
 

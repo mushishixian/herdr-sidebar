@@ -27,8 +27,34 @@ in_herdr || die "herdr-ide must run inside herdr"
 [ -z "${HERDR_PLUGIN_ACTION_ID:-}" ] || tip "IDE layout" dotfiles-ide.layout
 
 existing=$(pane_with_label "$cur_tab" "$FRESH_LABEL")
-if [ -n "$existing" ]; then
+
+# An editor that is really running: focus it and print its pane id. The id is
+# the last line of this script's output — that is how fresh-open reaches an
+# editor its own search could not use.
+if [ -n "$existing" ] && fresh_editor_ok "$existing"; then
   focus_pane "$existing"
+  printf '%s\n' "$existing"
+  exit 0
+fi
+
+# A pane labelled `Fresh` whose editor is gone is a CORPSE, most often from a
+# herdr server restart: panes come back as plain shells with their labels but
+# without metadata tokens, so there is no fresh_daemon to check and nothing
+# running in it. Heal it IN PLACE — it already sits where the editor belongs,
+# and splitting a new one would leave the labelled corpse in the layout and
+# give the column two editors. (Before this, the label alone counted as "layout
+# already built": herdr-ide exited 0 with no output and fresh-open then
+# reported "could not start the IDE editor", exit 1.)
+if [ -n "$existing" ]; then
+  cwd=$(pane_field "$existing" foreground_cwd)
+  [ -n "$cwd" ] || cwd=$(pane_field "$existing" cwd)
+  [ -n "$cwd" ] || cwd=${HERDR_STARTUP_CWD:-$PWD}
+  root=$(project_root "${1:-$cwd}")
+  name=$(ide_daemon_for "$root" "$cur_ws")
+  mark_fresh_pane "$existing" "$name"
+  "$HERDR" pane run "$existing" "$(printf '%q %q' "$here/fresh-ide" "$root")" >/dev/null
+  focus_pane "$existing"
+  printf '%s\n' "$existing"
   exit 0
 fi
 

@@ -1917,6 +1917,17 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   the sidebar reported "opened in custom editor" and then did nothing at all. The variables are
   `$lbl`/`$tab`/`$ws` now; see `dotfiles/AGENTS.md` for the full failure chain and the other
   reserved names to avoid.
+- **A herdr server restart turns the whole IDE into labeled corpses.** herdr resumes panes as plain
+  shells: labels (`Fresh`/`Terminal`/`Agent`) survive, metadata tokens do NOT, and the Fresh
+  clients/daemons are gone (observed live: five workspaces, every `Fresh` pane a bare prompt,
+  `fresh --cmd daemon list` empty). So a label alone never means "the editor is up": `lib.sh`'s
+  `fresh_editor_ok` demands the `fresh_daemon` token AND a live daemon, `herdr-ide` heals such a
+  pane IN PLACE (relabel + `fresh-ide` into the same pane, no extra splits, because a new editor
+  would leave the corpse behind and double the middle column), and it prints the editor pane id on
+  every path since `fresh-open` reads it as its last line. Regression symptom, bit the maintainer
+  live: the first file click after a restart showed `custom editor failed: …/fresh-open exited with
+  exit status: 1` while the pane showed an empty prompt. `fresh-restart` still skips tokenless panes
+  by design.
 
 ## Herdr workspace
 

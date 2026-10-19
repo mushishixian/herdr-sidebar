@@ -117,6 +117,25 @@ fresh_panes() {
     | .[] | [.pane_id, .workspace_id, (.tokens.fresh_daemon // ""), (.foreground_cwd // .cwd // "")] | @tsv'
 }
 
+# The `fresh_daemon` token of pane $1, or nothing.
+pane_fresh_daemon() {
+  "$HERDR" pane list | jq -r --arg p "$1" '
+    first(.result.panes[] | select(.pane_id == $p) | .tokens.fresh_daemon) // empty'
+}
+
+# True when pane $1 is a WORKING Fresh editor: it carries a `fresh_daemon` token
+# and that daemon is running. The label alone says nothing: a herdr server
+# restart resumes every pane as a plain shell, KEEPING the labels but DROPPING
+# the metadata tokens, so a pane labelled `Fresh` can be an empty prompt (its
+# `fresh-ide` is gone, and with it the editor). `pane list` marks such a pane
+# with no tokens at all.
+fresh_editor_ok() { # pane
+  local daemon
+  daemon=$(pane_fresh_daemon "$1") || daemon=''
+  [ -n "$daemon" ] || return 1
+  daemon_alive "$daemon"
+}
+
 # First pane in tab $1 carrying label $2.
 pane_with_label() {
   "$HERDR" pane list | jq -r --arg tab "$1" --arg lbl "$2" '
