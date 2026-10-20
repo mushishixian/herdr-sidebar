@@ -1421,6 +1421,12 @@ It replaced the original pane-ID-keyed park/restore implementation; the optional
   host script then brings the editor back. Before any file goes to the inline custom editor,
   `viewer::uncover_host` writes `close` to a hosted viewer in the caller's tab, so the editor shows
   again (a dirty buffer still gets its unsaved-changes prompt). Tabs without a host are unchanged.
+  **The caller tab's INLINE preview is closed the same way** (`viewer::close_in_tab`): with an
+  editor configured, a plain preview pane used to survive beside the editor, so each click
+  added one more pane instead of replacing the last one (user-reported: open a git diff, click
+  a file, and the tab held both). It goes through the viewer's own close request, so an unsaved
+  preview buffer still asks first, and a preview TAB is untouched (the caller there is the tab's
+  sidebar, which has no inline viewer).
 
 ### Diff preview
 

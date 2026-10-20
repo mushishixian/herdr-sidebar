@@ -889,6 +889,12 @@ fn spawn_inline_editor(
         .or_else(|| std::env::var("HERDR_PANE_ID").ok())
         .unwrap_or_default();
     crate::viewer::uncover_host(&caller);
+    // The tab's inline preview is about to be REPLACED by the editor. Leaving it
+    // beside the editor made every file click accumulate one more pane once an
+    // editor was configured (user-reported: a git diff, then a file, and the tab
+    // held both). `close_in_tab` writes the viewer's own close request, so an
+    // unsaved preview buffer still asks before anything is discarded.
+    let _ = crate::viewer::close_in_tab(&caller);
     let command = configured_editor().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
