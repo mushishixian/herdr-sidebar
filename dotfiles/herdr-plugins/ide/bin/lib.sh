@@ -68,7 +68,11 @@ agent_command() {
     printf '%s\n' "$IDE_AGENT"
     return 0
   fi
-  for candidate in pi claude; do
+  # Ordered by preference, not by completeness: pi first (the setup here), then
+  # the CLIs the IDE layer's `ide-agent-title` table knows, so a fresh machine
+  # with only codebuddy/codex/gemini still gets an Agent column instead of
+  # `none`. Add a line here when a new agent CLI ships.
+  for candidate in pi claude codex gemini codebuddy cursor-agent opencode aider qwen kimi grok droid; do
     if command -v "$candidate" >/dev/null 2>&1; then
       printf '%s\n' "$candidate"
       return 0

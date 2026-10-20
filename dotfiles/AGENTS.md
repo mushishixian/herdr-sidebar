@@ -151,7 +151,8 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 - **The Agent column does not assume `claude`.** `lib.sh`'s `agent_command()` resolves the
   command in this order: the plugin's `agent` file (`$(herdr plugin config-dir dotfiles-ide)/agent`,
   the user's explicit choice) → `$IDE_AGENT` → the first agent that is actually INSTALLED,
-  **pi before claude** — typing a missing binary into a pane leaves a dead shell that reads as
+  **pi first**, then claude, codex, gemini, codebuddy, cursor-agent, opencode, aider, qwen,
+  kimi, grok, droid — typing a missing binary into a pane leaves a dead shell that reads as
   "the IDE is broken" (user-reported on a fresh machine). Neither installed → `none`, so no
   Agent column. Get the config dir from the CLI, not a hardcoded `~/.config/herdr`: a user
   with `XDG_CONFIG_HOME` set has a different path.

@@ -41,10 +41,10 @@ rows = [
   # The state glyph is one terminal cell — there is no "bigger"; bold is the
   # strongest emphasis the terminal gives a single character.
   [{ token = "state_icon", bold = true }, { token = "workspace", bold = true, fg = "#e6edf3" }, "$agents"],
-  # $pad = 零宽空格，由 herdr-sidebar 每 5s 上报（src/agent_tokens.rs）：herdr 会
-  # 把"所有 token 都没值"的行整行丢掉，非 git 的 space 因此比邻居矮一行、很乱。
-  # 只在仓库外（cwd 向上找不到 .git）的 space 上报，git 项目上报 null，
-  # 所以不会给它们多出尾部的 " · " 分隔符。
+  # $pad = 横线 "-"，由 herdr-sidebar 每 5s 上报（src/agent_tokens.rs）：herdr 会把
+  # "所有 token 都没值"的行整行丢掉，非 git 的 space 因此比邻居矮一行、很乱；现在
+  # 那一行显示 "-"（= 这里没有分支）。只在仓库外（cwd 向上找不到 .git）的 space 上报，
+  # git 项目上报 null，所以不会给它们多出尾部的 " · " 分隔符。
   ["branch", "git_status", "$pad"],
 ]
 

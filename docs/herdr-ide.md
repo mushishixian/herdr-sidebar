@@ -344,9 +344,11 @@ Two things that surprise people:
 - `bin/herdr-ide` (action `layout`) splits the current tab into the layout
   above. Started from an agent pane, that agent becomes the right column; from
   a shell, the shell becomes the Terminal and a new agent opens (agent command:
-  plugin config `agent` file, else `$IDE_AGENT`, else the first INSTALLED agent —
-  **pi before claude**, since claude is not a given; `none` = no column, which is
-  also what you get when neither is installed). An explicit choice always wins.
+  plugin config `agent` file, else `$IDE_AGENT`, else the first INSTALLED agent from a
+  preference list — **pi first**, then claude, codex, gemini, codebuddy, cursor-agent,
+  opencode, aider, qwen, kimi, grok, droid, since claude is not a given; `none` = no
+  column, which is also what you get when none of them is installed). An explicit
+  choice always wins.
 - **Agent pane title.** The Agent pane's border shows the agent it runs: `◆ CLAUDE`,
   `◆ CODEX`, and so on, taken from the command you type there (`claude -r`,
   `codex resume xxxx`, `npx @openai/codex@latest`, `env X=1 claude`, `~/.local/bin/claude`
