@@ -157,6 +157,9 @@ fi
 step "config files"
 link zsh/zshrc                 "$HOME/.zshrc"
 link config/herdr/config.toml  "$HOME/.config/herdr/config.toml"
+# The keymap's helper scripts (popup commands run `bash ~/.config/herdr/scripts/…`).
+# One directory symlink, so a pulled `git pull` reaches every machine's keymap.
+link config/herdr/scripts      "$HOME/.config/herdr/scripts"
 link config/fresh/config.json  "$HOME/.config/fresh/config.json"
 for plugin in "$DOTFILES"/config/fresh/plugins/*.ts; do
   link "config/fresh/plugins/$(basename "$plugin")" "$HOME/.config/fresh/plugins/$(basename "$plugin")"

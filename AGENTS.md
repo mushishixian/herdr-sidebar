@@ -505,7 +505,9 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
 - The rail's default first row `["state_icon", "workspace"]` IS that status. Symbols
   style: `◐` working, `×` blocked, `✓` done, `○` idle, `·` unknown (yellow/red/teal/
   green/grey); DOTS style draws `●` for working+blocked+done, differing only in colour —
-  which reads as "the indicator never changes". `ui.status_indicators = "symbols"`.
+  which reads as "the indicator never changes". `ui.status_indicators = "symbols"` fixes
+  that; the managed config ships `"dots"` (the maintainer's long-standing choice, migrated
+  verbatim into the repo), so switching it there is a one-line, on-demand edit.
 - Injecting text into the spaces rail: `workspace report-metadata --token k=v` stores
   display-only tokens and `[ui.sidebar.spaces] rows` may render `$k`
   (`SpaceSidebarToken::Custom`). Rows REPLACE the defaults (re-declare
@@ -2017,17 +2019,26 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   alive yet invisible. (Note the bracket in the pattern: a bare
   `pkill -f "herdr-sidebar --symbol-popup"` matches the shell command line that runs it
   and kills that shell.)
-- **On the maintainer's Linux box the live herdr config is NOT this repo's copy**:
-  `~/.config/herdr/config.toml` is a plain 300-line file of its own (Chinese comments,
-  Zed-era chords, its own `~/.config/herdr/scripts/*.sh`), not a symlink to
-  `dotfiles/config/herdr/config.toml`. Editing the repo file and running
-  `herdr server reload-config` therefore changes nothing the user can press: the reload
-  re-applies the LIVE file and reports `applied` with no diagnostics either way. Check
-  `ls -la ~/.config/herdr/config.toml` before blaming a binding, and put the binding the
-  user is actually going to press in the live file too. Their live chords already
-  included `ctrl+q` = fzf file jump, `ctrl+w` = their own `jump-symbol.sh` (rg + fzf,
-  PHP-focused), and `ctrl+alt+q` = `herdr.file-picker.pick` until the symbol popup took
-  it over.
+- **The managed config owns the maintainer's keymap.** `dotfiles/config/herdr/config.toml`
+  IS `~/.config/herdr/config.toml` (installer symlink; until 2026-10 this box ran a
+  hand-merged plain file, so editing the repo file changed nothing there — check
+  `ls -la ~/.config/herdr/config.toml` first when a binding looks inert). The keymap's popup
+  commands run `bash ~/.config/herdr/scripts/<name>.sh`, and that directory is a SECOND
+  installer symlink, to `dotfiles/config/herdr/scripts/`: edit scripts in the repo, not in
+  `~/.config`, and remember a pulled config change needs `herdr server reload-config`
+  while a script change needs nothing (the command runs on each press).
+- **Keymap conflict rule: on a direct chord the plugin feature wins over the older
+  hand-written script.** `ctrl+q`, `ctrl+alt+f`, `ctrl+alt+e`, `ctrl+alt+c`/`r`,
+  `ctrl+alt+p`/`k` call sidebar actions, while `jump-file.sh`, `branch-switch.sh`,
+  `branch-merge.sh`, `rename-branch.sh`, `run-hold.sh` and `ai-commit.sh` sit in the
+  scripts dir UNBOUND (rebind them if the fzf/popup behaviour is wanted back);
+  `force-reset.sh` moved to `ctrl+alt+shift+f` and `herdr-file-viewer` to `ctrl+alt+v`.
+  `ctrl+alt+s` and `ctrl+alt+f` BOTH open the search popup — the first is the user's own
+  chord, the second the documented one. The Zed-derived bindings worth keeping are
+  `toggle_sidebar = ["prefix+b", "alt+f12"]`, `goto = ["prefix+g", "ctrl+f12"]`,
+  `next_agent = "ctrl+alt+t"`, the `detach`/`close_pane` chord lists, `ctrl+w` →
+  `jump-symbol.sh`, `alt+w` / `ctrl+alt+h` → lazygit popups, `ctrl+alt+g` →
+  `tareqmlx.lazygit-viewer.branch-popup`, `ctrl+alt+b` → open-sidebar.
 - **Global content search needs no new code either**: `herdr-sidebar.search-popup` already IS
   VS Code's Ctrl+Shift+F layout — query + `Aa`/`ab`/`.*` chips and file-grouped hits with
   line numbers on the left, a syntax-highlighted preview centred on the selected hit on the
@@ -2041,7 +2052,8 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   protocol, so Ctrl+Shift+<letter> is either eaten by the terminal's own Find or collapses
   to plain Ctrl+<letter> — and herdr's pane side can't distinguish them either). The
   Ctrl+Alt+<letter> family is the one proven to pass through there (`ctrl+alt+q/c/x/p/k…`).
-  `ctrl+alt+f` in that file is `force-reset.sh`, so the repo's own chord was never usable.
+  That file now also binds `ctrl+alt+f` to the same popup, and the `force-reset.sh` that
+  used to own that chord lives on `ctrl+alt+shift+f`.
 
 
 ## dotfiles/ (the IDE layer)

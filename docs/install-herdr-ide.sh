@@ -68,6 +68,7 @@ drift_check() {
 step "config drift check"
 drift_check "$DOTFILES/config/fresh/config.json" "$HOME/.config/fresh/config.json"
 drift_check "$DOTFILES/config/herdr/config.toml" "$HOME/.config/herdr/config.toml"
+drift_check "$DOTFILES/config/herdr/scripts" "$HOME/.config/herdr/scripts"
 
 # ── 2. Dotfiles installer (packages, herdr, Fresh, configs, plugins) ───
 step "dotfiles installer"

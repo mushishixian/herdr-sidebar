@@ -1,41 +1,49 @@
-# herdr — terminal workspace manager (managed by herdr-sidebar/dotfiles)
-# Full reference: `herdr --default-config`. Reload: prefix+shift+r.
+# herdr — terminal workspace manager.
+#
+# MANAGED: dotfiles/install.sh symlinks this file to ~/.config/herdr/config.toml,
+# and links dotfiles/config/herdr/scripts/ to ~/.config/herdr/scripts/. Edit the
+# file HERE and commit: every machine that pulls this repo and reruns the
+# installer gets the same settings, the same keymap and the same helper scripts.
+# Full reference: `herdr --default-config`. Reload: `herdr server reload-config`
+# (or prefix+shift+r). Validate: `herdr config check`.
 
 onboarding = false
 
 [theme]
-# Follow the host terminal's palette (set Dark+ there), with VS Code's blue accent.
+# Follow the host terminal's palette (set Dark+ there). `auto_switch` is off:
+# the theme below always wins.
 name = "vesper"
-
 auto_switch = false
-[theme.custom]
-accent = "#007acc"
 
 [terminal]
 new_cwd = "follow"
 
 [ui]
 tab_bar_position = "top"
-# herdr draws its own steady cursor on WSL by default; "native" keeps the
-# terminal's cursor and puts IME candidate windows (中文/日本語) in the right
-# place, at the cost of occasional flicker during heavy output.
-host_cursor = "native"
-status_indicators = "symbols"
 
-# Which space's agent is busy, at a glance. Row 1's `state_icon` is a single
-# cell (symbols style: ◐ working, × blocked, ✓ done, ○ idle, · unknown), so a
-# busy space also gets a BOLD stand-alone word line. The `hide` rules drop that
-# line for idle/unknown spaces, so quiet spaces keep the two-line layout.
-# `$agents` is reported by herdr-sidebar itself (source `herdr-sidebar`, 20 s
-# TTL, refreshed from every sidebar pane's 5 s heartbeat): the agent names in
-# that space, the busy one first, e.g. `claude` or `pi · codex`. Agent state
-# comes from herdr's agent-state hooks (`herdr integration status`; the
-# installer installs the pi and Claude Code ones).
+# 关 workspace 时不再问"确定吗"。关 TAB 本来就不弹确认；插件预览只有在
+# 编辑器 buffer 有未保存修改时才会问（防止丢数据，那条别关）。
+confirm_close = false
+
+# 左上角 agent 状态：symbols 用静态字形区分（◐ working / × blocked / ✓ done /
+# ○ idle / · unknown）；"dots" 全都画 ●，只有颜色不同，看不出在干活。
+# 当前沿用 dots（本机既有行为）；想要一眼看出忙闲就把下面这行改成 "symbols"。
+status_indicators = "dots"
+
+# The agent list under the spaces. There is NO key that removes this section:
+# `rows = []` degrades to one line per agent holding just the state dot (verified
+# live), and the "agents … grouped" header stays. The minimum is one line per
+# detected agent pane, so the list is as tall as your agent count.
+# One line with name (instead of the default TWO: machine/workspace/tab + agent):
+[ui.sidebar.agents]
+row_gap = 0
+rows = [["state_icon", "agent"]]
+
 [ui.sidebar.spaces]
-# Two lines per space and no blank line between spaces: the project name carries
-# the space's agents right beside it, the branch line stays underneath. (The old
-# three-line form put the agents + state word on a row of their own, which is
-# what made the rail tall; the state icon still says busy/idle.)
+# 每个 space 两行：项目名（bold）+ 该空间的 agent 名（$agents，sidebar 每 5s 上报、20s TTL），
+# 下面分支/git。状态不单独占行，由最左的图标本身表示。
+# herdr 没有"分隔线/横线"可配（rows 只认内置与 $custom token，不认字面量），
+# 能加的间隔只有 row_gap：0 = 各空间紧贴，1 = 空间之间空一行。
 row_gap = 0
 rows = [
   # The state glyph is one terminal cell — there is no "bigger"; bold is the
@@ -49,130 +57,269 @@ rows = [
 ]
 
 [ui.toast]
+# "system" asks the OS (Windows Terminal shows it bottom-right; WSL has no
+# notification service, so it disappears). "herdr" draws the toast inside herdr,
+# bottom-right, on every platform - so AI commit / pull / push failures are
+# always visible.
 delivery = "herdr"
 
+# ============================================================
+# 键位
+#   参考: /mnt/c/Users/64813/AppData/Roaming/Zed/keymap.json（Zed keymap 翻译）
+#
+# Herdr 是终端复用器，不是编辑器。Zed 的编辑器动作（多光标 alt-d、折叠
+# alt-c、整理 import alt-enter、outline、思考模式等）在 Herdr 里没有对应
+# 物，一律不绑；下面每条都标了「原 Zed 动作」和必要的语义漂移。
+#
+# 前缀键默认 ctrl+b；带 prefix+ 的形式一个键都不抢，直连和弦（ctrl+alt…）
+# 才是从 pane 手里截键，所以危险动作故意用多修饰键。
+#
+# 冲突取舍：直连和弦上，插件做进 herdr-sidebar 的功能优先（quick open /
+# 搜索、替换弹窗 / 分支弹窗 / 后台 pull、push），早期自己写的脚本让位或
+# 改绑（jump-file.sh、branch-*.sh、rename-branch.sh、ai-commit.sh、
+# run-hold.sh 仍在 dotfiles/config/herdr/scripts/ 里，想用随时重绑）。
+# ============================================================
+
 [keys]
-# Defaults kept: prefix = ctrl+b, v / minus split, h j k l focus, z zoom,
-# c new tab, g goto, b toggles the agent sidebar, ? shows every binding.
+# 原 Zed: alt-f12 → workspace::ToggleBottomDock（开关终端面板）
+# Herdr 里一切皆终端，取「开关辅助面板 = 侧边栏」这个近似
+toggle_sidebar = ["prefix+b", "alt+f12"]
 
-# ── IDE (dotfiles-ide plugin) ──────────────────────────────────────────
-[[keys.command]]
-key = "prefix+i"
-type = "plugin_action"
-command = "dotfiles-ide.layout"
-description = "IDE layout: sidebar | Fresh / terminal | agent"
+# 原 Zed: ctrl-f12 → outline::Toggle（大纲）
+# Herdr 没有代码大纲；取「会话大纲」= 会话导航器（列出每个 agent/pane、路径、分支）
+goto = ["prefix+g", "ctrl+f12"]
 
-[[keys.command]]
-key = "prefix+backtick"
-type = "plugin_action"
-command = "dotfiles-ide.toggle-terminal"
-description = "toggle terminal (Ctrl+`)"
+# 原 Zed: ctrl-alt-t → agent::ToggleThinkingMode（切换思考模式）
+# Herdr 控制不了 agent 内部模式，改成「跳到下一个需要我的 agent」
+next_agent = "ctrl+alt+t"
 
-# ── Sidebar (herdr-sidebar plugin) ─────────────────────────────────────
-[[keys.command]]
-key = "prefix+a"
-type = "plugin_action"
-command = "herdr-sidebar.open-sidebar"
-description = "toggle explorer sidebar (Ctrl+B)"
+# 原 Zed: alt-f4 / ctrl-shift-q → zed::Quit（退出）
+# alt+f4 在 WSL 会被 Windows 直接截走关窗口，绑不上，改用 ctrl+alt 变体
+detach = ["prefix+q", "ctrl+shift+q", "ctrl+alt+shift+q"]
 
-[[keys.command]]
-key = "prefix+f"
-type = "plugin_action"
-command = "herdr-sidebar.quick-open"
-description = "quick open file (Ctrl+P)"
+# 原 Zed: ctrl-d → project_panel::Delete（面板内删除文件）
+# ctrl+d 是 shell/agent 的 EOF，绝不能直连；Herdr 也没有面板上下文，
+# 这里给个近似的「关闭当前 pane」，故意用三修饰键防误触（会杀掉正在跑的 agent！）
+close_pane = ["prefix+x", "ctrl+alt+shift+d"]
 
-[[keys.command]]
-key = "prefix+/"
-type = "plugin_action"
-command = "herdr-sidebar.show-search"
-description = "search in files (sidebar view)"
-
-[[keys.command]]
-key = "prefix+d"
-type = "plugin_action"
-command = "herdr-sidebar.show-git"
-description = "source control (Ctrl+Shift+G)"
-
-# ── File search popup ──────────────────────────────────────────────────
-# Direct, global chord: opens centered file search modal from any pane.
+# ── 快速打开文件：插件的图形化弹窗（原 Zed ctrl-q → file_finder::Toggle）──
+# 树外任意位置按 ctrl+q，模糊列出项目文件，⏎ 在 Fresh/预览里打开。
+# 早期那份 fzf 版 jump-file.sh 仍在 scripts/ 里，想要就换一个键。
 [[keys.command]]
 key = "ctrl+q"
 type = "plugin_action"
 command = "herdr-sidebar.file-search"
-description = "quick open file popup (Ctrl+Q)"
+description = "快速打开文件弹窗（Ctrl+Q / fzf 版在 scripts/jump-file.sh）"
 
-# Search file contents with a live preview (popup). Ctrl+Alt+F, like the
-# other Ctrl+Alt chords: terminals pass it through (Ctrl+Shift+F is Find).
+# ── 全局搜索内容：左结果、右语法高亮预览（原 Zed ctrl-shift-f）──
+# 键用 ctrl+alt+s 而不是 VS Code 的 ctrl+shift+f：实测本机 ctrl+f 有反应、
+# ctrl+shift+f 完全没到 herdr —— 外层终端没有 kitty 键盘协议，Ctrl+Shift+<字母>
+# 要么被它自己吞掉（Find），要么降级成普通 Ctrl+<字母>。Ctrl+Alt+字母 这一族
+# 在你机器上已验证能穿透（ctrl+alt+q/c/x/p/k… 都在用）。
+# ctrl+alt+f 是同一招的备用位（两键都开同一个弹窗）。
+[[keys.command]]
+key = "ctrl+alt+s"
+type = "plugin_action"
+command = "herdr-sidebar.search-popup"
+description = "全局搜索内容 · 左结果右预览（Ctrl+Alt+S）"
+
 [[keys.command]]
 key = "ctrl+alt+f"
 type = "plugin_action"
 command = "herdr-sidebar.search-popup"
-description = "search in files popup (Ctrl+Alt+F)"
+description = "全局搜索内容 · 左结果右预览（Ctrl+Alt+F）"
 
-# Replace across files (the search popup in replace mode). Not Ctrl+Alt+H:
-# without the kitty protocol that arrives as Alt+Backspace.
+# 替换模式 = 同一个搜索弹窗 + Replace 行：ctrl+R 替换当前项，alt+enter 全部替换。
+# 不用 Ctrl+Alt+H：没有 kitty 协议时它到达的是 Alt+Backspace。
 [[keys.command]]
 key = "ctrl+alt+e"
 type = "plugin_action"
 command = "herdr-sidebar.replace-popup"
-description = "replace in files popup (Ctrl+Alt+E)"
-# Go to symbol across the project (popup). Heuristic, not LSP: the sidebar
-# indexes definition-shaped lines per language (see docs/herdr-ide.md).
+description = "跨文件替换（Ctrl+Alt+E）"
+
+# herdr-sidebar 的「跳转符号」弹窗：全项目定义名的模糊列表（多语言），
+# ⏎ 在本 workspace 的 Fresh 里定位到那一行。启发式索引（正则表，不是 LSP），
+# 要语义精确的定义跳转用 Fresh 的 alt+shift+q。
 [[keys.command]]
 key = "ctrl+alt+q"
 type = "plugin_action"
 command = "herdr-sidebar.symbol-popup"
-description = "go to symbol popup (Ctrl+Alt+Q)"
+description = "跳转符号 · 全项目定义模糊搜索 → Fresh 定位到行"
 
+# ---- 全局跳转到函数/类：自己那份 fzf 版（留着，与插件版并存）----
+# fzf 实时扫 PHP 的 class/interface/trait/函数/方法（rg，不建索引），
+# 选中跳进 Fresh 对应那一行；显示成 Class::method。ctrl+w 在 shell 里是删词，
+# 但这个绑定是 herdr 全局接管，不经过 shell，放心用。
+[[keys.command]]
+key = "ctrl+w"
+type = "popup"
+command = "bash ~/.config/herdr/scripts/jump-symbol.sh"
+description = "跳转函数/类 · fzf 扫符号 → Fresh 定位到行"
 
-# ── Git branch popups (patched herdr-sidebar) ──────────────────────────
-# Direct, global chords: they work from any pane. Windows Terminal passes
-# Ctrl+Alt+letter through (unlike Ctrl+Shift+C, which it keeps for copy).
+# ---- 原 Zed: alt-w → task "Lazygit" ----
+# alt+w 归 Herdr（它比 pane 里的程序先拿到键），Fresh 的"找引用"改走 alt+shift+w。
+[[keys.command]]
+key = "alt+w"
+type = "popup"
+command = "lazygit"
+description = "Lazygit (原 Zed alt+w)"
+width = "90%"
+height = "90%"
+
+# ---- 分支操作：一个操作一个键、一个专用小弹窗（顶上就是过滤框）----
+# 键位对着原 Zed：ctrl-alt-c = git::Branch（切分支）、ctrl-alt-x = task "Git: Merge Branch"。
+# 都走插件弹窗：切换时可以输入新名字直接建；合并选中分支按一次 ⏎ 就合并，
+# 冲突时结果屏里按 a 可以 merge --abort。（scripts/ 里 branch-switch.sh、
+# branch-merge.sh、rename-branch.sh 是同功能的 fzf 老版本，想用就重绑。）
 [[keys.command]]
 key = "ctrl+alt+c"
 type = "plugin_action"
 command = "herdr-sidebar.git-switch-branch"
-description = "git: switch branch"
-
-[[keys.command]]
-key = "ctrl+alt+r"
-type = "plugin_action"
-command = "herdr-sidebar.git-rename-branch"
-description = "git: rename current branch"
+description = "切换分支 · 模糊搜索弹窗，也可输入新名字"
 
 [[keys.command]]
 key = "ctrl+alt+x"
 type = "plugin_action"
 command = "herdr-sidebar.git-merge-branch"
-description = "git: merge a branch into current"
+description = "合并分支到当前 · 插件弹窗（一次 ⏎ 直接合并）"
 
+# ---- 原 Zed: ctrl-alt-r → git::RenameBranch ----
+[[keys.command]]
+key = "ctrl+alt+r"
+type = "plugin_action"
+command = "herdr-sidebar.git-rename-branch"
+description = "Git 重命名当前分支 (原 Zed ctrl+alt+r)"
+
+# ---- 新建分支：弹窗输名字，从 HEAD 拉出并切过去（git switch -c）----
+# 原来这里绑的是 ide-open.sh（fzf 选目录 → 新 IDE workspace），已按需让位；
+# 脚本还在 ~/.config/herdr/scripts/ide-open.sh，想找回来就换个键再绑。
 [[keys.command]]
 key = "ctrl+alt+n"
 type = "plugin_action"
 command = "herdr-sidebar.git-new-branch"
-description = "git: new branch from HEAD (popup)"
+description = "git: 新建分支（从 HEAD 拉出并切过去）"
 
-# ── Git remote operations (with async progress toast) ──────────────────
+# ---- 全功能档：lazygit 的分支面板（space 切 / M 合并进当前 / R 重命名 / n 新建 / d 删除）----
+# 三个专用弹窗干细活；要翻面板、看 reflog、干上面三件以外的事就走这个。
+# 跟 alt+w（整个 lazygit）、ctrl+alt+h（lazygit log）是一家人。
+[[keys.command]]
+key = "ctrl+alt+g"
+type = "plugin_action"
+command = "tareqmlx.lazygit-viewer.branch-popup"
+description = "lazygit 分支面板：切换/合并/重命名/新建/删除"
+
+# ---- 原 Zed: ctrl-alt-h → task "Git Line History" ----
+# 该 task 在你的 tasks.json 里并不存在；且 Herdr 拿不到编辑器当前文件，
+# 所以退成整仓库的 log 面板
+[[keys.command]]
+key = "ctrl+alt+h"
+type = "popup"
+command = "lazygit log"
+description = "Git 历史 (原 Zed ctrl+alt+h)"
+width = "90%"
+height = "90%"
+
+# ---- 原 Zed: ctrl-alt-p → git::Pull ----
+# 走插件：后台执行，进度/失败用 toast 汇报，不占一个弹窗。
+# scripts/run-hold.sh 是「跑完停住等回车」的弹窗老版本，想要就重绑。
 [[keys.command]]
 key = "ctrl+alt+p"
 type = "plugin_action"
 command = "herdr-sidebar.git-pull"
-description = "git pull (Ctrl+Alt+P)"
+description = "Git pull (原 Zed ctrl+alt+p，后台 + 进度 toast)"
 
+# ---- 原 Zed: ctrl-alt-k → git::Push ----
 [[keys.command]]
 key = "ctrl+alt+k"
 type = "plugin_action"
 command = "herdr-sidebar.git-push"
-description = "git push (Ctrl+Alt+K)"
+description = "Git push (原 Zed ctrl+alt+k，后台 + 进度 toast)"
 
-# git add -A + commit with an OpenCommit (oco) generated message.
-# Windows Terminal binds Ctrl+Shift+A to "Select all" by default — unbind it
-# there or this chord never reaches herdr.
+# ---- 原 Zed: ctrl-shift-a → task "Git: AI Commit All" ----
+# 走插件流程（不是弹窗）：切到该 tab 的 Source Control，nested-repo 安全地暂存，
+# oco 用裁剪后的临时 index 生成消息（大文件只喂前 40 行、两个 token 上限都钉死），
+# 填进 Message 框，~0.9s 后走 ✓ Commit 提交——消息可以在这 0.9s 里改。
+# Windows Terminal 默认把 Ctrl+Shift+A 绑成 Select all，要解绑。
+# 自己那份 popup 脚本（scripts/ai-commit.sh）还在，想用就重绑一个键。
 [[keys.command]]
 key = "ctrl+shift+a"
 type = "plugin_action"
 command = "herdr-sidebar.git-commit-ai"
-description = "git: add -A + AI commit (Ctrl+Shift+A)"
+description = "AI 提交 (插件: Source Control + oco)"
+
+# ---- 原 Zed: ctrl-alt-f → task "Git Force Reset & Clean" ----
+# 比 Zed 那边多一道 y/N 确认。ctrl+alt+f 让给了搜索弹窗，这里升到三修饰键
+# （危险动作本来就用多修饰键防误触）。
+[[keys.command]]
+key = "ctrl+alt+shift+f"
+type = "popup"
+command = "bash ~/.config/herdr/scripts/force-reset.sh"
+description = "Git 强制重置 + 清理 (原 Zed ctrl+alt+f)"
+
+# ---- 左侧：sidebar 文件树开关（b = browser/tree）----
+# herdr-sidebar.open-sidebar = 开/聚焦/关三态 toggle。prefix+a 是同一动作。
+[[keys.command]]
+key = "ctrl+alt+b"
+type = "plugin_action"
+command = "herdr-sidebar.open-sidebar"
+description = "文件树侧边栏开关"
+
+# ---- 中栏换成「可点目录树 + 内容」的 viewer（社区插件 herdr-file-viewer）----
+# ctrl+alt+e 让给了替换弹窗，viewer 挪到 ctrl+alt+v。
+# 三态 toggle：无则开分栏 / 有则聚焦 / 已聚焦则关。
+# 在 viewer 里：点/回车看文件（只读），按 e 用 fresh 就地打开编辑，退出 fresh 回到 viewer。
+[[keys.command]]
+key = "ctrl+alt+v"
+type = "plugin_action"
+command = "herdr-file-viewer.open-file-viewer"
+description = "文件浏览器 + 内容 pane（e 用 fresh 编辑）"
+
+# ── IDE (dotfiles-ide plugin) ──────────────────────────────────────────
+# prefix+i 等走 prefix 前缀，不抢任何直连和弦，与 ctrl+alt 那套不冲突。
+
+# ---- IDE 布局：sidebar | Fresh/终端 | agent ----
+[[keys.command]]
+key = "prefix+i"
+type = "plugin_action"
+command = "dotfiles-ide.layout"
+description = "IDE 布局：侧栏 | Fresh/终端 | agent"
+
+# ---- 开关底部终端（相当于 Ctrl+`）----
+[[keys.command]]
+key = "prefix+backtick"
+type = "plugin_action"
+command = "dotfiles-ide.toggle-terminal"
+description = "开关终端（Ctrl+`）"
+
+# ── Sidebar (herdr-sidebar plugin) ─────────────────────────────────────
+
+# ---- 侧栏开关（与 ctrl+alt+b 同一个动作，多一个前缀键形式）----
+[[keys.command]]
+key = "prefix+a"
+type = "plugin_action"
+command = "herdr-sidebar.open-sidebar"
+description = "文件树侧边栏开关（Ctrl+B A）"
+
+# ---- 侧栏内快速打开文件（相当于 Ctrl+P）----
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "herdr-sidebar.quick-open"
+description = "快速打开文件（Ctrl+P）"
+
+# ---- 侧栏内的内容搜索 ----
+[[keys.command]]
+key = "prefix+/"
+type = "plugin_action"
+command = "herdr-sidebar.show-search"
+description = "侧栏内容搜索"
+
+# ---- 侧栏内的源代码管理视图 ----
+[[keys.command]]
+key = "prefix+d"
+type = "plugin_action"
+command = "herdr-sidebar.show-git"
+description = "侧栏源代码管理（Ctrl+Shift+G）"
 
 # ── Popups ─────────────────────────────────────────────────────────────
 [[keys.command]]

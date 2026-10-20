@@ -119,24 +119,41 @@ moves the copy aside.
 |---|---|
 | `ctrl+b i` | IDE layout for the current pane's project (focuses Fresh if already built) |
 | ``ctrl+b ` `` | Toggle the terminal under Fresh (focus / collapse / reopen) |
-| `ctrl+b a` | Toggle the sidebar |
+| `ctrl+b a`, `ctrl+alt+b`, `alt+f12` | Toggle the sidebar |
 | `ctrl+b f` | Quick Open in the sidebar |
 | `ctrl+b /` | Search in files |
 | `ctrl+b d` | Source Control view |
 | `ctrl+q` | File-search popup (fuzzy find, opens in Fresh/preview) |
-| `ctrl+alt+f` | Search in files popup (file contents, live preview; opens at the matching line) |
+| `ctrl+alt+s`, `ctrl+alt+f` | Search in files popup (file contents, live preview; opens at the matching line) |
 | `ctrl+alt+e` | Replace in files popup (the search popup with a Replace row: Ctrl+R replaces the selected item, Alt+Enter replaces all, after a y/N prompt) |
 | `ctrl+alt+q` | Go to symbol popup: fuzzy list of the project's definitions, Enter opens one at its line (heuristic index — see below) |
+| `ctrl+w` | The older fzf "jump to symbol" script (`scripts/jump-symbol.sh`, rg + PHP-focused) beside the plugin popup |
 | `ctrl+alt+c` | Git: switch branch (popup; type a new name to create) |
 | `ctrl+alt+n` | Git: new branch — name prompt (popup), branched from HEAD and switched to |
 | `ctrl+alt+r` | Git: rename current branch (popup) |
 | `ctrl+alt+x` | Git: merge a branch into the current one (popup) |
+| `ctrl+alt+g` | lazygit branch panel (switch / merge / rename / new / delete; needs the `lazygit-viewer` plugin) |
 | `ctrl+alt+p` | Git: pull (background, progress toasts) |
 | `ctrl+alt+k` | Git: push (background, progress toasts) |
 | `ctrl+shift+a` | Git: stage all + OpenCommit message into Source Control, then commit |
+| `ctrl+alt+shift+f` | Git: force reset + clean (`scripts/force-reset.sh`, extra y/N prompt) |
+| `alt+w`, `ctrl+alt+h` | lazygit (whole UI / the log panel) as popups |
+| `ctrl+alt+v` | File viewer pane (`herdr-file-viewer`; `e` opens the file in Fresh) |
 | `ctrl+b alt+g` | lazygit popup |
 | `ctrl+b t` | Scratch terminal popup |
 | `ctrl+b ?` | Every herdr binding |
+
+The prefix-mode extras come from the same `[keys]` table: `ctrl+f12` (session outline /
+goto), `ctrl+alt+t` (next agent), `ctrl+shift+q` / `ctrl+alt+shift+q` (detach),
+`ctrl+alt+shift+d` (close pane — deliberately three modifiers, it kills a running agent).
+
+`dotfiles/config/herdr/config.toml` and `dotfiles/config/herdr/scripts/` are both symlinked
+into `~/.config/herdr/` by the installer, so a keymap or script edit belongs in this repo:
+`git pull` + `./install.sh`, then `herdr server reload-config` for a config change (scripts
+need no reload). The scripts the plugin actions replaced — `jump-file.sh`,
+`branch-switch.sh`, `branch-merge.sh`, `rename-branch.sh`, `run-hold.sh`, `ai-commit.sh`,
+`ide-open.sh` — still ship in that directory but are **not bound**; rebind one if its fzf /
+popup behaviour is wanted back.
 
 Git keys act on the repository of the **focused pane's** current directory.
 
@@ -251,15 +268,20 @@ space's agent names beside it, row 2 is the branch/git line. The busy/idle *word
 is not drawn — the icon and its colour carry it; adding `state_text` back is one
 config line (`rows` is a plain list).
 
-**That block only reaches the rail if `~/.config/herdr/config.toml` is the installer's
-symlink.** Replace that file with your own config (a personal keymap file is the common
-case) and herdr silently falls back to its defaults: `status_indicators = "dots"`, where
-working / blocked / done are all a `●` and only the colour differs, plus two rows
-(`["state_icon", "workspace"]`, `["branch", "git_status"]`) with no word line. The status
-data is still correct — `herdr workspace list` reports `agent_status = working` — it is
-just unreadable. Merge `[ui] status_indicators = "symbols"` and the
-`[ui.sidebar.spaces] rows` table into your file, then `herdr server reload-config`
-(applies to a LIVE client, no restart).
+**That block only reaches the rail when `~/.config/herdr/config.toml` is the installer's
+symlink** (it is on every machine this repo's installer set up; the repo file is the source
+of truth). Replace that file with a hand-written config — a personal keymap file used to be
+the common case — and herdr silently falls back to its defaults: `status_indicators =
+"dots"`, where working / blocked / done are all a `●` and only the colour differs, plus two
+rows (`["state_icon", "workspace"]`, `["branch", "git_status"]`) with no agents beside the
+name. The status data is still correct — `herdr workspace list` reports `agent_status =
+working` — it is just unreadable without colour. Re-link it (or merge
+`[ui] status_indicators` and the `[ui.sidebar.spaces] rows` table into your file), then
+`herdr server reload-config` (applies to a LIVE client, no restart).
+
+The shipped file sets `status_indicators = "dots"`, the machine's long-standing choice, so
+working vs idle is a colour, not a glyph. One line turns that into `"symbols"`
+(`◐` working, `×` blocked, `✓` done, `○` idle, `·` unknown), which reads without colour.
 
 **The agent list under the spaces cannot be hidden.** `[ui.sidebar.agents]` accepts only
 `row_gap`, `rows` and `rows_by_agent` — there is no enable/visibility switch — and the

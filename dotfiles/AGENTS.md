@@ -17,7 +17,8 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 
 | When you change | Also update |
 |---|---|
-| A herdr key binding (`dotfiles/config/herdr/config.toml`) | The herdr key table in `docs/herdr-ide.md` (*Keys → herdr, global*); the verify list in `docs/install-herdr-ide.sh` if the action is one it should check |
+| A herdr key binding (`dotfiles/config/herdr/config.toml`) | The herdr key table in `docs/herdr-ide.md` (*Keys → herdr, global*); the verify list in `docs/install-herdr-ide.sh` if the action is one it should check. This file AND `config/herdr/scripts/` are installer symlinks into `~/.config/herdr/`: never edit the `~/.config` copies, a pull cannot reach them |
+| A script under `config/herdr/scripts/` (a keymap popup runs `bash ~/.config/herdr/scripts/<name>.sh`) | Keep it plain bash (`bash -n`) with `~`/`$HOME` paths, never a hardcoded `/home/<user>`, or another machine's copy breaks. Record or drop its binding in the key table of `docs/herdr-ide.md`. Add scripts to this directory, not to `~/.config`: the installer symlinks the whole directory |
 | A herdr action or plugin entry point | The manifest that owns it (`plugins/herdr-sidebar/herdr-plugin.toml` or `dotfiles/herdr-plugins/ide/herdr-plugin.toml`); for a sidebar action with a keybinding, the flag mapping in `announce_flag` in `plugins/herdr-sidebar/src/shortcut_tip.rs` so its toast shows the key; the verify list in `docs/install-herdr-ide.sh` |
 | A Fresh key binding (`dotfiles/config/fresh/config.json`) | The Fresh key table in `docs/herdr-ide.md` (*Keys → Fresh*); the `fresh config show` grep list in `docs/install-herdr-ide.sh` |
 | A Fresh plugin (`dotfiles/config/fresh/plugins/*.ts`) | The *Fresh plugins* section of `docs/herdr-ide.md`; `docs/install-herdr-ide.sh` verify list if it should be checked; the plugin link loop in `dotfiles/install.sh` picks new `*.ts` files up automatically, but a rerun is still needed |
