@@ -2007,6 +2007,20 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   included `ctrl+q` = fzf file jump, `ctrl+w` = their own `jump-symbol.sh` (rg + fzf,
   PHP-focused), and `ctrl+alt+q` = `herdr.file-picker.pick` until the symbol popup took
   it over.
+- **Global content search needs no new code either**: `herdr-sidebar.search-popup` already IS
+  VS Code's Ctrl+Shift+F layout — query + `Aa`/`ab`/`.*` chips and file-grouped hits with
+  line numbers on the left, a syntax-highlighted preview centred on the selected hit on the
+  right (dropped below 90 columns), Enter opens the hit at its line, Ctrl+R/Alt+Enter replace.
+  Verified live in a scratch pane (`SYMBOL_MAX_BYTES` → "3 results in 2 files", preview at
+  `AGENTS.md · line 1977`). The one VS Code feature it lacks is include/exclude glob fields —
+  those exist only in the Explorer's Search view (`content_search::build_search_globs`); the
+  popup passes empty globs. The maintainer's live config binds it to `ctrl+alt+s`, NOT
+  VS Code's `ctrl+shift+f`: verified live on their box, `ctrl+f` reaches the app but
+  `ctrl+shift+f` never reaches herdr at all (the outer terminal has no kitty keyboard
+  protocol, so Ctrl+Shift+<letter> is either eaten by the terminal's own Find or collapses
+  to plain Ctrl+<letter> — and herdr's pane side can't distinguish them either). The
+  Ctrl+Alt+<letter> family is the one proven to pass through there (`ctrl+alt+q/c/x/p/k…`).
+  `ctrl+alt+f` in that file is `force-reset.sh`, so the repo's own chord was never usable.
 
 
 ## dotfiles/ (the IDE layer)
