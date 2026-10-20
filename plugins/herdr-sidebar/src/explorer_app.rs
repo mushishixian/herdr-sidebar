@@ -3944,19 +3944,13 @@ impl App {
                         .fg(palette().button_fg)
                 };
                 frame.render_widget(
-                    Paragraph::new(truncate_to(label.to_string(), usize::from(width)))
-                        .style(style),
+                    Paragraph::new(truncate_to(label.to_string(), usize::from(width))).style(style),
                     rect,
                 );
                 if hint_area.width > width + 2 {
                     frame.render_widget(
                         Paragraph::new(" not a git repository".dim().italic()),
-                        Rect::new(
-                            hint_area.x + width,
-                            hint_area.y,
-                            hint_area.width - width,
-                            1,
-                        ),
+                        Rect::new(hint_area.x + width, hint_area.y, hint_area.width - width, 1),
                     );
                 }
             }

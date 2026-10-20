@@ -126,6 +126,7 @@ moves the copy aside.
 | `ctrl+q` | File-search popup (fuzzy find, opens in Fresh/preview) |
 | `ctrl+alt+f` | Search in files popup (file contents, live preview; opens at the matching line) |
 | `ctrl+alt+e` | Replace in files popup (the search popup with a Replace row: Ctrl+R replaces the selected item, Alt+Enter replaces all, after a y/N prompt) |
+| `ctrl+alt+q` | Go to symbol popup: fuzzy list of the project's definitions, Enter opens one at its line (heuristic index — see below) |
 | `ctrl+alt+c` | Git: switch branch (popup; type a new name to create) |
 | `ctrl+alt+n` | Git: new branch — name prompt (popup), branched from HEAD and switched to |
 | `ctrl+alt+r` | Git: rename current branch (popup) |
@@ -150,6 +151,18 @@ under the query, and Tab moves between the two inputs. Ctrl+R replaces the selec
 match (or, on a file header, every match in that file after a `y` confirmation);
 Alt+Enter replaces every match in the project after a `y`. Open editor buffers see
 the change on disk as an external change.
+**Ctrl+Alt+Q** is "Go to symbol": one flat list of the project's definitions,
+filtered as you type, with the matched characters highlighted and the file's
+line number on the right. Enter opens the pick at that line in Fresh (or the
+preview when no editor is configured). It is a **name** index, not an LSP one:
+Fresh owns the language servers and herdr-sidebar has no LSP client, so each
+language's definition lines are matched with a regex table
+(`plugins/herdr-sidebar/src/symbol_search.rs`). Consequences: a symbol produced by
+a macro, re-exported under another name, or a method whose owning type is only
+visible from an `impl` block can be missing or land on a slightly different line.
+Use Fresh's `alt+shift+q` (LSP definition under the cursor) or `alt+shift+w`
+(references) when accuracy matters, and this popup when you only remember the
+name and the file.
 
 **Shortcut toasts:** every custom shortcut (herdr and Fresh) shows a small
 toast with its name and key, e.g. "Switch branch / Ctrl+Alt+C", as a reminder.
@@ -502,6 +515,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | *uncommitted* | **IDE layer: a label-only Fresh pane is healed in place** | A herdr server restart resumes panes as plain shells, keeping labels but dropping metadata tokens, so `herdr-ide`'s label-only check treated a dead `Fresh` pane as a working editor: it focused it, printed nothing, and `fresh-open` died with "could not start the IDE editor" (exit 1, surfaced by the sidebar as `custom editor failed: …/fresh-open exited with exit status: 1`). `lib.sh` adds `pane_fresh_daemon` and `fresh_editor_ok` (token AND live daemon); `herdr-ide` reuses a corpse pane as the editor (relabel + `fresh-ide` in place, no new splits) and prints the editor pane id on the already-built path, which is how `fresh-open` gets it. |
 | *uncommitted* | **IDE layer: jq ≥ 1.6 keyword fix** | `lib.sh`, `ide-save-sizes` and `fresh-to-agent` named a jq variable `label`, which jq 1.6+ parses as its `label` keyword (`$label` → "syntax error, unexpected label"), so EVERY pane lookup failed on Linux/WSL and a file click built no editor. Variables are `$lbl` now; `fresh-open` also reports a failed `herdr-ide` instead of exiting 3 silently. |
 | *uncommitted* | **Media opens in the preview; previews cover Fresh; Agent pane title** | `viewer::is_media_file` keeps pictures and videos out of the custom editor (Explorer click, Ctrl+Q popup; Source Control's `diff_opens_in_editor` media flag). Preview host: `fresh-ide` runs a host loop in the Fresh pane (token `hs-preview-host`); the sidebar writes `<sidebar state dir>/preview-host/<pane>.req`, the host claims it by rename, and the viewer runs there with `HERDR_SIDEBAR_PREVIEW_HOSTED=1`; `viewer::uncover_host` runs before the editor launches. Agent pane title: `ide-agent-title` + `shell/agent-title.zsh` (zsh preexec/precmd) → `pane report-metadata --title "◆ CLAUDE"`; language servers: `dotfiles/install-lsp.sh` (default in the installer) + Fresh `lsp` auto_start. |
+| *uncommitted* | **Go to symbol popup** | `--symbol-popup-open` (action `symbol-popup`, `ctrl+alt+q`) opens the popup pane `--symbol-popup` (80%×70%), `src/symbol_search.rs` indexes definitions with a per-language regex table over the Quick Open walk (gitignore-aware, `.git` skipped, files ≤1 MiB, 5000-symbol cap) and `src/symbol_popup.rs` fuzzy-filters it in memory and opens the pick at its line through `file_popup::open_file_in_workspace`. Deliberately NOT an LSP client: Fresh already runs the language servers and a second rust-analyzer per project is not worth it, so the result is a name index, not `workspace/symbol`. |
 
 **AI commit** (`ctrl+shift+a`): the action does not commit. It writes a per-tab
 request (`src/ai_commit.rs`, under the sidebar's private runtime dir) for the focused
@@ -742,6 +756,8 @@ popups, and conflict routing.
 | Actions missing in `herdr plugin action list` | manifest error: `herdr plugin log list --plugin herdr-sidebar` |
 | Conflict colors/keys missing | the file must contain `<<<<<<<` markers; `ls -la ~/.config/fresh/config.json` must be a symlink; `fresh --cmd config show \| grep conflict_`; restart Fresh with `fresh-restart` |
 | `ctrl+alt+f` / `ctrl+alt+e` does nothing | `herdr plugin action list \| grep -E 'search-popup\|replace-popup'`; `herdr server reload-config` |
+| `ctrl+alt+q` lists nothing or misses a symbol | the index is heuristic: only extensions in `symbol_search.rs`'s `LANGUAGES` table are scanned, files over 1 MiB, hidden and gitignored paths are skipped, and the list caps at 5000 symbols (the footer says `index capped`). A language that is missing there, or a symbol defined by a macro, needs the LSP instead: `alt+shift+q` |
+| `ctrl+alt+q` does nothing at all | two live-verified causes, in order: (1) a popup from an earlier attempt is still running — herdr reuses one popup per entrypoint, so the key silently starts nothing (`pkill -f -- "--symbol[-]popup"`, note the bracket or the pattern kills the shell typing it); (2) herdr is not reading the config you edited — `ls -la ~/.config/herdr/config.toml` must point at the file containing the binding (`herdr server reload-config` reports `applied` either way), and `herdr config check` should say `ok` |
 | A picture opens as garbage in Fresh | pictures open in the sidebar preview since the media-routing change; rebuild and redeploy the sidebar (`dotfiles/herdr-sidebar/build.sh`) if an old build is still running. The explicit "Open in Editor" menu item still sends it to Fresh |
 | A file opens in another workspace's Fresh | fixed: `fresh-open` only uses this workspace's editor; check the Fresh pane's `fresh_daemon` token with `herdr pane list` |
 | AI commit is slow or writes several messages | Update the sidebar (`dotfiles/herdr-sidebar/build.sh`) so the curated diff is used; lower `OCO_TOKENS_MAX_INPUT` in `~/.opencommit` too for manual `oco` runs (the sidebar already passes 24000) |

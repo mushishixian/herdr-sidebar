@@ -1950,6 +1950,64 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   `ctrl+alt+e` in `dotfiles/config/herdr/config.toml`.
 - Open editor buffers (Fresh) do not get a notification. They see the change on disk as an external
   change through their own reload or conflict handling.
+### Go to symbol popup (Ctrl+Alt+Q) — heuristic, deliberately not LSP
+
+- Entry points: `--symbol-popup` (pane `[[panes]] id = "symbol-popup"`, placement
+  `popup`, 80%x70%, `src/symbol_popup.rs::run`) and `--symbol-popup-open` (action
+  `symbol-popup`, Windows twin `symbol-popup-windows` through
+  `herdr-sidebar-ensure.exe`). Host key `ctrl+alt+q` in
+  `dotfiles/config/herdr/config.toml`; the caller-pane env travels through the same
+  `file_popup::request_popup_pane` the other popups use.
+- **There is no LSP client in this crate, and adding one was rejected.** Fresh already
+  runs the project's servers; a second rust-analyzer/tsserver per project costs
+  hundreds of MB to GB and needs its own root/lifecycle/paging code. Fresh 0.5.3 also
+  exposes NO workspace-symbol UI of its own (its `goto_lsp_symbol` sends
+  `textDocument/documentSymbol`, i.e. current buffer only, and nothing in its source
+  issues `workspace/symbol`), so there was nothing to delegate to either. The sidebar
+  therefore ships a NAME index: `src/symbol_search.rs`'s `LANGUAGES` table of
+  definition regexes (rust, ts/js, python, go, C/C++, java/cs/kotlin, ruby, php, shell,
+  lua, zig, swift, dart, elixir, haskell, markdown headings).
+- Known imprecision, do not "fix" it by widening patterns: macro-generated symbols,
+  re-exports, and which type owns an `impl`-block method are invisible to a line
+  regex. Fresh's `alt+shift+q`/`alt+shift+w` stay the accurate path. Loose C-family
+  patterns are why `NOT_NAMES` filters control-flow words (`else if (x) {`) and why the
+  C/C++ function rule requires the signature to end in `{` (a call ends in `;`).
+- The walk is Quick Open's (`collect_quick_files`: gitignore-aware, `.git` skipped, no
+  directory symlinks, 20k-file cap), plus: hidden files are OFF, files over 1 MiB
+  (`SYMBOL_MAX_BYTES`), NUL-containing or non-UTF-8 files, and an index cap of 5000
+  symbols (`SYMBOL_LIMIT`, the footer says `index capped`). One symbol per line (first
+  matching rule wins), so a line never reports twice.
+- Indexing happens ONCE on a worker thread at startup; typing re-ranks in memory
+  (`match_symbols`: `fuzzy_score_lowercased` on the name x3, or on the root-relative
+  path, name first). No debounce/generation machinery is needed, unlike the search
+  popup, because nothing re-scans. An empty query keeps walk order (path, then line).
+- The row is `<file icon> name  kind  …path:line`; matched characters are highlighted
+  with `palette().header_accent`, the location keeps its TAIL (file name first) since
+  that disambiguates same-named symbols, and both the name and the location are clipped
+  rather than pushing each other off the row. Enter (or a click) opens through
+  `file_popup::open_file_in_workspace(caller, root, path, Some(line))`, i.e. the same
+  routing Quick Open uses; Esc / Ctrl+Q / Ctrl+C cancel.
+- **A live popup is not re-opened, it is reused.** herdr keeps one popup per
+  `[[panes]]` entrypoint: with a `--symbol-popup` process already running, a further
+  `plugin.pane.open` answers ok and starts NOTHING, so the key looks dead even though
+  the earlier process is alive somewhere. That bit live — leftover popups from a test
+  in a since-closed tab made `ctrl+alt+q` look broken. `pkill -f -- "--symbol[-]popup"`
+  before judging a keybinding, and remember a popup inherited from a closed tab can be
+  alive yet invisible. (Note the bracket in the pattern: a bare
+  `pkill -f "herdr-sidebar --symbol-popup"` matches the shell command line that runs it
+  and kills that shell.)
+- **On the maintainer's Linux box the live herdr config is NOT this repo's copy**:
+  `~/.config/herdr/config.toml` is a plain 300-line file of its own (Chinese comments,
+  Zed-era chords, its own `~/.config/herdr/scripts/*.sh`), not a symlink to
+  `dotfiles/config/herdr/config.toml`. Editing the repo file and running
+  `herdr server reload-config` therefore changes nothing the user can press: the reload
+  re-applies the LIVE file and reports `applied` with no diagnostics either way. Check
+  `ls -la ~/.config/herdr/config.toml` before blaming a binding, and put the binding the
+  user is actually going to press in the live file too. Their live chords already
+  included `ctrl+q` = fzf file jump, `ctrl+w` = their own `jump-symbol.sh` (rg + fzf,
+  PHP-focused), and `ctrl+alt+q` = `herdr.file-picker.pick` until the symbol popup took
+  it over.
+
 
 ## dotfiles/ (the IDE layer)
 

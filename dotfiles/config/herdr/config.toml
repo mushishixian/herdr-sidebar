@@ -116,6 +116,14 @@ key = "ctrl+alt+e"
 type = "plugin_action"
 command = "herdr-sidebar.replace-popup"
 description = "replace in files popup (Ctrl+Alt+E)"
+# Go to symbol across the project (popup). Heuristic, not LSP: the sidebar
+# indexes definition-shaped lines per language (see docs/herdr-ide.md).
+[[keys.command]]
+key = "ctrl+alt+q"
+type = "plugin_action"
+command = "herdr-sidebar.symbol-popup"
+description = "go to symbol popup (Ctrl+Alt+Q)"
+
 
 # ── Git branch popups (patched herdr-sidebar) ──────────────────────────
 # Direct, global chords: they work from any pane. Windows Terminal passes

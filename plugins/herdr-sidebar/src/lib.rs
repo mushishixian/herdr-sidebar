@@ -30,6 +30,8 @@ pub mod shortcut_tip;
 pub mod snooze;
 pub mod state;
 pub mod suggest;
+pub mod symbol_popup;
+pub mod symbol_search;
 pub mod syntax;
 pub mod takeover;
 pub mod tree;

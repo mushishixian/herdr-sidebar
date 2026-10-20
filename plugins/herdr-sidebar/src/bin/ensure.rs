@@ -36,6 +36,11 @@ fn main() {
             let _ = herdr_sidebar::search_popup::open();
             return;
         }
+        Some("--symbol-popup-open") => {
+            // Windows twin of the Unix action, same as --search-popup-open.
+            let _ = herdr_sidebar::symbol_popup::open();
+            return;
+        }
         Some("--replace-popup-open") => {
             // Windows twin of the Unix action, same as --search-popup-open.
             let _ = herdr_sidebar::search_popup::open_replace();

@@ -113,6 +113,16 @@ platforms = ["linux", "macos"]
 title = "Quick Open (Popup)"
 description = "Popup: quickly search and open files in current workspace/repo."
 command = ["./target/release/herdr-sidebar", "--file-popup-open"]
+# Go to symbol (Ctrl+Alt+Q): project-wide symbol list. Heuristic — the sidebar
+# has no LSP client, so this indexes definition-shaped lines per language
+# (`symbol_search`), not a semantic workspace/symbol result.
+[[panes]]
+id = "symbol-popup"
+title = "Go to symbol"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--symbol-popup"]
+platforms = ["linux", "macos"]
+
 
 [[actions]]
 id = "search-popup"
@@ -127,6 +137,20 @@ platforms = ["windows"]
 title = "Search in files (popup)"
 description = "Popup: search file contents in the current workspace/repo with a live preview."
 command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--search-popup-open"]
+[[actions]]
+id = "symbol-popup"
+platforms = ["linux", "macos"]
+title = "Go to symbol (popup)"
+description = "Popup: fuzzy-search a project-wide symbol list (heuristic, no LSP) and open the definition."
+command = ["./target/release/herdr-sidebar", "--symbol-popup-open"]
+
+[[actions]]
+id = "symbol-popup-windows"
+platforms = ["windows"]
+title = "Go to symbol (popup)"
+description = "Popup: fuzzy-search a project-wide symbol list (heuristic, no LSP) and open the definition."
+command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--symbol-popup-open"]
+
 
 [[actions]]
 id = "replace-popup"

@@ -94,7 +94,7 @@ fi
 # ── 4. Verify (report only; never aborts) ──────────────────────────────
 step "verify"
 actions=$(herdr plugin action list 2>/dev/null || true)
-for a in git-commit-ai git-pull git-push file-search search-popup replace-popup git-switch-branch restart-fresh; do
+for a in git-commit-ai git-pull git-push file-search search-popup symbol-popup replace-popup git-switch-branch restart-fresh; do
   if grep -qE "\"action_id\": *\"$a\"" <<<"$actions"; then
     ok "herdr action $a"
   else

@@ -3999,7 +3999,6 @@ impl App {
         self.open_diff_viewer(repo, entry, staged);
     }
 
-
     /// Show a file's diff in the preview pane beside the sidebar. Staged
     /// rows show the staged diff; untracked files render as one addition.
     fn open_diff_viewer(&mut self, repo: usize, entry: &FileEntry, staged: bool) {
