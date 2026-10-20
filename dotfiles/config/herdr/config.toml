@@ -146,16 +146,6 @@ type = "plugin_action"
 command = "herdr-sidebar.symbol-popup"
 description = "跳转符号 · 全项目定义模糊搜索 → Fresh 定位到行"
 
-# ---- 全局跳转到函数/类：自己那份 fzf 版（留着，与插件版并存）----
-# fzf 实时扫 PHP 的 class/interface/trait/函数/方法（rg，不建索引），
-# 选中跳进 Fresh 对应那一行；显示成 Class::method。ctrl+w 在 shell 里是删词，
-# 但这个绑定是 herdr 全局接管，不经过 shell，放心用。
-[[keys.command]]
-key = "ctrl+w"
-type = "popup"
-command = "bash ~/.config/herdr/scripts/jump-symbol.sh"
-description = "跳转函数/类 · fzf 扫符号 → Fresh 定位到行"
-
 # ---- 原 Zed: alt-w → task "Lazygit" ----
 # alt+w 归 Herdr（它比 pane 里的程序先拿到键），Fresh 的"找引用"改走 alt+shift+w。
 [[keys.command]]
