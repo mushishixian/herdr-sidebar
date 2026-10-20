@@ -51,6 +51,20 @@ const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(450);
 const AI_COMMIT_REVIEW: std::time::Duration = std::time::Duration::from_millis(900);
 /// How often this sidebar checks its tab's AI commit request file.
 const AI_REQUEST_POLL: std::time::Duration = std::time::Duration::from_millis(300);
+/// How often the focused pane re-reads `git status`. The idle cadence
+/// ([`REFRESH_EVERY`](crate::REFRESH_EVERY), 1.5 s) made a file edited in another
+/// pane show up late (user-reported); when the user is looking at this pane, a
+/// status read is cheap (one process per repo) and `refresh` skips the rebuild
+/// when nothing changed.
+const FOCUSED_REFRESH: std::time::Duration = std::time::Duration::from_millis(500);
+/// How often an UNFOCUSED pane still re-reads `git status`. It used to skip the
+/// read entirely (the guard exists so the several hidden sidebars of one session
+/// do not multiply git processes), but that left a background Source Control pane
+/// frozen on stale changes while another pane had focus (user-reported). Five
+/// seconds is one `git status` per repo per period — `refresh` skips the rebuild
+/// when nothing changed — and the real catch-up is still instant: focusing the
+/// pane polls immediately at [`FOCUSED_REFRESH`].
+const BACKGROUND_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 /// How long a divider drag must stay put before it is adopted as the sidebar
 /// width setting — a drag is a burst of resize events, not one.
 const WIDTH_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -1280,6 +1294,9 @@ pub struct App {
     pub tree_view: bool,
     /// Keep polling Git status while unfocused ([`sidebar::BACKGROUND_REFRESH_ENV`]).
     background_refresh: bool,
+    /// Last `git status` read done while this pane was unfocused, for
+    /// [`BACKGROUND_POLL`].
+    last_background_poll: Option<std::time::Instant>,
 }
 
 const MY_VIEW: View = View::SourceControl;
@@ -1425,6 +1442,7 @@ impl App {
                     .ok()
                     .as_deref(),
             ),
+            last_background_poll: None,
         };
         app.apply_identity();
         app.refresh();
@@ -1525,19 +1543,43 @@ impl App {
         );
     }
 
+    /// How often the event loop should call [`Self::tick`]: the fast cadence
+    /// while this pane is focused (or explicitly background-refreshing), the
+    /// idle one otherwise.
+    pub fn refresh_interval(&self) -> std::time::Duration {
+        if self.background_refresh || self.pane_is_focused() {
+            FOCUSED_REFRESH
+        } else {
+            crate::REFRESH_EVERY
+        }
+    }
+
     /// Re-read every repo's git status (this is the change auto-detection —
-    /// tick() calls it every [`crate::REFRESH_EVERY`]); keeps the flash so
+    /// tick() calls it every [`Self::refresh_interval`]); keeps the flash so
     /// periodic ticks don't eat notices.
+    ///
+    /// The list is only rebuilt when a status actually CHANGED, which is what
+    /// makes the fast focused cadence affordable: an idle poll costs one `git
+    /// status` per repo and nothing else.
     pub fn refresh(&mut self) {
         let mut error = None;
+        let mut changed = false;
         for repo in &mut self.repos {
             match repo.git.status() {
-                Ok(status) => repo.status = status,
+                Ok(status) => {
+                    if status != repo.status {
+                        repo.status = status;
+                        changed = true;
+                    }
+                }
                 Err(e) => error = Some(e),
             }
         }
         if let Some(e) = error {
             self.flash = Some((e, true));
+        }
+        if !changed {
+            return;
         }
         self.reload_expanded_drawers();
         self.rebuild();
@@ -1735,7 +1777,16 @@ impl App {
             }
         }
         if !self.background_refresh && !self.pane_is_focused() {
-            return;
+            // Unfocused: keep the view roughly current on a slow cadence instead
+            // of not at all - the collections above still run at the loop's own
+            // cadence, so finished work is never stranded.
+            if self
+                .last_background_poll
+                .is_some_and(|at| at.elapsed() < BACKGROUND_POLL)
+            {
+                return;
+            }
+            self.last_background_poll = Some(std::time::Instant::now());
         }
         if self.repos.is_empty() {
             self.repos = Git::discover_all(&self.cwd)

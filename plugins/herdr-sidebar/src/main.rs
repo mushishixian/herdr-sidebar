@@ -627,7 +627,9 @@ fn run_scm(
     let mut last_tick = std::time::Instant::now();
     loop {
         terminal.draw(|frame| app.draw(frame))?;
-        let mut timeout = REFRESH_EVERY
+        // Focused panes refresh faster (see `App::refresh_interval`).
+        let interval = app.refresh_interval();
+        let mut timeout = interval
             .saturating_sub(last_tick.elapsed())
             .min(BRANCH_POLL);
         if app.is_syncing() || app.is_ai_commit_busy() {
@@ -671,7 +673,7 @@ fn run_scm(
         app.poll_picker();
         app.dismiss_popups_if_unfocused();
         app.poll_branch();
-        if last_tick.elapsed() >= REFRESH_EVERY {
+        if last_tick.elapsed() >= interval {
             app.tick();
             last_tick = std::time::Instant::now();
         }
