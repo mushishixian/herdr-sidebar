@@ -37,7 +37,9 @@ use crate::content_search::{
 use crate::file_popup;
 use crate::file_search::truncate_path_tail;
 use crate::icons::{self, IconTheme};
-use crate::ui::{input_tail, palette, selection_style, truncate_to};
+use crate::ui::{
+    SelectAll, input_tail, palette, selected_text_style, selection_style, truncate_to,
+};
 
 /// Typing settles for this long before a search starts.
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -604,6 +606,8 @@ struct App {
     replacement: String,
     /// Byte offset of the caret in `replacement`, on a char boundary.
     replacement_cursor: usize,
+    /// Ctrl+A on the focused field: the next edit replaces the whole value.
+    select_all: SelectAll,
     /// A replacement that needs `y` before it runs.
     pending: Option<Pending>,
     /// A worker is replacing files; new replacements wait for it.
@@ -655,6 +659,7 @@ impl App {
             focus: Focus::Query,
             replacement: String::new(),
             replacement_cursor: 0,
+            select_all: SelectAll::default(),
             pending: None,
             replacing: false,
             notice: None,
@@ -808,6 +813,7 @@ impl App {
     }
 
     fn toggle_replace_row(&mut self) {
+        self.select_all.disarm();
         self.replace_open = !self.replace_open;
         if !self.replace_open {
             self.focus = Focus::Query;
@@ -817,6 +823,8 @@ impl App {
 
     fn toggle_focus(&mut self) {
         if self.replace_mode && self.replace_open {
+            // The armed selection belongs to the field it was made in.
+            self.select_all.disarm();
             self.focus = match self.focus {
                 Focus::Query => Focus::Replacement,
                 Focus::Replacement => Focus::Query,
@@ -981,7 +989,34 @@ impl App {
         self.mark_edited();
     }
 
+    /// Ctrl+A on the focused field. There is no selection model here, so this
+    /// arms [`SelectAll`]: the value is drawn as selected and the next edit
+    /// replaces all of it (see `ui::SelectAll`).
+    fn arm_select_all(&mut self) {
+        let has_text = {
+            let (text, _) = self.field_mut();
+            !text.is_empty()
+        };
+        self.select_all.arm_if_nonempty(has_text);
+    }
+
+    /// Drop an armed select-all, clearing the focused field. True when it did,
+    /// i.e. when the caller must skip the edit it was about to make.
+    fn clear_selected(&mut self) -> bool {
+        if !self.select_all.armed() {
+            return false;
+        }
+        if self.editing_replacement() {
+            self.select_all
+                .take(&mut self.replacement, &mut self.replacement_cursor);
+        } else {
+            self.select_all.take(&mut self.query, &mut self.cursor);
+        }
+        true
+    }
+
     fn insert_char(&mut self, character: char) {
+        self.clear_selected();
         let (text, cursor) = self.field_mut();
         text.insert(*cursor, character);
         *cursor += character.len_utf8();
@@ -989,6 +1024,10 @@ impl App {
     }
 
     fn delete_before_cursor(&mut self) {
+        if self.clear_selected() {
+            self.after_field_edit();
+            return;
+        }
         let (text, cursor) = self.field_mut();
         if let Some((index, _)) = text[..*cursor].char_indices().next_back() {
             text.remove(index);
@@ -998,6 +1037,10 @@ impl App {
     }
 
     fn delete_at_cursor(&mut self) {
+        if self.clear_selected() {
+            self.after_field_edit();
+            return;
+        }
         let (text, cursor) = self.field_mut();
         if *cursor < text.len() {
             text.remove(*cursor);
@@ -1006,6 +1049,7 @@ impl App {
     }
 
     fn cursor_left(&mut self) {
+        self.select_all.disarm();
         let (text, cursor) = self.field_mut();
         if let Some((index, _)) = text[..*cursor].char_indices().next_back() {
             *cursor = index;
@@ -1013,6 +1057,7 @@ impl App {
     }
 
     fn cursor_right(&mut self) {
+        self.select_all.disarm();
         let (text, cursor) = self.field_mut();
         if let Some(character) = text[*cursor..].chars().next() {
             *cursor += character.len_utf8();
@@ -1020,6 +1065,7 @@ impl App {
     }
 
     fn clear_field(&mut self) {
+        self.select_all.disarm();
         let (text, cursor) = self.field_mut();
         text.clear();
         *cursor = 0;
@@ -1048,6 +1094,8 @@ impl App {
         }
         let page = self.page() as isize;
         match key.code {
+            // Esc first drops an armed Ctrl+A selection, then closes.
+            KeyCode::Esc if self.select_all.armed() => self.select_all.disarm(),
             KeyCode::Esc => self.done = true,
             KeyCode::Enter if alt && self.replace_mode => self.request_replace_all(),
             KeyCode::Enter => self.activate(),
@@ -1059,15 +1107,18 @@ impl App {
             KeyCode::Left => self.cursor_left(),
             KeyCode::Right => self.cursor_right(),
             KeyCode::Home => {
+                self.select_all.disarm();
                 let (_, cursor) = self.field_mut();
                 *cursor = 0;
             }
             KeyCode::End => {
+                self.select_all.disarm();
                 let (text, cursor) = self.field_mut();
                 *cursor = text.len();
             }
             KeyCode::Backspace => self.delete_before_cursor(),
             KeyCode::Delete => self.delete_at_cursor(),
+            KeyCode::Char('a') if ctrl && !alt => self.arm_select_all(),
             KeyCode::Char('u') if ctrl && !alt => self.clear_field(),
             KeyCode::Char('r') if ctrl && !alt && self.replace_mode => {
                 self.request_replace_selected();
@@ -1111,8 +1162,10 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                // Any click answers a pending replacement with "no".
+                // Any click answers a pending replacement with "no", and it
+                // also leaves the field a Ctrl+A selection was made in.
                 self.pending = None;
+                self.select_all.disarm();
                 if self.replace_mode && contains(self.chevron_zone, column, row) {
                     self.toggle_replace_row();
                     return;
@@ -1449,6 +1502,7 @@ impl App {
         let room = usize::from(left_width.saturating_sub(CHIPS_WIDTH + 2))
             .saturating_sub(prompt.len() + 1);
         let caret = !self.editing_replacement();
+        let selected = self.select_all.armed() && caret;
         frame.render_widget(
             Paragraph::new(input_line(
                 prompt,
@@ -1457,6 +1511,7 @@ impl App {
                 room,
                 accent,
                 caret,
+                selected,
             )),
             Rect::new(x, y, left_width.saturating_sub(CHIPS_WIDTH + 1), 1),
         );
@@ -1506,6 +1561,7 @@ impl App {
         self.replace_field = Rect::new(x, y, field_width, 1);
         let room = usize::from(field_width).saturating_sub(prompt_cells + 1);
         let caret = self.editing_replacement();
+        let selected = self.select_all.armed() && caret;
         frame.render_widget(
             Paragraph::new(input_line(
                 prompt,
@@ -1514,6 +1570,7 @@ impl App {
                 room,
                 accent,
                 caret,
+                selected,
             )),
             Rect::new(x, y, field_width, 1),
         );
@@ -1724,7 +1781,8 @@ fn header_line(group: &Group, theme: IconTheme, width: usize) -> Line<'static> {
 }
 
 /// One input line: prompt, the text around the caret, and the caret when this
-/// input has focus. Long text scrolls to keep the caret visible.
+/// input has focus. Long text scrolls to keep the caret visible. `selected`
+/// draws the value as selected — an armed Ctrl+A, waiting to be typed over.
 fn input_line(
     prompt: &str,
     text: &str,
@@ -1732,15 +1790,24 @@ fn input_line(
     room: usize,
     accent: Style,
     caret: bool,
+    selected: bool,
 ) -> Line<'static> {
+    let text_style = if selected {
+        selected_text_style()
+    } else {
+        Style::default()
+    };
     let before = input_tail(&text[..cursor], room);
     let used = before.chars().count();
     let after = truncate_to(text[cursor..].to_string(), room.saturating_sub(used));
-    let mut spans = vec![Span::styled(prompt.to_string(), accent), Span::raw(before)];
+    let mut spans = vec![
+        Span::styled(prompt.to_string(), accent),
+        Span::styled(before, text_style),
+    ];
     if caret {
         spans.push(Span::styled("█", accent));
     }
-    spans.push(Span::raw(after));
+    spans.push(Span::styled(after, text_style));
     Line::from(spans)
 }
 
@@ -2033,6 +2100,72 @@ mod tests {
         );
         app.key(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(app.query, "");
+        app.key(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.done);
+    }
+
+    #[test]
+    fn a_mouse_click_drops_an_armed_selection() {
+        let mut app = App::new(PathBuf::from("/r"), None, IconTheme::Emoji);
+        app.replace_mode = true;
+        app.replace_open = true;
+        for character in "needle".chars() {
+            app.key(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.query_field = Rect::new(0, 0, 40, 1);
+        app.key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.select_all.armed());
+        // Clicking anywhere (here: the field itself) is a focus move.
+        app.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(!app.select_all.armed(), "a click leaves the field");
+        assert_eq!(app.query, "needle", "and it must not eat the text");
+        assert!(!app.done);
+    }
+
+    #[test]
+    fn ctrl_a_replaces_the_whole_query_on_the_next_edit() {
+        let mut app = App::new(PathBuf::from("/r"), None, IconTheme::Emoji);
+        for character in "héllo".chars() {
+            app.key(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.select_all.armed(), "ctrl+a selects the query");
+        // The next typed character replaces everything, not just the caret.
+        app.key(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.query, "x");
+        assert!(!app.select_all.armed());
+
+        // Backspace over a selection clears the field instead of one char.
+        app.key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.key(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.query, "");
+
+        // An empty field has nothing to select.
+        app.key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(!app.select_all.armed());
+    }
+
+    #[test]
+    fn ctrl_a_is_dropped_by_a_caret_move_and_by_esc() {
+        let mut app = App::new(PathBuf::from("/r"), None, IconTheme::Emoji);
+        for character in "abc".chars() {
+            app.key(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.key(key(KeyCode::Left, KeyModifiers::NONE));
+        assert!(!app.select_all.armed(), "moving the caret drops it");
+        app.key(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.query, "ac", "a plain backspace after the move");
+
+        app.key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.key(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.select_all.armed());
+        assert!(!app.done, "the first Esc only drops the selection");
         app.key(key(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.done);
     }

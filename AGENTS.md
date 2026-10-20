@@ -1907,7 +1907,28 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   custom editor: `actions::open_in_editor_inline_at`, with the line in the argv via `{line}`, or as
   `<file>:<line>` for a `fresh`/`fresh-open` program, or the plain file otherwise. Custom editor TAB
   mode ignores the line; with no custom editor the preview pane opens via `viewer::file_request_at`.
-- Keys: typing edits the query (caret with Left/Right/Home/End, Backspace/Delete, Ctrl+U clears).
+- Keys: typing edits the query (caret with Left/Right/Home/End, Backspace/Delete, Ctrl+U clears,
+  **Ctrl+A selects the whole value, then the next edit replaces it**). Those inputs have no real
+  selection model, so Ctrl+A is `ui::SelectAll`: an armed one-shot flag drawn with
+  `ui::selected_text_style()` (the preview's text-selection background, light-theme safe) that the next
+  insert/delete clears instead of editing; a caret move, a field switch (Tab), Ctrl+U, a **mouse click
+  anywhere** (a click is a focus move — verified live in the Search view: the query's DarkGray selection
+  background drops and the text stays), or Esc disarms it
+  (Esc therefore only drops the selection the first time and closes on the second). Such an armed
+  selection must NEVER outlive the field it was made in — every overlay constructor starts from
+  `SelectAll::default()`, and focus/overlay switches disarm explicitly (the AI-suggestion path in SCM
+  disarms too, since the generated message replaces the draft).
+- **Which inputs have it** (all verified by unit tests, per file): the search popup's query and Replace
+  fields, `symbol_popup`, `file_popup`, `git_popup`'s edit field, `branch_ui`'s New-branch name, the
+  Explorer's dialog prompt (New file/folder/Rename/Change folder/editor command — through
+  `ui::draw_input_dialog`'s `selected` parameter), its Quick Open overlay, its Search view's
+  query/replace/include/exclude (one flag on the overlay, disarmed on every focus move), the SCM view's
+  commit box (per-`Repo`, drawn highlighted across every wrapped row) and its Rename-pane dialog.
+  `explorer_app` folds the shared caret-less rules into `text_input_key(key, text, select_all)`; SCM has
+  `Repo::message_key` / `take_selected_message` / `esc_message` for its `Vec<char>` + cursor buffer
+  (`SelectAll::take` only speaks `String`). The experimental editor (`editor.rs`) needs none of this: it
+  has a real selection and its own Ctrl+A. Every arm is guarded `!ALT` so an AltGr character
+  (CONTROL|ALT on Windows) still types.
   Alt+C / Alt+W / Alt+R toggle Match Case / Whole Word / Regex (clicking the `Aa`/`ab`/`.*` chips
   does the same). Up/Down and PgUp/PgDn move over headers and matches alike; Enter or a double-click
   opens (a header opens its first match). Esc cancels. The wheel scrolls the list view, or the

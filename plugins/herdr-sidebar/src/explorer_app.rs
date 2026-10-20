@@ -32,11 +32,12 @@ use herdr_sidebar::pane_menu::{self, PaneAction};
 use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::tree::{Row, Tree};
 use herdr_sidebar::ui::{
-    TitleAction, activity_button_style, activity_icons, chrome_button_style, draw_activity_caps,
-    draw_scrollbar, gear_icon, hits, hits_activity_button, hits_collapse_button, hover_style,
-    icon_style as ui_icon_style, input_tail, keep_visible_scroll, palette, selection_style,
-    set_color_theme, sibling_panes_of, status_color, title_action_icon, title_action_spans,
-    title_actions_visible, title_actions_width, truncate_to, wrap_footer_message, wrap_hints,
+    SelectAll, TitleAction, activity_button_style, activity_icons, chrome_button_style,
+    draw_activity_caps, draw_scrollbar, gear_icon, hits, hits_activity_button,
+    hits_collapse_button, hover_style, icon_style as ui_icon_style, input_tail,
+    keep_visible_scroll, palette, selected_text_style, selection_style, set_color_theme,
+    sibling_panes_of, status_color, title_action_icon, title_action_spans, title_actions_visible,
+    title_actions_width, truncate_to, wrap_footer_message, wrap_hints,
 };
 
 use herdr_sidebar::state::Exit;
@@ -283,6 +284,8 @@ enum Overlay {
         title: String,
         input: String,
         kind: PromptKind,
+        /// Ctrl+A: the next edit replaces the whole input (`ui::SelectAll`).
+        select_all: SelectAll,
     },
     ConfirmDelete {
         path: PathBuf,
@@ -301,6 +304,8 @@ enum Overlay {
         selected: usize,
         truncated: bool,
         loading: bool,
+        /// Ctrl+A: the next edit replaces the whole query (`ui::SelectAll`).
+        select_all: SelectAll,
     },
     ContentSearch {
         query: String,
@@ -317,6 +322,9 @@ enum Overlay {
         options: SearchOptions,
         error: Option<String>,
         dirty_since: Option<std::time::Instant>,
+        /// Ctrl+A on whichever field `focus` names: the next edit replaces that
+        /// field's whole value (`ui::SelectAll`). Disarmed on every focus move.
+        select_all: SelectAll,
     },
 }
 
@@ -1369,8 +1377,12 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
-            if let Some(Overlay::ContentSearch { focus, .. }) = self.overlay.as_mut() {
+            if let Some(Overlay::ContentSearch {
+                focus, select_all, ..
+            }) = self.overlay.as_mut()
+            {
                 *focus = SearchFocus::Query;
+                select_all.disarm();
             } else if self.overlay.is_none() {
                 // Ctrl+F is the "find" gesture — open ready to type.
                 self.open_content_search(true);
@@ -1474,11 +1486,27 @@ impl App {
     }
 
     /// `Some(exit)` ends the event loop, mirroring on_key.
+    /// Drop an armed Ctrl+A on whichever text input has one. Only the visible
+    /// overlay can hold the selection, so this is one match.
+    fn disarm_input_selection(&mut self) {
+        match self.overlay.as_mut() {
+            Some(Overlay::Prompt { select_all, .. })
+            | Some(Overlay::QuickOpen { select_all, .. })
+            | Some(Overlay::ContentSearch { select_all, .. }) => select_all.disarm(),
+            _ => {}
+        }
+    }
+
     pub fn on_mouse(&mut self, mouse: MouseEvent) -> Option<Exit> {
         // Any mouse activity = "the mouse is over this pane": it shows the
         // hover title-bar buttons until the linger expires.
         self.last_mouse = Some(std::time::Instant::now());
         self.mouse_pos = Some((mouse.column, mouse.row));
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            // A click is a focus move: whatever field held a Ctrl+A selection
+            // is being left behind, so drop it (its highlight too).
+            self.disarm_input_selection();
+        }
         if self.overlay.is_some() && !matches!(self.overlay, Some(Overlay::ContentSearch { .. })) {
             self.overlay_mouse(mouse);
             return None;
@@ -1638,6 +1666,7 @@ impl App {
             } else {
                 PromptKind::NewFile(dir)
             },
+            select_all: SelectAll::default(),
         });
     }
 
@@ -1792,56 +1821,47 @@ impl App {
                 KeyCode::Enter => Cmd::Activate,
                 _ => Cmd::Nothing,
             },
-            Some(Overlay::Prompt { input, .. }) => match key.code {
-                KeyCode::Esc => Cmd::Close,
-                KeyCode::Backspace => {
-                    input.pop();
-                    Cmd::Nothing
-                }
-                KeyCode::Char(c) => {
-                    input.push(c);
-                    Cmd::Nothing
-                }
-                KeyCode::Enter => Cmd::ConfirmPrompt,
-                _ => Cmd::Nothing,
+            Some(Overlay::Prompt {
+                input, select_all, ..
+            }) => match text_input_key(key, input, select_all) {
+                TextKey::Edited | TextKey::Consumed => Cmd::Nothing,
+                TextKey::Other => match key.code {
+                    KeyCode::Esc => Cmd::Close,
+                    KeyCode::Enter => Cmd::ConfirmPrompt,
+                    _ => Cmd::Nothing,
+                },
             },
             Some(Overlay::QuickOpen {
                 query,
                 files,
                 matches,
                 selected,
+                select_all,
                 ..
-            }) => match key.code {
-                KeyCode::Esc => Cmd::Close,
-                KeyCode::Up => {
-                    *selected = selected.saturating_sub(1);
-                    Cmd::Nothing
-                }
-                KeyCode::Down => {
-                    *selected = (*selected + 1).min(matches.len().saturating_sub(1));
-                    Cmd::Nothing
-                }
-                KeyCode::Backspace => {
-                    query.pop();
+            }) => match text_input_key(key, query, select_all) {
+                TextKey::Edited => {
                     *matches = quick_matches(files, query);
                     *selected = 0;
                     Cmd::Nothing
                 }
-                KeyCode::Enter => matches
-                    .get(*selected)
-                    .and_then(|index| files.get(*index))
-                    .map(|file| Cmd::OpenQuick(file.path.clone()))
-                    .unwrap_or(Cmd::Nothing),
-                KeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        || key.modifiers.contains(KeyModifiers::ALT) =>
-                {
-                    query.push(c);
-                    *matches = quick_matches(files, query);
-                    *selected = 0;
-                    Cmd::Nothing
-                }
-                _ => Cmd::Nothing,
+                TextKey::Consumed => Cmd::Nothing,
+                TextKey::Other => match key.code {
+                    KeyCode::Esc => Cmd::Close,
+                    KeyCode::Up => {
+                        *selected = selected.saturating_sub(1);
+                        Cmd::Nothing
+                    }
+                    KeyCode::Down => {
+                        *selected = (*selected + 1).min(matches.len().saturating_sub(1));
+                        Cmd::Nothing
+                    }
+                    KeyCode::Enter => matches
+                        .get(*selected)
+                        .and_then(|index| files.get(*index))
+                        .map(|file| Cmd::OpenQuick(file.path.clone()))
+                        .unwrap_or(Cmd::Nothing),
+                    _ => Cmd::Nothing,
+                },
             },
             Some(Overlay::ContentSearch {
                 query,
@@ -1858,6 +1878,7 @@ impl App {
                 options,
                 error,
                 dirty_since,
+                select_all,
             }) => {
                 let mark_dirty =
                     |query: &str,
@@ -1916,148 +1937,92 @@ impl App {
                         && matches!(*focus, SearchFocus::Include | SearchFocus::Exclude)
                     {
                         *focus = SearchFocus::Query;
+                        select_all.disarm();
                     }
                     Cmd::Nothing
                 } else {
-                    match key.code {
-                        KeyCode::Esc => Cmd::Close,
-                        KeyCode::Tab => {
-                            *focus = match *focus {
-                                SearchFocus::Query => SearchFocus::Replace,
-                                SearchFocus::Replace if *details_expanded => SearchFocus::Include,
-                                SearchFocus::Replace => SearchFocus::Results,
-                                SearchFocus::Include => SearchFocus::Exclude,
-                                SearchFocus::Exclude => SearchFocus::Results,
-                                SearchFocus::Results => SearchFocus::Query,
-                            };
-                            Cmd::Nothing
-                        }
-                        KeyCode::BackTab => {
-                            *focus = match *focus {
-                                SearchFocus::Query => SearchFocus::Results,
-                                SearchFocus::Replace => SearchFocus::Query,
-                                SearchFocus::Include => SearchFocus::Replace,
-                                SearchFocus::Exclude => SearchFocus::Include,
-                                SearchFocus::Results if *details_expanded => SearchFocus::Exclude,
-                                SearchFocus::Results => SearchFocus::Replace,
-                            };
-                            Cmd::Nothing
-                        }
-                        KeyCode::Up if *focus == SearchFocus::Results => {
-                            *selected = selected.saturating_sub(1);
-                            Cmd::Nothing
-                        }
-                        KeyCode::Down if *focus == SearchFocus::Results => {
-                            *selected = (*selected + 1).min(hits.len().saturating_sub(1));
-                            Cmd::Nothing
-                        }
-                        KeyCode::Down if *focus != SearchFocus::Replace && !hits.is_empty() => {
-                            *focus = SearchFocus::Results;
-                            Cmd::Nothing
-                        }
-                        KeyCode::Enter if *focus == SearchFocus::Results => hits
-                            .get(*selected)
-                            .map(|hit| Cmd::OpenContent(hit.path.clone(), hit.line))
-                            .unwrap_or(Cmd::Nothing),
-                        KeyCode::Enter
-                            if matches!(
-                                *focus,
-                                SearchFocus::Query | SearchFocus::Include | SearchFocus::Exclude
-                            ) && !*loading
-                                && !query.trim().is_empty() =>
-                        {
-                            Cmd::StartContentSearch
-                        }
-                        KeyCode::Backspace if *focus == SearchFocus::Query => {
-                            query.pop();
-                            mark_dirty(
-                                query,
-                                hits,
-                                selected,
-                                truncated,
-                                loading,
-                                searched,
-                                error,
-                                dirty_since,
-                            );
-                            Cmd::Nothing
-                        }
-                        KeyCode::Backspace if *focus == SearchFocus::Replace => {
-                            replace.pop();
-                            Cmd::Nothing
-                        }
-                        KeyCode::Backspace
-                            if matches!(*focus, SearchFocus::Include | SearchFocus::Exclude) =>
-                        {
-                            if *focus == SearchFocus::Include {
-                                include.pop();
-                            } else {
-                                exclude.pop();
+                    // The focused field owns typing, deletes, Ctrl+A and
+                    // Esc-while-selected; Esc, Tab and the list keys fall
+                    // through to the view keys below.
+                    let key_result = match focused_field(*focus, query, replace, include, exclude) {
+                        Some(field) => text_input_key(key, field, select_all),
+                        None => TextKey::Other,
+                    };
+                    if key_result == TextKey::Edited && !matches!(*focus, SearchFocus::Replace) {
+                        mark_dirty(
+                            query,
+                            hits,
+                            selected,
+                            truncated,
+                            loading,
+                            searched,
+                            error,
+                            dirty_since,
+                        );
+                    }
+                    if key_result != TextKey::Other {
+                        Cmd::Nothing
+                    } else {
+                        match key.code {
+                            KeyCode::Esc => Cmd::Close,
+                            KeyCode::Tab => {
+                                *focus = match *focus {
+                                    SearchFocus::Query => SearchFocus::Replace,
+                                    SearchFocus::Replace if *details_expanded => {
+                                        SearchFocus::Include
+                                    }
+                                    SearchFocus::Replace => SearchFocus::Results,
+                                    SearchFocus::Include => SearchFocus::Exclude,
+                                    SearchFocus::Exclude => SearchFocus::Results,
+                                    SearchFocus::Results => SearchFocus::Query,
+                                };
+                                select_all.disarm();
+                                Cmd::Nothing
                             }
-                            mark_dirty(
-                                query,
-                                hits,
-                                selected,
-                                truncated,
-                                loading,
-                                searched,
-                                error,
-                                dirty_since,
-                            );
-                            Cmd::Nothing
-                        }
-                        KeyCode::Char(c)
-                            if (!key.modifiers.contains(KeyModifiers::CONTROL)
-                                || key.modifiers.contains(KeyModifiers::ALT))
-                                && *focus == SearchFocus::Query =>
-                        {
-                            query.push(c);
-                            mark_dirty(
-                                query,
-                                hits,
-                                selected,
-                                truncated,
-                                loading,
-                                searched,
-                                error,
-                                dirty_since,
-                            );
-                            Cmd::Nothing
-                        }
-                        KeyCode::Char(c)
-                            if (!key.modifiers.contains(KeyModifiers::CONTROL)
-                                || key.modifiers.contains(KeyModifiers::ALT))
-                                && *focus == SearchFocus::Replace =>
-                        {
-                            replace.push(c);
-                            Cmd::Nothing
-                        }
-                        KeyCode::Char(c)
-                            if (!key.modifiers.contains(KeyModifiers::CONTROL)
-                                || key.modifiers.contains(KeyModifiers::ALT))
-                                && matches!(
+                            KeyCode::BackTab => {
+                                *focus = match *focus {
+                                    SearchFocus::Query => SearchFocus::Results,
+                                    SearchFocus::Replace => SearchFocus::Query,
+                                    SearchFocus::Include => SearchFocus::Replace,
+                                    SearchFocus::Exclude => SearchFocus::Include,
+                                    SearchFocus::Results if *details_expanded => {
+                                        SearchFocus::Exclude
+                                    }
+                                    SearchFocus::Results => SearchFocus::Replace,
+                                };
+                                select_all.disarm();
+                                Cmd::Nothing
+                            }
+                            KeyCode::Up if *focus == SearchFocus::Results => {
+                                *selected = selected.saturating_sub(1);
+                                Cmd::Nothing
+                            }
+                            KeyCode::Down if *focus == SearchFocus::Results => {
+                                *selected = (*selected + 1).min(hits.len().saturating_sub(1));
+                                Cmd::Nothing
+                            }
+                            KeyCode::Down if *focus != SearchFocus::Replace && !hits.is_empty() => {
+                                *focus = SearchFocus::Results;
+                                select_all.disarm();
+                                Cmd::Nothing
+                            }
+                            KeyCode::Enter if *focus == SearchFocus::Results => hits
+                                .get(*selected)
+                                .map(|hit| Cmd::OpenContent(hit.path.clone(), hit.line))
+                                .unwrap_or(Cmd::Nothing),
+                            KeyCode::Enter
+                                if matches!(
                                     *focus,
-                                    SearchFocus::Include | SearchFocus::Exclude
-                                ) =>
-                        {
-                            if *focus == SearchFocus::Include {
-                                include.push(c);
-                            } else {
-                                exclude.push(c);
+                                    SearchFocus::Query
+                                        | SearchFocus::Include
+                                        | SearchFocus::Exclude
+                                ) && !*loading
+                                    && !query.trim().is_empty() =>
+                            {
+                                Cmd::StartContentSearch
                             }
-                            mark_dirty(
-                                query,
-                                hits,
-                                selected,
-                                truncated,
-                                loading,
-                                searched,
-                                error,
-                                dirty_since,
-                            );
-                            Cmd::Nothing
+                            _ => Cmd::Nothing,
                         }
-                        _ => Cmd::Nothing,
                     }
                 }
             }
@@ -2228,6 +2193,11 @@ impl App {
     /// on close, rather than clobbering it (which dropped the user back to the
     /// tree). No-op when the current overlay isn't Search.
     fn suspend_search_for_modal(&mut self) {
+        if let Some(Overlay::ContentSearch { select_all, .. }) = self.overlay.as_mut() {
+            // A hidden overlay has nothing highlighted: the parked copy must
+            // not come back armed.
+            select_all.disarm();
+        }
         if matches!(self.overlay, Some(Overlay::ContentSearch { .. })) {
             self.suspended_search = self.overlay.take();
         }
@@ -2355,6 +2325,7 @@ impl App {
                     selected,
                     truncated,
                     loading,
+                    ..
                 }) = self.overlay.as_mut()
                 {
                     *files = std::sync::Arc::clone(&index.files);
@@ -2416,6 +2387,7 @@ impl App {
             selected: 0,
             truncated,
             loading,
+            select_all: SelectAll::default(),
         });
     }
 
@@ -2462,6 +2434,7 @@ impl App {
             options: SearchOptions::default(),
             error: None,
             dirty_since: None,
+            select_all: SelectAll::default(),
         });
         self.search_scroll = 0;
         self.search_snap = false;
@@ -2514,12 +2487,15 @@ impl App {
             options,
             error,
             dirty_since,
+            select_all,
             ..
         }) = self.overlay.as_mut()
         else {
             return;
         };
         let mut dirty = false;
+        // A click that moves the focus to another field drops the selection.
+        let focus_before = *focus;
         let cmd = match mouse.kind {
             MouseEventKind::ScrollUp => Cmd::Scroll(-3),
             MouseEventKind::ScrollDown => Cmd::Scroll(3),
@@ -2612,6 +2588,9 @@ impl App {
                 .unwrap_or(Cmd::Nothing),
             _ => Cmd::Nothing,
         };
+        if *focus != focus_before {
+            select_all.disarm();
+        }
         if dirty {
             *search_hits = std::sync::Arc::new(Vec::new());
             *selected = 0;
@@ -3030,6 +3009,7 @@ impl App {
                     title: "Custom editor".into(),
                     input: actions::configured_editor().unwrap_or_default(),
                     kind: PromptKind::CustomEditor,
+                    select_all: SelectAll::default(),
                 });
             }
             Setting::CustomEditorClick => {
@@ -3267,6 +3247,7 @@ impl App {
                     title: "New file".into(),
                     input: String::new(),
                     kind: PromptKind::NewFile(create_dir),
+                    select_all: SelectAll::default(),
                 });
             }
             MenuAction::NewFolder => {
@@ -3274,6 +3255,7 @@ impl App {
                     title: "New folder".into(),
                     input: String::new(),
                     kind: PromptKind::NewFolder(create_dir),
+                    select_all: SelectAll::default(),
                 });
             }
             MenuAction::CopyPath | MenuAction::CopyRelativePath => {
@@ -3304,6 +3286,7 @@ impl App {
                     title: "Rename".into(),
                     input: current,
                     kind: PromptKind::Rename(path),
+                    select_all: SelectAll::default(),
                 });
             }
             MenuAction::Delete => {
@@ -3440,6 +3423,7 @@ impl App {
             title: "Folder".into(),
             input: self.tree.root_path().display().to_string(),
             kind: PromptKind::ChangeFolder,
+            select_all: SelectAll::default(),
         });
     }
 
@@ -3546,6 +3530,7 @@ impl App {
                     title: "Rename pane".into(),
                     input: String::new(),
                     kind: PromptKind::PaneRename,
+                    select_all: SelectAll::default(),
                 });
             }
             // Close through the sidebar's own hide path (the `b` key): it
@@ -4245,11 +4230,17 @@ impl App {
     /// a footer line was too easy to miss. The title names the field
     /// ("Rename", "New file", "Custom editor"), so no prefix is needed.
     fn draw_prompt(&mut self, frame: &mut Frame) {
-        let Some(Overlay::Prompt { title, input, .. }) = self.overlay.as_ref() else {
+        let Some(Overlay::Prompt {
+            title,
+            input,
+            select_all,
+            ..
+        }) = self.overlay.as_ref()
+        else {
             return;
         };
         let (title, input) = (title.as_str(), input.as_str());
-        herdr_sidebar::ui::draw_input_dialog(frame, title, input);
+        herdr_sidebar::ui::draw_input_dialog(frame, title, input, select_all.armed());
     }
 
     /// Render the delete confirm as a bordered dialog over the body. The title
@@ -4294,6 +4285,7 @@ impl App {
             selected,
             truncated,
             loading,
+            select_all,
         }) = self.overlay.as_ref()
         else {
             return;
@@ -4359,7 +4351,14 @@ impl App {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" > ", Style::default().bold()),
-                Span::raw(query),
+                Span::styled(
+                    query.as_str(),
+                    if select_all.armed() {
+                        selected_text_style()
+                    } else {
+                        Style::default()
+                    },
+                ),
                 Span::styled("█", Style::default().dim()),
             ])),
             query_area,
@@ -4388,11 +4387,14 @@ impl App {
             focus,
             options,
             error,
+            select_all,
             ..
         }) = self.overlay.as_ref()
         else {
             return;
         };
+        // Only an armed selection on the focused field is drawn as selected.
+        let selected_field = select_all.armed();
         let query = query.clone();
         let replace = replace.clone();
         let include = include.clone();
@@ -4478,6 +4480,7 @@ impl App {
                 &query,
                 "Search",
                 focus == SearchFocus::Query,
+                selected_field && focus == SearchFocus::Query,
                 query_inner.width,
             )),
             query_inner,
@@ -4536,6 +4539,7 @@ impl App {
                 &replace,
                 "Replace",
                 focus == SearchFocus::Replace,
+                selected_field && focus == SearchFocus::Replace,
                 replace_inner.width,
             )),
             replace_inner,
@@ -4579,6 +4583,7 @@ impl App {
                     &include,
                     "e.g. *.ts, src/**/include",
                     focus == SearchFocus::Include,
+                    selected_field && focus == SearchFocus::Include,
                     include_inner.width,
                 )),
                 include_inner,
@@ -4618,6 +4623,7 @@ impl App {
                     &exclude,
                     "e.g. node_modules, **/*.min.js",
                     focus == SearchFocus::Exclude,
+                    selected_field && focus == SearchFocus::Exclude,
                     exclude_inner.width,
                 )),
                 exclude_inner,
@@ -4753,7 +4759,103 @@ impl App {
     }
 }
 
-fn search_input_line(value: &str, placeholder: &str, focused: bool, width: u16) -> Line<'static> {
+/// What a key did to a caret-less text input (see [`text_input_key`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextKey {
+    /// Not this input's key: the caller handles it (Enter, Esc, arrows, Tab).
+    Other,
+    /// The value changed, so whatever is derived from it must be refreshed.
+    Edited,
+    /// Consumed without an edit: an armed Esc dropped the selection, or a
+    /// caret key did nothing but clear it.
+    Consumed,
+}
+
+/// One key on one caret-less text input that supports Ctrl+A select-all.
+///
+/// These fields have no selection model (no anchor, no shift+arrows), so Ctrl+A
+/// arms [`SelectAll`]: the value is drawn with [`selected_text_style`] and the
+/// NEXT insert or delete replaces the whole value — the same one-shot selection
+/// the crate's popups use. Caret keys and Ctrl+U drop it, and Esc only closes
+/// once it is dropped (that press comes back as [`TextKey::Consumed`]).
+fn text_input_key(key: KeyEvent, text: &mut String, select_all: &mut SelectAll) -> TextKey {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        // Esc first drops an armed selection, then does its normal job.
+        KeyCode::Esc if select_all.armed() => {
+            select_all.disarm();
+            TextKey::Consumed
+        }
+        // AltGr layouts deliver CONTROL+ALT for plain characters, so only a
+        // bare Ctrl+A is the select-all chord (and only a bare Ctrl+U clears).
+        KeyCode::Char('a') if ctrl && !alt => {
+            select_all.arm_if_nonempty(!text.is_empty());
+            TextKey::Consumed
+        }
+        KeyCode::Char('u') if ctrl && !alt => {
+            select_all.disarm();
+            text.clear();
+            TextKey::Edited
+        }
+        // These fields type at the end and cannot move a caret, so the caret
+        // keys only drop the selection — exactly what they do in the popups.
+        KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
+            select_all.disarm();
+            TextKey::Consumed
+        }
+        KeyCode::Backspace => {
+            // An armed Ctrl+A means "replace it all": the first delete clears
+            // the value instead of removing one character.
+            if !take_selected(select_all, text) {
+                text.pop();
+            }
+            TextKey::Edited
+        }
+        KeyCode::Char(c) if !ctrl || alt => {
+            take_selected(select_all, text);
+            text.push(c);
+            TextKey::Edited
+        }
+        _ => TextKey::Other,
+    }
+}
+
+/// Drop an armed Ctrl+A (`ui::SelectAll`) by clearing `text`, and report that
+/// the edit about to happen must be skipped. These fields type at the end of
+/// the value, so the caret `SelectAll::take` leaves behind is 0.
+fn take_selected(select_all: &mut SelectAll, text: &mut String) -> bool {
+    let mut caret = 0;
+    select_all.take(text, &mut caret)
+}
+
+/// The Search view's focused text field, if the focus is on one at all (the
+/// Results list focuses no field, so typing goes to the list keys instead).
+fn focused_field<'a>(
+    focus: SearchFocus,
+    query: &'a mut String,
+    replace: &'a mut String,
+    include: &'a mut String,
+    exclude: &'a mut String,
+) -> Option<&'a mut String> {
+    match focus {
+        SearchFocus::Query => Some(query),
+        SearchFocus::Replace => Some(replace),
+        SearchFocus::Include => Some(include),
+        SearchFocus::Exclude => Some(exclude),
+        SearchFocus::Results => None,
+    }
+}
+
+/// One line of the Search view's field `value`: the typed tail so the caret end
+/// stays visible, or the placeholder when it is empty and unfocused.
+fn search_input_line(
+    value: &str,
+    placeholder: &str,
+    focused: bool,
+    selected: bool,
+    width: u16,
+) -> Line<'static> {
     let available = usize::from(width).saturating_sub(usize::from(focused));
     let mut spans = if value.is_empty() && !focused {
         vec![Span::styled(
@@ -4763,7 +4865,14 @@ fn search_input_line(value: &str, placeholder: &str, focused: bool, width: u16) 
     } else if value.is_empty() {
         Vec::new()
     } else {
-        vec![Span::raw(input_tail(value, available))]
+        vec![Span::styled(
+            input_tail(value, available),
+            if selected {
+                selected_text_style()
+            } else {
+                Style::default()
+            },
+        )]
     };
     if focused {
         spans.push(Span::raw("█"));
@@ -5406,7 +5515,7 @@ mod tests {
 
     #[test]
     fn focused_empty_search_hides_its_placeholder() {
-        let focused = search_input_line("", "Search", true, 20);
+        let focused = search_input_line("", "Search", true, false, 20);
         assert_eq!(
             focused
                 .spans
@@ -5415,7 +5524,7 @@ mod tests {
                 .collect::<String>(),
             "█"
         );
-        let idle = search_input_line("", "Search", false, 20);
+        let idle = search_input_line("", "Search", false, false, 20);
         assert_eq!(idle.spans[0].content.as_ref(), "Search");
         assert!(idle.spans[0].style.add_modifier.contains(Modifier::DIM));
     }
@@ -5426,5 +5535,216 @@ mod tests {
             search_toolbar_icons(IconTheme::Material),
             ("\u{eb37}", "\u{eabf}", "\u{ea7c}")
         );
+    }
+    /// A press as the terminal delivers it.
+    fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    const CTRL_A: KeyEvent = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    const ESC: KeyEvent = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+
+    #[test]
+    fn ctrl_a_then_typing_replaces_the_whole_prompt_value() {
+        // The name prompt (`Overlay::Prompt`) edits through `text_input_key`.
+        let mut input = "old-name.rs".to_string();
+        let mut select_all = SelectAll::default();
+        assert_eq!(
+            text_input_key(CTRL_A, &mut input, &mut select_all),
+            TextKey::Consumed
+        );
+        assert!(select_all.armed(), "ctrl+a selects the whole value");
+        assert_eq!(
+            text_input_key(
+                press(KeyCode::Char('n'), KeyModifiers::NONE),
+                &mut input,
+                &mut select_all
+            ),
+            TextKey::Edited
+        );
+        assert_eq!(input, "n", "the first character replaces the whole value");
+        assert!(!select_all.armed(), "the selection is one shot");
+        // The next character appends, like any other edit.
+        text_input_key(
+            press(KeyCode::Char('o'), KeyModifiers::NONE),
+            &mut input,
+            &mut select_all,
+        );
+        assert_eq!(input, "no");
+    }
+
+    #[test]
+    fn ctrl_a_then_backspace_clears_the_value_instead_of_one_character() {
+        let mut input = "old-name.rs".to_string();
+        let mut select_all = SelectAll::default();
+        text_input_key(CTRL_A, &mut input, &mut select_all);
+        assert_eq!(
+            text_input_key(
+                press(KeyCode::Backspace, KeyModifiers::NONE),
+                &mut input,
+                &mut select_all
+            ),
+            TextKey::Edited
+        );
+        assert_eq!(input, "");
+        assert!(!select_all.armed());
+        // A plain backspace on an empty value stays empty (no panic).
+        text_input_key(
+            press(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut input,
+            &mut select_all,
+        );
+        assert_eq!(input, "");
+    }
+
+    #[test]
+    fn an_empty_field_has_nothing_to_select_all() {
+        let mut input = String::new();
+        let mut select_all = SelectAll::default();
+        text_input_key(CTRL_A, &mut input, &mut select_all);
+        assert!(!select_all.armed());
+    }
+
+    #[test]
+    fn altgr_ctrl_alt_a_is_text_not_select_all() {
+        // AltGr layouts deliver CONTROL+ALT for plain characters.
+        let mut input = "x".to_string();
+        let mut select_all = SelectAll::default();
+        text_input_key(CTRL_A, &mut input, &mut select_all);
+        assert!(select_all.armed());
+        let alt_gr = press(
+            KeyCode::Char('ą'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_eq!(
+            text_input_key(alt_gr, &mut input, &mut select_all),
+            TextKey::Edited
+        );
+        assert_eq!(input, "ą", "still text, and it replaced the selection");
+        assert!(!select_all.armed());
+    }
+
+    #[test]
+    fn a_caret_move_drops_an_armed_selection_without_editing() {
+        for code in [KeyCode::Left, KeyCode::Right, KeyCode::Home, KeyCode::End] {
+            let mut input = "abc".to_string();
+            let mut select_all = SelectAll::default();
+            text_input_key(CTRL_A, &mut input, &mut select_all);
+            assert!(select_all.armed());
+            assert_eq!(
+                text_input_key(press(code, KeyModifiers::NONE), &mut input, &mut select_all),
+                TextKey::Consumed
+            );
+            assert!(!select_all.armed(), "{code:?} drops the selection");
+            assert_eq!(input, "abc", "a caret move never edits");
+        }
+    }
+
+    #[test]
+    fn esc_drops_the_prompt_selection_first_and_closes_on_the_next_press() {
+        let mut input = "Rename-me".to_string();
+        let mut select_all = SelectAll::default();
+        text_input_key(CTRL_A, &mut input, &mut select_all);
+        assert!(select_all.armed());
+        // Consumed, so the prompt's own Esc (close) does not run.
+        assert_eq!(
+            text_input_key(ESC, &mut input, &mut select_all),
+            TextKey::Consumed
+        );
+        assert!(!select_all.armed());
+        assert_eq!(input, "Rename-me", "disarming is not an edit");
+        // The next Esc falls through to the caller: close.
+        assert_eq!(
+            text_input_key(ESC, &mut input, &mut select_all),
+            TextKey::Other
+        );
+    }
+
+    #[test]
+    fn esc_drops_the_search_query_selection_first_and_closes_on_the_next_press() {
+        let mut query = "needle".to_string();
+        let mut replace = "hay".to_string();
+        let mut include = "*.rs".to_string();
+        let mut exclude = "target".to_string();
+        let mut select_all = SelectAll::default();
+        let field = focused_field(
+            SearchFocus::Query,
+            &mut query,
+            &mut replace,
+            &mut include,
+            &mut exclude,
+        )
+        .expect("Query focus is a text field");
+        assert_eq!(
+            text_input_key(CTRL_A, field, &mut select_all),
+            TextKey::Consumed
+        );
+        assert!(select_all.armed());
+        let field = focused_field(
+            SearchFocus::Query,
+            &mut query,
+            &mut replace,
+            &mut include,
+            &mut exclude,
+        )
+        .expect("Query focus is a text field");
+        assert_eq!(
+            text_input_key(ESC, field, &mut select_all),
+            TextKey::Consumed
+        );
+        assert!(!select_all.armed());
+        assert_eq!(query, "needle");
+        assert_eq!(replace, "hay", "only the focused field is touched");
+        let field = focused_field(
+            SearchFocus::Query,
+            &mut query,
+            &mut replace,
+            &mut include,
+            &mut exclude,
+        )
+        .expect("Query focus is a text field");
+        assert_eq!(text_input_key(ESC, field, &mut select_all), TextKey::Other);
+    }
+
+    #[test]
+    fn the_search_view_types_into_whichever_field_it_focused() {
+        let mut query = String::new();
+        let mut replace = String::new();
+        let mut include = String::new();
+        let mut exclude = String::new();
+        let mut select_all = SelectAll::default();
+        let field = focused_field(
+            SearchFocus::Include,
+            &mut query,
+            &mut replace,
+            &mut include,
+            &mut exclude,
+        )
+        .expect("Include focus is a text field");
+        text_input_key(
+            press(KeyCode::Char('*'), KeyModifiers::NONE),
+            field,
+            &mut select_all,
+        );
+        assert_eq!((query.as_str(), include.as_str()), ("", "*"));
+        // The Results list focuses no field, so its keys stay list keys.
+        assert!(
+            focused_field(
+                SearchFocus::Results,
+                &mut query,
+                &mut replace,
+                &mut include,
+                &mut exclude
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn an_armed_field_is_drawn_with_the_selection_background() {
+        let armed = search_input_line("query", "Search", true, true, 20);
+        assert_eq!(armed.spans[0].style, selected_text_style());
+        let idle = search_input_line("query", "Search", true, false, 20);
+        assert_eq!(idle.spans[0].style, Style::default());
     }
 }

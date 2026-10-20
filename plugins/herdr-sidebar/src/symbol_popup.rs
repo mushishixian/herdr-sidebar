@@ -28,7 +28,10 @@ use crate::file_popup::open_file_in_workspace;
 use crate::file_search::truncate_path_tail;
 use crate::icons::{self, IconTheme};
 use crate::symbol_search::{self, SYMBOL_LIMIT, Symbol};
-use crate::ui::{input_tail, keep_visible_scroll, palette, selection_style, truncate_to};
+use crate::ui::{
+    SelectAll, input_tail, keep_visible_scroll, palette, selected_text_style, selection_style,
+    truncate_to,
+};
 
 const IDLE_POLL: Duration = Duration::from_millis(250);
 const LOAD_POLL: Duration = Duration::from_millis(50);
@@ -96,6 +99,8 @@ struct App {
     symbols: Arc<Vec<Symbol>>,
     matches: Vec<usize>,
     query: String,
+    /// Ctrl+A: the next edit replaces the whole query (`ui::SelectAll`).
+    select_all: SelectAll,
     selected: usize,
     scroll: usize,
     truncated: bool,
@@ -124,6 +129,7 @@ impl App {
             symbols: Arc::new(Vec::new()),
             matches: Vec::new(),
             query: String::new(),
+            select_all: SelectAll::default(),
             selected: 0,
             scroll: 0,
             truncated: false,
@@ -186,9 +192,20 @@ impl App {
         }
     }
 
+    /// An armed Ctrl+A (`ui::SelectAll`) means the next edit replaces the whole
+    /// query. This popup has no caret, so "replace" is simply a clear.
+    fn drop_armed_selection(&mut self) {
+        if self.select_all.armed() {
+            self.select_all.disarm();
+            self.query.clear();
+        }
+    }
+
     fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            // Esc first drops an armed Ctrl+A selection, then closes.
+            KeyCode::Esc if self.select_all.armed() => self.select_all.disarm(),
             KeyCode::Esc => self.done = true,
             KeyCode::Char('q') | KeyCode::Char('c') if ctrl => self.done = true,
             KeyCode::Up => self.select_prev(),
@@ -202,15 +219,23 @@ impl App {
                 self.selected = self.matches.len().saturating_sub(1);
             }
             KeyCode::Backspace => {
-                self.query.pop();
+                // An armed Ctrl+A means "replace it all": the first delete
+                // clears the query instead of removing one character.
+                self.drop_armed_selection();
+                if !self.query.is_empty() {
+                    self.query.pop();
+                }
                 self.on_query_changed();
             }
             KeyCode::Char('u') if ctrl => {
+                self.select_all.disarm();
                 self.query.clear();
                 self.on_query_changed();
             }
+            KeyCode::Char('a') if ctrl => self.select_all.arm_if_nonempty(!self.query.is_empty()),
             KeyCode::Enter => self.activate(),
             KeyCode::Char(c) if !ctrl || key.modifiers.contains(KeyModifiers::ALT) => {
+                self.drop_armed_selection();
                 self.query.push(c);
                 self.on_query_changed();
             }
@@ -224,6 +249,8 @@ impl App {
             MouseEventKind::ScrollUp => self.select_prev(),
             MouseEventKind::ScrollDown => self.select_next(),
             MouseEventKind::Down(MouseButton::Left) => {
+                // A click is a focus move: drop an armed Ctrl+A.
+                self.select_all.disarm();
                 let area = self.list_area;
                 if mouse.row >= area.y
                     && mouse.row < area.y + area.height
@@ -293,9 +320,15 @@ impl App {
         // Row 1: Query input.
         let prompt = " › ";
         let room = width.saturating_sub(prompt.len() + 2);
+        // Ctrl+A draws the query as selected, waiting to be typed over.
+        let query_style = if self.select_all.armed() {
+            selected_text_style()
+        } else {
+            Style::default()
+        };
         let mut input_spans = vec![
             Span::styled(prompt, accent),
-            Span::raw(input_tail(&self.query, room)),
+            Span::styled(input_tail(&self.query, room), query_style),
             Span::styled("█", dim),
         ];
         if self.query.is_empty() {
@@ -487,6 +520,7 @@ mod tests {
             symbols,
             matches,
             query: String::new(),
+            select_all: SelectAll::default(),
             selected: 0,
             scroll: 0,
             truncated: false,
@@ -543,6 +577,28 @@ mod tests {
             KeyModifiers::CONTROL | KeyModifiers::ALT,
         ));
         assert_eq!(app.query, "[");
+        assert!(!app.done);
+    }
+
+    #[test]
+    fn ctrl_a_replaces_the_whole_query_on_the_next_edit() {
+        let mut app = app_with(vec![symbol("render", "src/app.rs", 10)]);
+        for character in "rend".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.select_all.armed());
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.query, "x", "the first edit replaces the query");
+        assert!(!app.select_all.armed());
+
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.query, "");
+
+        // An empty query disarms immediately, and Esc keeps its usual meaning.
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(!app.select_all.armed());
         assert!(!app.done);
     }
 

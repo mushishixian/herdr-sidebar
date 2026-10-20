@@ -635,6 +635,50 @@ pub fn input_tail(input: &str, max: usize) -> String {
     format!("…{out}")
 }
 
+/// "Ctrl+A" for the plain `String` + caret inputs this crate's popups use.
+///
+/// Those fields have no selection model (no anchor, no shift+arrows), so "all
+/// selected" is a one-shot flag: while it is armed the value is drawn with
+/// [`selected_text_style`] and the NEXT insert or delete replaces the whole
+/// value. Any caret move, field switch, or Esc disarms it. That is the part of
+/// select-all muscle memory people actually use — ctrl+a, then type over it.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectAll(bool);
+
+impl SelectAll {
+    pub fn armed(self) -> bool {
+        self.0
+    }
+
+    /// Arm it when the field has a value; an empty field has nothing to select.
+    pub fn arm_if_nonempty(&mut self, has_text: bool) {
+        self.0 = has_text;
+    }
+
+    pub fn disarm(&mut self) {
+        self.0 = false;
+    }
+
+    /// Clear an armed field. Returns true when it cleared, i.e. when the caller
+    /// must NOT also apply the edit it was about to apply.
+    pub fn take(&mut self, text: &mut String, cursor: &mut usize) -> bool {
+        if !self.0 {
+            return false;
+        }
+        self.0 = false;
+        text.clear();
+        *cursor = 0;
+        true
+    }
+}
+
+/// The look of a value that is "selected" by [`SelectAll`]: same background the
+/// preview uses for mouse text selection, so it reads as selected text on every
+/// theme (including `light`, where reverse-video would be illegible).
+pub fn selected_text_style() -> Style {
+    Style::default().bg(palette().text_selection_bg)
+}
+
 pub fn truncate_to(s: String, max: usize) -> String {
     if Span::raw(s.as_str()).width() <= max {
         return s;
@@ -805,8 +849,10 @@ pub fn draw_confirm_dialog(
 
 /// Draw a one-line input dialog (`title` on the border, `input`'s TAIL so the
 /// caret end stays visible, ⏎ ok · esc cancel while it fits) as a box over the
-/// body instead of burying the prompt in the footer. Returns the box's rect.
-pub fn draw_input_dialog(frame: &mut Frame, title: &str, input: &str) -> Rect {
+/// body instead of burying the prompt in the footer. `selected` draws the value
+/// with [`selected_text_style`] — an armed [`SelectAll`] waiting to be typed
+/// over. Returns the box's rect.
+pub fn draw_input_dialog(frame: &mut Frame, title: &str, input: &str, selected: bool) -> Rect {
     let rect = input_dialog_rect(frame.area(), title, INPUT_DIALOG_MAX_WIDTH);
     // A block TITLE is silently clipped rather than wrapped, so trim it to the
     // border's usable width first.
@@ -818,11 +864,16 @@ pub fn draw_input_dialog(frame: &mut Frame, title: &str, input: &str) -> Rect {
     let typed = input_tail(input, inner_width.saturating_sub(3));
     let hint_fits = Span::raw(typed.as_str()).width() + Span::raw(hint).width() + 2 <= inner_width;
 
+    let typed_style = if selected {
+        selected_text_style()
+    } else {
+        Style::default()
+    };
     let mut spans = vec![
         Span::raw(" "),
         // Tail, not head: a long name must keep its end — where the cursor
         // is — on screen.
-        Span::raw(typed),
+        Span::styled(typed, typed_style),
         Span::styled("█", Style::default().dim()),
     ];
     if hint_fits {
@@ -1225,6 +1276,26 @@ mod tests {
         assert!(tail.starts_with('…'), "{tail:?}");
         assert!(tail.ends_with(".txt"), "{tail:?}");
         assert!(ratatui::text::Span::raw(tail.as_str()).width() <= 12);
+    }
+
+    #[test]
+    fn select_all_arms_only_for_a_nonempty_field_and_eats_one_edit() {
+        let mut selection = SelectAll::default();
+        assert!(!selection.armed());
+        selection.arm_if_nonempty(false);
+        assert!(!selection.armed(), "nothing to select in an empty field");
+
+        selection.arm_if_nonempty(true);
+        assert!(selection.armed());
+        let (mut text, mut cursor) = ("typed".to_string(), 5usize);
+        assert!(selection.take(&mut text, &mut cursor), "the edit is eaten");
+        assert_eq!((text.as_str(), cursor), ("", 0));
+        assert!(!selection.armed(), "one-shot: the next edit is normal");
+        assert!(!selection.take(&mut text, &mut cursor));
+
+        selection.arm_if_nonempty(true);
+        selection.disarm();
+        assert!(!selection.armed());
     }
 
     #[test]

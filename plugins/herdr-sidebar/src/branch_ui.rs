@@ -8,8 +8,8 @@ use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use crate::git::{Branch, Git, Status};
 use crate::icons::IconTheme;
 use crate::ui::{
-    branch_icon, hits, hover_style, input_tail, keep_visible_scroll, palette, selection_style,
-    truncate_to,
+    SelectAll, branch_icon, hits, hover_style, input_tail, keep_visible_scroll, palette,
+    selected_text_style, selection_style, truncate_to,
 };
 
 const SYNC_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
@@ -46,6 +46,8 @@ pub struct BranchPicker {
     /// `Some` while the name field is open; the picker list is frozen behind
     /// it and every keystroke belongs to the field.
     naming: Option<String>,
+    /// Ctrl+A on the name field: the next edit replaces the whole name.
+    naming_select_all: SelectAll,
 }
 
 impl BranchPicker {
@@ -65,6 +67,7 @@ impl BranchPicker {
             scroll: 0,
             rect: Rect::default(),
             naming: None,
+            naming_select_all: SelectAll::default(),
         })
     }
 
@@ -81,6 +84,7 @@ impl BranchPicker {
             Some(branch) => PickerAction::Checkout(branch.clone()),
             None => {
                 self.naming = Some(String::new());
+                self.naming_select_all.disarm();
                 PickerAction::None
             }
         }
@@ -90,12 +94,19 @@ impl BranchPicker {
         // The name field owns every key while it is open, so a branch called
         // `k` cannot be typed into a list that reads k as "move up".
         if let Some(name) = &mut self.naming {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             return match key.code {
+                // Esc first drops an armed Ctrl+A selection, then the field.
+                KeyCode::Esc if self.naming_select_all.armed() => {
+                    self.naming_select_all.disarm();
+                    PickerAction::None
+                }
                 KeyCode::Esc => {
                     self.naming = None;
                     PickerAction::None
                 }
                 KeyCode::Enter => {
+                    self.naming_select_all.disarm();
                     let typed = name.trim().to_string();
                     if typed.is_empty() {
                         PickerAction::None
@@ -105,13 +116,25 @@ impl BranchPicker {
                     }
                 }
                 KeyCode::Backspace => {
-                    name.pop();
+                    // An armed Ctrl+A means "replace it all": the first delete
+                    // clears the name instead of removing one character.
+                    if self.naming_select_all.armed() {
+                        self.naming_select_all.disarm();
+                        name.clear();
+                    } else {
+                        name.pop();
+                    }
                     PickerAction::None
                 }
-                KeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        || key.modifiers.contains(KeyModifiers::ALT) =>
-                {
+                KeyCode::Char('a') if ctrl => {
+                    self.naming_select_all.arm_if_nonempty(!name.is_empty());
+                    PickerAction::None
+                }
+                KeyCode::Char(c) if !ctrl || key.modifiers.contains(KeyModifiers::ALT) => {
+                    if self.naming_select_all.armed() {
+                        self.naming_select_all.disarm();
+                        name.clear();
+                    }
                     name.push(c);
                     PickerAction::None
                 }
@@ -143,6 +166,11 @@ impl BranchPicker {
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent) -> PickerAction {
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            // A click leaves the name field (or the field itself): either way
+            // an armed Ctrl+A no longer describes what the user is doing.
+            self.naming_select_all.disarm();
+        }
         // While naming, the list behind the field is inert: a stray click or
         // scroll must not switch branches out from under a half-typed name.
         if self.naming.is_some() {
@@ -237,11 +265,16 @@ impl BranchPicker {
             let hint_fits =
                 Span::raw(typed.as_str()).width() + Span::raw(hint).width() + 2 <= field_inner;
 
+            let typed_style = if self.naming_select_all.armed() {
+                selected_text_style()
+            } else {
+                Style::default()
+            };
             let mut spans = vec![
                 Span::raw(" "),
                 // Tail, not head: a long name must keep its end — where the
                 // cursor is — on screen, exactly like the Explorer prompts.
-                Span::raw(typed),
+                Span::styled(typed, typed_style),
                 Span::styled("█", Style::default().dim()),
             ];
             if hint_fits {

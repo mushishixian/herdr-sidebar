@@ -587,6 +587,11 @@ menu item still sends a picture to Fresh.
 - The sidebar's own Search view still has an inert Replace field; replacement lives only in the popup.
 - Popup panes belong to no tab, so both popups (and Ctrl+Q, since `aedfbd6`) hand the editor
   the caller pane's `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`.
+- **Ctrl+A** in the query and Replace fields selects the whole value; the next character or Backspace
+  replaces it (a second Esc closes the popup only after the selection is dropped). The same works in
+  every other text input of the plugin: Quick Open, Go to symbol, the git popups, the branch-name field,
+  the Explorer's New file / New folder / Rename / Change folder dialogs, the Search view's four fields,
+  and Source Control's commit message box and Rename-pane dialog.
 
 ### Language servers (LSP)
 

@@ -32,12 +32,12 @@ use herdr_sidebar::state::Exit;
 use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::suggest;
 use herdr_sidebar::ui::{
-    TitleAction, activity_button_style, activity_icons, branch_icon, chrome_button_style,
-    draw_activity_caps, draw_scrollbar, gear_icon, hits, hits_activity_button,
+    SelectAll, TitleAction, activity_button_style, activity_icons, branch_icon,
+    chrome_button_style, draw_activity_caps, draw_scrollbar, gear_icon, hits, hits_activity_button,
     hits_collapse_button, hover_style, icon_style as ui_icon_style, keep_visible_scroll, palette,
-    selection_style, set_color_theme, sibling_panes_of, sparkle_icon, status_color,
-    title_action_spans, title_actions_visible, title_actions_width, truncate_to, within,
-    wrap_footer_message, wrap_hints,
+    selected_text_style, selection_style, set_color_theme, sibling_panes_of, sparkle_icon,
+    status_color, title_action_spans, title_actions_visible, title_actions_width, truncate_to,
+    within, wrap_footer_message, wrap_hints,
 };
 
 /// How many log lines the history-ish drawers fetch.
@@ -666,6 +666,9 @@ struct Repo {
     changes_collapsed: bool,
     message: Vec<char>,
     cursor: usize,
+    /// Ctrl+A in the commit box: the next edit replaces the whole message
+    /// (`ui::SelectAll`).
+    select_all: SelectAll,
     staged_dirs: Vec<DirEntry>,
     changes_dirs: Vec<DirEntry>,
     staged_file_depths: Vec<usize>,
@@ -688,6 +691,7 @@ impl Repo {
             changes_collapsed: false,
             message: Vec::new(),
             cursor: 0,
+            select_all: SelectAll::default(),
             staged_dirs: Vec::new(),
             changes_dirs: Vec::new(),
             staged_file_depths: Vec::new(),
@@ -696,6 +700,84 @@ impl Repo {
             changes_tree_rows: Vec::new(),
             staged_collapsed_dirs: std::collections::BTreeSet::new(),
             changes_collapsed_dirs: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// An armed Ctrl+A (`ui::SelectAll`) means "replace it all": clear the
+    /// message and the caret instead, and report that the edit the caller was
+    /// about to make must be skipped. (`SelectAll::take` wants a `String`; this
+    /// buffer is a `Vec<char>`.)
+    fn take_selected_message(&mut self) -> bool {
+        if !self.select_all.armed() {
+            return false;
+        }
+        self.select_all.disarm();
+        self.message.clear();
+        self.cursor = 0;
+        true
+    }
+
+    /// Esc in the commit box: drop an armed Ctrl+A and spend the press. False
+    /// when nothing was armed, so the caller knows the Esc means "leave the
+    /// box".
+    fn esc_message(&mut self) -> bool {
+        if !self.select_all.armed() {
+            return false;
+        }
+        self.select_all.disarm();
+        true
+    }
+
+    /// The commit box's editing keys: Backspace/Delete, the caret moves,
+    /// Ctrl+A/Ctrl+U and typed text. The focus keys (Enter, Esc, Tab…) stay in
+    /// `App::on_message_key`, which owns the focus.
+    fn message_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            // An armed Ctrl+A means "replace it all": the delete takes the
+            // whole message instead of one character.
+            KeyCode::Backspace if !self.take_selected_message() && self.cursor > 0 => {
+                self.cursor -= 1;
+                self.message.remove(self.cursor);
+            }
+            KeyCode::Delete
+                if !self.take_selected_message() && self.cursor < self.message.len() =>
+            {
+                self.message.remove(self.cursor);
+            }
+            // A caret move disarms: the selection belongs where it was made.
+            KeyCode::Left => {
+                self.select_all.disarm();
+                self.cursor = self.cursor.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                self.select_all.disarm();
+                self.cursor = (self.cursor + 1).min(self.message.len());
+            }
+            KeyCode::Home => {
+                self.select_all.disarm();
+                self.cursor = 0;
+            }
+            KeyCode::End => {
+                self.select_all.disarm();
+                self.cursor = self.message.len();
+            }
+            KeyCode::Char('a') if ctrl && !alt => {
+                self.select_all.arm_if_nonempty(!self.message.is_empty());
+            }
+            KeyCode::Char('u') if ctrl && !alt => {
+                self.select_all.disarm();
+                self.message.clear();
+                self.cursor = 0;
+            }
+            KeyCode::Char(c) if !ctrl || alt => {
+                // Typing over a selection replaces the whole message.
+                self.take_selected_message();
+                self.message.insert(self.cursor, c);
+                self.cursor += 1;
+            }
+            _ => {}
         }
     }
 
@@ -729,6 +811,14 @@ impl Repo {
         };
         format!("{}{dirty}", self.status.branch)
     }
+}
+
+/// Drop an armed Ctrl+A (`ui::SelectAll`) by clearing `input`, and report that
+/// the edit about to happen must be skipped. The rename dialog has no caret, so
+/// `SelectAll::take`'s cursor is the end of the text.
+fn take_selected(input: &mut String, select_all: &mut SelectAll) -> bool {
+    let mut caret = input.len();
+    select_all.take(input, &mut caret)
 }
 
 fn commit_draft_present<'a>(messages: impl IntoIterator<Item = &'a [char]>) -> bool {
@@ -916,9 +1006,11 @@ enum Overlay {
         rect: Rect,
         scroll: usize,
     },
-    /// The name typed for our own pane ("Rename pane…"), edited in the footer.
+    /// The name typed for our own pane ("Rename pane…"), edited in a dialog.
     PaneRename {
         input: String,
+        /// Ctrl+A: the next edit replaces the whole name (`ui::SelectAll`).
+        select_all: SelectAll,
     },
 }
 
@@ -1723,6 +1815,9 @@ impl App {
             match rx.try_recv() {
                 Ok(message) => {
                     if let Some(repo) = self.active_repo_mut() {
+                        // A fresh suggestion replaces the draft, so an armed
+                        // Ctrl+A no longer describes what is on screen.
+                        repo.select_all.disarm();
                         repo.message = message.chars().collect();
                         repo.cursor = repo.message.len();
                     }
@@ -2204,43 +2299,27 @@ impl App {
                 self.commit();
                 return;
             }
+            // Esc first drops an armed Ctrl+A selection, then leaves the box.
+            KeyCode::Esc if self.active_repo_mut().is_some_and(Repo::esc_message) => return,
             KeyCode::Esc => self.focus = Focus::List,
-            KeyCode::Tab => self.focus = Focus::Commit,
-            KeyCode::BackTab => self.focus = Focus::List,
-            KeyCode::Down => self.focus = Focus::Commit,
+            KeyCode::Tab => self.leave_message(Focus::Commit),
+            KeyCode::BackTab => self.leave_message(Focus::List),
+            KeyCode::Down => self.leave_message(Focus::Commit),
             _ => {}
         }
         let Some(repo) = self.active_repo_mut() else {
             return;
         };
-        match key.code {
-            KeyCode::Backspace if repo.cursor > 0 => {
-                repo.cursor -= 1;
-                repo.message.remove(repo.cursor);
-            }
-            KeyCode::Delete if repo.cursor < repo.message.len() => {
-                repo.message.remove(repo.cursor);
-            }
-            KeyCode::Left => repo.cursor = repo.cursor.saturating_sub(1),
-            KeyCode::Right => repo.cursor = (repo.cursor + 1).min(repo.message.len()),
-            KeyCode::Home => repo.cursor = 0,
-            KeyCode::End => repo.cursor = repo.message.len(),
-            KeyCode::Char('u')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                repo.message.clear();
-                repo.cursor = 0;
-            }
-            KeyCode::Char(c)
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    || key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                repo.message.insert(repo.cursor, c);
-                repo.cursor += 1;
-            }
-            _ => {}
+        repo.message_key(key);
+    }
+
+    /// An armed Ctrl+A (`ui::SelectAll`) belongs to the field it was made in,
+    /// so switching fields from the commit box drops it.
+    fn leave_message(&mut self, focus: Focus) {
+        if let Some(repo) = self.active_repo_mut() {
+            repo.select_all.disarm();
         }
+        self.focus = focus;
     }
 
     fn on_button_key(&mut self, key: KeyEvent) {
@@ -2290,11 +2369,26 @@ impl App {
     }
 
     /// `Some(exit)` ends the event loop, mirroring on_key.
+    /// Drop an armed Ctrl+A on the commit box or the rename dialog: a click
+    /// means the user left that field.
+    fn disarm_input_selection(&mut self) {
+        if let Some(Overlay::PaneRename { select_all, .. }) = self.overlay.as_mut() {
+            select_all.disarm();
+        }
+        if let Some(repo) = self.active_repo_mut() {
+            repo.select_all.disarm();
+        }
+    }
+
     pub fn on_mouse(&mut self, mouse: MouseEvent) -> Option<Exit> {
         // Any mouse activity = "the mouse is over this pane": it shows the
         // hover title-bar buttons until the linger expires.
         self.last_mouse = Some(std::time::Instant::now());
         self.mouse_pos = Some((mouse.column, mouse.row));
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            // A click is a focus move: drop an armed Ctrl+A where it was made.
+            self.disarm_input_selection();
+        }
         if self.overlay.is_some() {
             self.overlay_mouse(mouse);
             return None;
@@ -2600,6 +2694,7 @@ impl App {
             PaneAction::Rename => {
                 self.overlay = Some(Overlay::PaneRename {
                     input: String::new(),
+                    select_all: SelectAll::default(),
                 });
             }
             // Close through the sidebar's own hide path (the `b` key): it
@@ -2883,19 +2978,42 @@ impl App {
                 _ => Cmd::Nothing,
             },
             Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.key(key)),
-            Some(Overlay::PaneRename { input }) => match key.code {
-                KeyCode::Esc => Cmd::Close,
-                KeyCode::Backspace => {
-                    input.pop();
-                    Cmd::Nothing
+            Some(Overlay::PaneRename { input, select_all }) => {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let alt = key.modifiers.contains(KeyModifiers::ALT);
+                match key.code {
+                    // Esc first drops an armed Ctrl+A selection, then closes.
+                    KeyCode::Esc if select_all.armed() => {
+                        select_all.disarm();
+                        Cmd::Nothing
+                    }
+                    KeyCode::Esc => Cmd::Close,
+                    KeyCode::Backspace => {
+                        // An armed Ctrl+A means "replace it all".
+                        if !take_selected(input, select_all) {
+                            input.pop();
+                        }
+                        Cmd::Nothing
+                    }
+                    KeyCode::Char('a') if ctrl && !alt => {
+                        select_all.arm_if_nonempty(!input.is_empty());
+                        Cmd::Nothing
+                    }
+                    KeyCode::Char('u') if ctrl && !alt => {
+                        select_all.disarm();
+                        input.clear();
+                        Cmd::Nothing
+                    }
+                    KeyCode::Char(c) => {
+                        // Typing over a selection replaces the whole name.
+                        take_selected(input, select_all);
+                        input.push(c);
+                        Cmd::Nothing
+                    }
+                    KeyCode::Enter => Cmd::PaneRenameConfirmed,
+                    _ => Cmd::Nothing,
                 }
-                KeyCode::Char(c) => {
-                    input.push(c);
-                    Cmd::Nothing
-                }
-                KeyCode::Enter => Cmd::PaneRenameConfirmed,
-                _ => Cmd::Nothing,
-            },
+            }
             Some(Overlay::ConfirmDiscard { repo, entry }) => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     Cmd::DiscardConfirmed(*repo, entry.clone())
@@ -2962,7 +3080,7 @@ impl App {
             }
             Cmd::Picker(action) => self.handle_picker_action(action),
             Cmd::PaneRenameConfirmed => {
-                if let Some(Overlay::PaneRename { input }) = self.overlay.take() {
+                if let Some(Overlay::PaneRename { input, .. }) = self.overlay.take() {
                     self.confirm_pane_rename(&input);
                 }
             }
@@ -4789,6 +4907,9 @@ impl App {
                 // The commit below needs the staged list to be current.
                 self.refresh();
                 if let Some(repo) = self.repos.get_mut(index) {
+                    // The generated message replaces the draft: drop an armed
+                    // Ctrl+A, which no longer describes what is on screen.
+                    repo.select_all.disarm();
                     repo.message = generated.message.chars().collect();
                     repo.cursor = repo.message.len();
                 }
@@ -4877,6 +4998,7 @@ impl App {
         match repo.git.commit(message.trim()) {
             Ok(summary) => {
                 self.flash = Some((summary, false));
+                repo.select_all.disarm();
                 repo.message.clear();
                 repo.cursor = 0;
                 self.focus = Focus::List;
@@ -5202,10 +5324,15 @@ impl App {
     /// The pane-rename field as a bordered dialog over the body — a footer
     /// line was too easy to miss while typing a new pane name.
     fn draw_pane_rename(&mut self, frame: &mut Frame) {
-        let Some(Overlay::PaneRename { input }) = self.overlay.as_ref() else {
+        let Some(Overlay::PaneRename { input, select_all }) = self.overlay.as_ref() else {
             return;
         };
-        herdr_sidebar::ui::draw_input_dialog(frame, "Rename pane", input.as_str());
+        herdr_sidebar::ui::draw_input_dialog(
+            frame,
+            "Rename pane",
+            input.as_str(),
+            select_all.armed(),
+        );
     }
 
     /// The VS Code activity bar: view-switcher icons plus a detach button.
@@ -5418,9 +5545,14 @@ impl App {
         frame.render_widget(Paragraph::new(sparkle_glyph), sparkle_area);
         self.zones.sparkle = sparkle_area;
 
-        let (message, cursor, branch) = match self.active_repo() {
-            Some(r) => (r.message.clone(), r.cursor, r.status.branch.clone()),
-            None => (Vec::new(), 0, String::new()),
+        let (message, cursor, selected, branch) = match self.active_repo() {
+            Some(r) => (
+                r.message.clone(),
+                r.cursor,
+                r.select_all.armed() && focused,
+                r.status.branch.clone(),
+            ),
+            None => (Vec::new(), 0, false, String::new()),
         };
         if message.is_empty() && !focused {
             let placeholder = message_placeholder(&branch, usize::from(text_area.width));
@@ -5433,11 +5565,18 @@ impl App {
         let field = text_area.width.max(1) as usize;
         let (rows, cursor_row, cursor_col) = wrap_message(&message, cursor, field);
         let (top, visible) = message_window(rows.len(), cursor_row, focused);
+        // An armed Ctrl+A draws the whole message as selected: the next edit
+        // replaces all of it.
+        let text_style = if selected {
+            selected_text_style()
+        } else {
+            Style::default()
+        };
         let text: Vec<Line> = rows
             .iter()
             .skip(top)
             .take(visible)
-            .map(|row| Line::from(row.clone()))
+            .map(|row| Line::from(Span::styled(row.clone(), text_style)))
             .collect();
         frame.render_widget(Paragraph::new(text), text_area);
         if focused {
@@ -6203,6 +6342,13 @@ fn message_box_item(
     } else {
         let (rows, cursor_row, _) = wrap_message(&repo.message, repo.cursor, field);
         let (top, visible) = message_window(rows.len(), cursor_row, focused);
+        // An armed Ctrl+A draws the whole message as selected: the next edit
+        // replaces all of it.
+        let text_style = if repo.select_all.armed() && focused {
+            selected_text_style()
+        } else {
+            Style::default()
+        };
         for (i, row) in rows.iter().skip(top).take(visible).enumerate() {
             let pad = field.saturating_sub(Span::raw(row.as_str()).width());
             // The ✧ button owns the 3-column tail of the FIRST line only.
@@ -6213,7 +6359,7 @@ fn message_box_item(
             };
             lines.push(Line::from(vec![
                 Span::styled("│", border),
-                Span::raw(row.clone()),
+                Span::styled(row.clone(), text_style),
                 Span::raw(" ".repeat(pad)),
                 tail,
                 Span::styled("│", border),
@@ -7180,6 +7326,89 @@ mod tests {
 
         let action_left = dir_hover_action_at(10, 40, true, 3);
         assert_eq!(action_left, None);
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    /// A repo whose commit message holds `text`. `Repo` wraps a `Git`, so this
+    /// makes a throwaway one; the box's input rules are what is under test.
+    fn message_repo(tag: &str, text: &str) -> Repo {
+        let root = std::env::temp_dir().join(format!("herdr-scm-msg-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        Git::init(&root).unwrap();
+        let mut repo = Repo::new(Git::discover(&root).unwrap());
+        repo.message = text.chars().collect();
+        repo.cursor = repo.message.len();
+        repo
+    }
+
+    fn message_text(repo: &Repo) -> String {
+        repo.message.iter().collect()
+    }
+
+    #[test]
+    fn ctrl_a_then_typing_replaces_the_whole_commit_message() {
+        let mut repo = message_repo("typing", "héllo");
+        repo.message_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(repo.select_all.armed(), "ctrl+a selects the message");
+        // The next typed character replaces everything, not just the caret.
+        repo.message_key(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(message_text(&repo), "x");
+        assert_eq!(repo.cursor, 1);
+        assert!(!repo.select_all.armed());
+
+        // An empty box has nothing to select.
+        repo.message_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        repo.message_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(!repo.select_all.armed());
+    }
+
+    #[test]
+    fn ctrl_alt_a_is_text_not_select_all() {
+        let mut repo = message_repo("altgr", "ab");
+        repo.message_key(key(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert!(!repo.select_all.armed(), "ctrl+alt is a typed character");
+        assert_eq!(message_text(&repo), "aba");
+    }
+
+    #[test]
+    fn ctrl_a_then_backspace_clears_the_whole_commit_message() {
+        let mut repo = message_repo("backspace", "héllo");
+        repo.message_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        repo.message_key(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(message_text(&repo), "", "one backspace takes the selection");
+        assert_eq!(repo.cursor, 0);
+        assert!(!repo.select_all.armed());
+    }
+
+    #[test]
+    fn ctrl_a_is_dropped_by_a_caret_move() {
+        let mut repo = message_repo("caret", "abc");
+        repo.message_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        repo.message_key(key(KeyCode::Left, KeyModifiers::NONE));
+        assert!(!repo.select_all.armed(), "moving the caret drops it");
+        // A plain backspace after the move deletes one character, not all.
+        repo.message_key(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(message_text(&repo), "ac");
+        assert_eq!(repo.cursor, 1);
+    }
+
+    #[test]
+    fn ctrl_a_is_dropped_by_esc_before_esc_leaves_the_box() {
+        let mut repo = message_repo("esc", "abc");
+        repo.message_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(repo.esc_message(), "the first Esc only drops the selection");
+        assert!(!repo.select_all.armed());
+        assert!(
+            !repo.esc_message(),
+            "the next Esc is the one that leaves the box"
+        );
     }
 }
 

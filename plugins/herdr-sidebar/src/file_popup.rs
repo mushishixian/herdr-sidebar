@@ -28,7 +28,10 @@ use crate::file_search::{
     truncate_path_tail,
 };
 use crate::icons::{self, IconTheme};
-use crate::ui::{input_tail, keep_visible_scroll, palette, selection_style, truncate_to};
+use crate::ui::{
+    SelectAll, input_tail, keep_visible_scroll, palette, selected_text_style, selection_style,
+    truncate_to,
+};
 
 // ── Action side: request Herdr to spawn popup pane ──────────────────────
 
@@ -175,6 +178,8 @@ struct App {
     files: Arc<Vec<QuickFile>>,
     matches: Vec<usize>,
     query: String,
+    /// Ctrl+A: the next edit replaces the whole query (`ui::SelectAll`).
+    select_all: SelectAll,
     selected: usize,
     scroll: usize,
     truncated: bool,
@@ -208,6 +213,7 @@ impl App {
             files: Arc::new(Vec::new()),
             matches: Vec::new(),
             query: String::new(),
+            select_all: SelectAll::default(),
             selected: 0,
             scroll: 0,
             truncated: false,
@@ -238,6 +244,15 @@ impl App {
                 true
             }
             Err(mpsc::TryRecvError::Empty) => false,
+        }
+    }
+
+    /// An armed Ctrl+A (`ui::SelectAll`) means the next edit replaces the whole
+    /// query. This popup has no caret, so "replace" is simply a clear.
+    fn drop_armed_selection(&mut self) {
+        if self.select_all.armed() {
+            self.select_all.disarm();
+            self.query.clear();
         }
     }
 
@@ -273,6 +288,8 @@ impl App {
     fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            // Esc first drops an armed Ctrl+A selection, then closes.
+            KeyCode::Esc if self.select_all.armed() => self.select_all.disarm(),
             KeyCode::Esc => self.done = true,
             KeyCode::Char('q') | KeyCode::Char('c') if ctrl => self.done = true,
             KeyCode::Up => self.select_prev(),
@@ -286,15 +303,23 @@ impl App {
                 self.selected = self.matches.len().saturating_sub(1);
             }
             KeyCode::Backspace => {
-                self.query.pop();
+                // An armed Ctrl+A means "replace it all": the first delete
+                // clears the query instead of removing one character.
+                self.drop_armed_selection();
+                if !self.query.is_empty() {
+                    self.query.pop();
+                }
                 self.on_query_changed();
             }
             KeyCode::Char('u') if ctrl => {
+                self.select_all.disarm();
                 self.query.clear();
                 self.on_query_changed();
             }
+            KeyCode::Char('a') if ctrl => self.select_all.arm_if_nonempty(!self.query.is_empty()),
             KeyCode::Enter => self.activate(),
             KeyCode::Char(c) if !ctrl || key.modifiers.contains(KeyModifiers::ALT) => {
+                self.drop_armed_selection();
                 self.query.push(c);
                 self.on_query_changed();
             }
@@ -308,6 +333,8 @@ impl App {
             MouseEventKind::ScrollUp => self.select_prev(),
             MouseEventKind::ScrollDown => self.select_next(),
             MouseEventKind::Down(MouseButton::Left) => {
+                // A click is a focus move: drop an armed Ctrl+A.
+                self.select_all.disarm();
                 let area = self.list_area;
                 if mouse.row >= area.y
                     && mouse.row < area.y + area.height
@@ -380,9 +407,15 @@ impl App {
         // Row 1: Search input bar
         let prompt = " › ";
         let room = width.saturating_sub(prompt.len() + 2);
+        // Ctrl+A draws the query as selected, waiting to be typed over.
+        let query_style = if self.select_all.armed() {
+            selected_text_style()
+        } else {
+            Style::default()
+        };
         let mut input_spans = vec![
             Span::styled(prompt, accent),
-            Span::raw(input_tail(&self.query, room)),
+            Span::styled(input_tail(&self.query, room), query_style),
             Span::styled("█", dim),
         ];
         if self.query.is_empty() {
@@ -548,6 +581,36 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
+    fn ctrl_a_replaces_the_whole_query_on_the_next_edit() {
+        let mut app = App {
+            root: PathBuf::from("/test"),
+            caller_pane_id: None,
+            files: Arc::new(Vec::new()),
+            matches: Vec::new(),
+            query: "typed".to_string(),
+            select_all: SelectAll::default(),
+            selected: 0,
+            scroll: 0,
+            truncated: false,
+            loading: false,
+            done: false,
+            error: None,
+            rx: None,
+            theme: IconTheme::Emoji,
+            list_area: Rect::new(0, 0, 80, 20),
+        };
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.select_all.armed());
+        app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(app.query, "l");
+
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.select_all.armed());
+        assert!(!app.done, "the first Esc only drops the selection");
+    }
+
+    #[test]
     fn file_popup_key_navigation_and_cancellation() {
         let mut app = App {
             root: PathBuf::from("/test"),
@@ -566,6 +629,7 @@ mod tests {
             ]),
             matches: vec![0, 1],
             query: String::new(),
+            select_all: SelectAll::default(),
             selected: 0,
             scroll: 0,
             truncated: false,
@@ -621,6 +685,7 @@ mod tests {
             }]),
             matches: vec![0],
             query: "main".to_string(),
+            select_all: SelectAll::default(),
             selected: 0,
             scroll: 0,
             truncated: false,

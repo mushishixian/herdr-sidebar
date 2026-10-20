@@ -33,7 +33,10 @@ use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 use crate::actions::{ClipboardWrite, copy_to_clipboard};
 use crate::diffview;
 use crate::git::{Branch, Git, LineCommit, MergeOutcome};
-use crate::ui::{input_tail, keep_visible_scroll, palette, selection_style, truncate_to};
+use crate::ui::{
+    SelectAll, input_tail, keep_visible_scroll, palette, selected_text_style, selection_style,
+    truncate_to,
+};
 
 /// Set by the Fresh editor plugin: absolute path of the file to inspect.
 pub const HISTORY_FILE_ENV: &str = "HERDR_SIDEBAR_HISTORY_FILE";
@@ -216,6 +219,8 @@ struct App {
     current: Option<String>,
     branches: Vec<Branch>,
     input: String,
+    /// Ctrl+A: the next edit replaces the whole input (`ui::SelectAll`).
+    select_all: SelectAll,
     selected: usize,
     scroll: usize,
     list_area: Rect,
@@ -234,6 +239,7 @@ impl App {
             current: None,
             branches: Vec::new(),
             input: String::new(),
+            select_all: SelectAll::default(),
             selected: 0,
             scroll: 0,
             list_area: Rect::default(),
@@ -332,6 +338,8 @@ impl App {
             self.rows().len()
         };
         match key.code {
+            // Esc first drops an armed Ctrl+A selection, then closes.
+            KeyCode::Esc if self.select_all.armed() => self.select_all.disarm(),
             KeyCode::Esc => self.done = true,
             KeyCode::Enter => self.activate(self.selected),
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
@@ -339,18 +347,34 @@ impl App {
             KeyCode::PageUp => self.selected = self.selected.saturating_sub(10),
             KeyCode::PageDown => self.selected = (self.selected + 10).min(rows.saturating_sub(1)),
             KeyCode::Backspace => {
-                self.input.pop();
+                // An armed Ctrl+A means "replace it all".
+                self.drop_armed_selection();
+                if !self.input.is_empty() {
+                    self.input.pop();
+                }
                 self.edited();
             }
             KeyCode::Char('u') if ctrl => {
+                self.select_all.disarm();
                 self.input.clear();
                 self.edited();
             }
+            KeyCode::Char('a') if ctrl => self.select_all.arm_if_nonempty(!self.input.is_empty()),
             KeyCode::Char(c) if !ctrl || key.modifiers.contains(KeyModifiers::ALT) => {
+                self.drop_armed_selection();
                 self.input.push(c);
                 self.edited();
             }
             _ => {}
+        }
+    }
+
+    /// An armed Ctrl+A (`ui::SelectAll`) makes the next edit replace the whole
+    /// input; there is no caret in this field, so that is a clear.
+    fn drop_armed_selection(&mut self) {
+        if self.select_all.armed() {
+            self.select_all.disarm();
+            self.input.clear();
         }
     }
 
@@ -360,6 +384,10 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) {
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            // A click is a focus move: drop an armed Ctrl+A.
+            self.select_all.disarm();
+        }
         if !matches!(self.screen, Screen::Edit) || matches!(self.op, Op::Rename | Op::New) {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                 && !matches!(self.screen, Screen::Edit)
@@ -598,7 +626,14 @@ impl App {
         let room = width.saturating_sub(prompt.len() + 2);
         let mut input = vec![
             Span::styled(prompt, accent),
-            Span::raw(input_tail(&self.input, room)),
+            Span::styled(
+                input_tail(&self.input, room),
+                if self.select_all.armed() {
+                    selected_text_style()
+                } else {
+                    Style::default()
+                },
+            ),
             Span::styled("█", dim),
         ];
         if self.input.is_empty() && !matches!(self.op, Op::Rename | Op::New) {
