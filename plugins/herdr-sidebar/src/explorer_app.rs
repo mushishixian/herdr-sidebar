@@ -48,9 +48,6 @@ const MY_VIEW: View = View::Explorer;
 /// explorer's own poll is 500ms, so this throttles them down to a quarter of
 /// that.
 const DECO_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
-/// The same throttle while this pane is FOCUSED: a file edited in another pane
-/// should light up its decoration within about a second, not two.
-const DECO_REFRESH_FOCUSED: std::time::Duration = std::time::Duration::from_millis(400);
 const TREE_SYNC_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 /// How long a divider drag must stay put before it is adopted as the sidebar
 /// width setting — a drag is a burst of resize events, not one.
@@ -656,12 +653,7 @@ impl App {
         self.collect_git_sync();
         self.start_content_search_if_due();
         self.collect_decorations();
-        let interval = if self.pane_is_focused() {
-            DECO_REFRESH_FOCUSED
-        } else {
-            DECO_REFRESH
-        };
-        if self.last_deco.elapsed() < interval {
+        if self.last_deco.elapsed() < DECO_REFRESH {
             return;
         }
         self.request_decorations(false);

@@ -52,19 +52,19 @@ const AI_COMMIT_REVIEW: std::time::Duration = std::time::Duration::from_millis(9
 /// How often this sidebar checks its tab's AI commit request file.
 const AI_REQUEST_POLL: std::time::Duration = std::time::Duration::from_millis(300);
 /// How often the focused pane re-reads `git status`. The idle cadence
-/// ([`REFRESH_EVERY`](crate::REFRESH_EVERY), 1.5 s) made a file edited in another
+/// (the old 1.5 s one) made a file edited in another
 /// pane show up late (user-reported); when the user is looking at this pane, a
 /// status read is cheap (one process per repo) and `refresh` skips the rebuild
 /// when nothing changed.
-const FOCUSED_REFRESH: std::time::Duration = std::time::Duration::from_millis(500);
-/// How often an UNFOCUSED pane still re-reads `git status`. It used to skip the
-/// read entirely (the guard exists so the several hidden sidebars of one session
-/// do not multiply git processes), but that left a background Source Control pane
-/// frozen on stale changes while another pane had focus (user-reported). Five
-/// seconds is one `git status` per repo per period — `refresh` skips the rebuild
-/// when nothing changed — and the real catch-up is still instant: focusing the
-/// pane polls immediately at [`FOCUSED_REFRESH`].
-const BACKGROUND_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+const FOCUSED_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+/// How often the event loop wakes while this pane is UNFOCUSED. herdr delivers
+/// no per-pane focus events (verified: nothing arrives on the pane's stdin when
+/// focus moves), so gaining focus is only noticed by polling `pane.list` — at the
+/// old 1.5 s cadence that meant "click the sidebar, then wait up to 1.5 s plus a
+/// `git status` before the list moved" (user-reported). 400 ms costs one socket
+/// call (and no git process: the refresh guard below still refuses while
+/// unfocused) and makes the catch-up feel immediate.
+const IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(400);
 /// How long a divider drag must stay put before it is adopted as the sidebar
 /// width setting — a drag is a burst of resize events, not one.
 const WIDTH_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -1294,9 +1294,11 @@ pub struct App {
     pub tree_view: bool,
     /// Keep polling Git status while unfocused ([`sidebar::BACKGROUND_REFRESH_ENV`]).
     background_refresh: bool,
-    /// Last `git status` read done while this pane was unfocused, for
-    /// [`BACKGROUND_POLL`].
-    last_background_poll: Option<std::time::Instant>,
+    /// When `git status` was last read (focus-gated, see `tick`).
+    last_git_read: Option<std::time::Instant>,
+    /// Seen focused on the previous tick: a false -> true transition refreshes
+    /// at once.
+    was_focused: bool,
 }
 
 const MY_VIEW: View = View::SourceControl;
@@ -1442,7 +1444,8 @@ impl App {
                     .ok()
                     .as_deref(),
             ),
-            last_background_poll: None,
+            last_git_read: None,
+            was_focused: false,
         };
         app.apply_identity();
         app.refresh();
@@ -1543,15 +1546,12 @@ impl App {
         );
     }
 
-    /// How often the event loop should call [`Self::tick`]: the fast cadence
-    /// while this pane is focused (or explicitly background-refreshing), the
-    /// idle one otherwise.
-    pub fn refresh_interval(&self) -> std::time::Duration {
-        if self.background_refresh || self.pane_is_focused() {
-            FOCUSED_REFRESH
-        } else {
-            crate::REFRESH_EVERY
-        }
+    /// How often the event loop calls [`Self::tick`]: a uniform, git-free probe
+    /// cadence. The `git status` cadence is decided INSIDE `tick`
+    /// ([`FOCUSED_REFRESH`]) so that gaining focus can refresh at once instead of
+    /// waiting out a slow interval that has just become the active one.
+    pub fn tick_interval(&self) -> std::time::Duration {
+        IDLE_TICK
     }
 
     /// Re-read every repo's git status (this is the change auto-detection —
@@ -1588,7 +1588,7 @@ impl App {
     /// The branch-moved probe: cheap (one small file per repo), so the event
     /// loop can run it several times a second. A popup (own process) or a
     /// `git switch` in a terminal rewrites the git dir's HEAD, and the view then
-    /// refreshes at once instead of waiting for the next [`crate::REFRESH_EVERY`]
+    /// refreshes at once instead of waiting for the next [`FOCUSED_REFRESH`]
     /// status poll. Returns true when it triggered a refresh.
     pub fn poll_branch(&mut self) -> bool {
         let mut moved = false;
@@ -1776,18 +1776,28 @@ impl App {
                 }
             }
         }
-        if !self.background_refresh && !self.pane_is_focused() {
-            // Unfocused: keep the view roughly current on a slow cadence instead
-            // of not at all - the collections above still run at the loop's own
-            // cadence, so finished work is never stranded.
-            if self
-                .last_background_poll
-                .is_some_and(|at| at.elapsed() < BACKGROUND_POLL)
-            {
-                return;
-            }
-            self.last_background_poll = Some(std::time::Instant::now());
+        // No `git status` at all while this pane is unfocused: one session holds a
+        // sidebar per IDE tab, and polling them all multiplied git processes. The
+        // collections above still run at the loop cadence (finished AI-commit /
+        // sync / suggestion work is never stranded).
+        let focused = self.background_refresh || self.pane_is_focused();
+        if !focused {
+            self.was_focused = false;
+            return;
         }
+        // Gaining focus reads immediately (the loop only probes every
+        // [`IDLE_TICK`], so this is what makes "click the sidebar" feel instant);
+        // while focused it is [`FOCUSED_REFRESH`].
+        let gained_focus = !self.was_focused;
+        self.was_focused = true;
+        if !gained_focus
+            && self
+                .last_git_read
+                .is_some_and(|at| at.elapsed() < FOCUSED_REFRESH)
+        {
+            return;
+        }
+        self.last_git_read = Some(std::time::Instant::now());
         if self.repos.is_empty() {
             self.repos = Git::discover_all(&self.cwd)
                 .into_iter()

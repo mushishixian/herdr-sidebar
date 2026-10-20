@@ -1178,21 +1178,18 @@ HACKING.md — budget time for that before promising a patched build.
   Local choices use a normal checkout; a remote choice creates its local tracking branch.
   Symbolic `<remote>/HEAD` aliases are omitted. Dirty-worktree checkout failures surface intact
   and never force, stash, discard, or otherwise mutate work to make the switch succeed.
-- **The git working-tree poll is focus-aware** (`scm_app::FOCUSED_REFRESH` 500 ms while the
-  pane is focused, `REFRESH_EVERY` 1.5 s otherwise, via `App::refresh_interval()` which the event
-  loop uses for BOTH its poll timeout and its tick gate). `refresh()` also skips
-  `reload_expanded_drawers` + `rebuild` unless a repo's `Status` actually changed, which is what
-  makes the fast cadence affordable: an idle poll costs one `git status` per repo and no UI
-  churn. Measured live (external edit, focused SCM): ~0.35 s for a new untracked file, ~0.5 s for
-  a modified one (was 1.5-1.7 s). The Explorer's decorations use the same idea
-  (`DECO_REFRESH_FOCUSED` 400 ms focused, 2 s idle) and land in about a second.
-- **An UNFOCUSED Source Control pane still polls, just slowly** (`BACKGROUND_POLL` 5 s, measured
-  ~4 s to show an external edit). It used to skip the read entirely — the guard exists so the
-  several hidden sidebars of one session do not multiply git processes — but that left a
-  background pane frozen on stale changes while another pane had focus (user-reported). Only
-  the `git status` read is throttled: the tick's own collections (AI commit, sync, suggestions)
-  still run at the loop cadence, so a hidden pane never strands finished work, and focusing the
-  pane polls immediately (~250-300 ms to catch up).
+- **Only the FOCUSED pane reads `git status`** — immediately when it GAINS focus, then every
+  2 s (`scm_app::FOCUSED_REFRESH`). An unfocused pane reads NOTHING (one session holds a sidebar
+  per IDE tab; polling them all multiplied git processes). Two details make that feel instant:
+  the event loop runs a uniform, git-free probe every `IDLE_TICK` (400 ms) — herdr delivers no
+  per-pane focus events (verified: nothing arrives on a pane's stdin when `pane.focus` moves) so
+  focus is polled through `pane.list` — and `tick` refreshes at once on a false→true focus
+  transition instead of waiting out the 2 s. Measured: `Changes` appears ~0.4 s after focusing a
+  pane that had gone stale, and ≤2 s while it stays focused. `refresh()` also skips
+  `reload_expanded_drawers` + `rebuild` unless a repo's `Status` actually changed (one `git
+  status` per repo, no UI churn), and the 300 ms branch probe (`Git::head_signature`) keeps
+  branch switches instant without a git process. The Explorer's decorations follow the same rule
+  (`DECO_REFRESH` 2 s, and `request_decorations` skips while unfocused).
 - Periodic Source Control status/drawer refresh backs off while its pane is unfocused, just
   like Explorer decorations. Suggestion/sync worker results are still collected first so a
   hidden pane never strands completed background work. A pane launched with

@@ -21,8 +21,6 @@ use crossterm::event::{
 use herdr_sidebar::{ensure, launch, shortcut_tip, state, viewer};
 use state::{Exit, View};
 
-/// How often the source-control view re-reads `git status` while idle.
-const REFRESH_EVERY: Duration = Duration::from_millis(1500);
 /// How often to look for a MOVED branch (one small `HEAD` read per repo, no git
 /// process): a checkout coming from a branch popup or a terminal lands on screen
 /// within a few hundred ms instead of at the next full status poll.
@@ -628,7 +626,7 @@ fn run_scm(
     loop {
         terminal.draw(|frame| app.draw(frame))?;
         // Focused panes refresh faster (see `App::refresh_interval`).
-        let interval = app.refresh_interval();
+        let interval = app.tick_interval();
         let mut timeout = interval
             .saturating_sub(last_tick.elapsed())
             .min(BRANCH_POLL);
