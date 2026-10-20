@@ -429,9 +429,12 @@ Two things that surprise people:
 - `bin/fresh-open FILE[:LINE[:COL]] | file://URL | --link` sends a file to the
   nearest `Fresh` pane (this tab, then this workspace — never another
   workspace's, even on the same project: that workspace has its own daemon).
-  A live-diff request (sidebar git clicks) is written per daemon, as
+  A `HERDR_SIDEBAR_OPEN_DIFF=1` launch writes a live-diff request per daemon, as
   `live-diff-request-<daemon>` in `$XDG_STATE_HOME/fresh-ide`, so only the
-  editor the file went to consumes it. It is the sidebar's custom editor (`editor-command.txt`) and
+  editor the file went to consumes it. The sidebar no longer sends it: SCM diffs
+  and git shows are read-only viewing and stay in the built-in preview (see the
+  changelog), so the request path is only reachable if something else sets the
+  env. It is the sidebar's custom editor (`editor-command.txt`) and
   the target of the `file-link` link handler, so **Ctrl+click on `file://`
   links** (rg, delta, eza, fd) opens Fresh
   at that line.
@@ -486,6 +489,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | 261bccb | **Dotfiles folded into this repo** | The standalone `~/code/dotfiles` now lives in `dotfiles/`; the upstream patch set was dropped. `dotfiles/herdr-sidebar/build.sh` builds this checkout and points herdr's `herdr-sidebar` registration at it. |
 | *uncommitted* | **"Git init" footer button** | When the root has no repository above it, the Explorer footer shows a clickable `Git init` chip (`Git::is_initialized`, a `.git` walk with no git process, refreshed on tick). It runs `git init` on a worker, then rediscovers repos/decorations: branch strip and `U` markers appear immediately. Mouse-only, the zone is reset every frame. |
 | *uncommitted* | **Focus-only working-tree refresh** | Only the FOCUSED Source Control pane reads `git status`: at once when it gains focus, then every 2 s; it skips the rebuild when nothing changed (one git process, no UI churn). An unfocused pane reads nothing, and a uniform 400 ms focus probe (herdr sends no per-pane focus events) makes the catch-up ~0.4 s after clicking it — previously it waited out the whole interval (~1.9 s). The Explorer's decorations keep their 2 s cadence and still skip while unfocused; branch switches stay instant via the 300 ms HEAD probe. |
+| *uncommitted* | **Diffs and git shows stay in the preview** | SCM changed-file rows used to route to the custom editor when one was configured (`HERDR_SIDEBAR_OPEN_DIFF=1`, live diff vs HEAD), which handed "look at this diff" to Fresh where nothing appeared, and the preview it displaced had to be closed again. `open_diff` now always uses `open_diff_viewer`; drawer refs (commits, stashes, branches) already did. Opening a FILE still goes to the editor, and that launch closes the tab's inline preview so the two never stack. Measured: clicking a changed row opens `base.txt · preview`, and clicking a commit replaces it with `4c0abe0 · preview` in the same pane. |
 | *uncommitted* | **The editor replaces the preview instead of stacking** | Opening a file with an editor configured used to leave the tab's inline preview pane beside the fresh editor, so a diff then a file click ended with two content panes. `actions::spawn_inline_editor` now closes that preview through the viewer's own close request (`viewer::close_in_tab`) before launching the editor: an unsaved preview buffer still prompts, and the tab keeps ONE content pane. |
 | *uncommitted* | **Search results open in the editor** | The Search view and Quick Open forced the built-in preview (`open_preview_at`) even with a custom editor configured; they now go through `explorer_app::open_file` → `file_popup::open_file_in_workspace`, i.e. the same routing a tree click uses (Fresh at the hit's line, else the preview). Media goes to the editor too (the media exception was dropped later), and the preview path keeps the double-click pin bookkeeping. |
 | *uncommitted* | **Merge popup merges on one key** | The `--git-popup merge` branch list used to ask "Merge X into Y?" on a second screen (`Screen::ConfirmMerge`); picking a branch now merges immediately, and the result/conflict message screen (with `a` for `merge --abort`) is unchanged. `Git::merge_branch` still passes `--no-edit` and never forces. |

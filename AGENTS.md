@@ -1047,20 +1047,17 @@ HACKING.md — budget time for that before promising a patched build.
   rule made the same file open in different places depending on how you clicked it). The preview
   still RENDERS media when something routes there — no editor configured, the diff viewer, or the
   explicit "Open Diff Preview" — so the two paths do not conflict.
-- **SCM changed-file routing** (`scm_app.rs` `open_diff` / `diff_opens_in_editor`): with the custom
-  editor opted in (`custom_editor_on_click` AND `custom_editor_inline`, re-read on SCM tick), a
-  configured editor, a non-`D` status and an existing path, clicking/Enter/hover-open/`o` on a staged
-  or unstaged file runs `actions::open_in_editor_inline_env(root, file, [HERDR_SIDEBAR_OPEN_DIFF=1])`
-  instead of the preview pane. `HERDR_SIDEBAR_OPEN_DIFF=1` is the contract with the editor: open the
-  file and show its diff against HEAD. Launch failure flashes the error and falls back to the viewer.
-  There is no media exclusion any more (`diff_opens_in_editor`'s `media` parameter is gone), so a
-  changed picture opens in the editor like any other file.
-  Context menu "Open Diff Preview" always uses `open_diff_viewer`; drawer refs keep the viewer.
-  **Conflicted files (`!`) never send `HERDR_SIDEBAR_OPEN_DIFF`** (`editor_live_diff`): they still
-  open in the editor, but without the live-diff request. Fresh's live diff overlays would paint over
-  the `<<<<<<<` / `=======` / `>>>>>>>` markers that the editor's inline conflict resolver
-  (`selection_share.ts`, "Inline merge conflicts") needs to show, so the two views would fight.
-  Ordinary changes still send it. Covered by `conflicted_file_opens_in_editor_without_live_diff`.
+- **SCM diffs and git shows are READ-ONLY viewing, so they always use the built-in preview.**
+  `open_diff` (staged / unstaged / untracked rows, click / Enter / hover-open / `o`) calls
+  `open_diff_viewer`, and drawer refs (commits, stashes, branches) follow the same path: one
+  inline preview pane, replaced in place by the next thing you view. They used to be routed to
+  the custom editor when one was configured, which handed "look at this diff" to Fresh, where
+  nothing (or a live-diff overlay that needs its own plugin) appeared — and the preview it
+  displaced had to be closed again (user-reported). `HERDR_SIDEBAR_OPEN_DIFF` is therefore no
+  longer emitted by the sidebar (the env's `live-diff-request-<daemon>` path in `fresh-open` /
+  the Fresh plugin still exists, just unreached). **Opening a FILE** — tree click, Quick Open, a
+  search hit — still goes to the editor, and that launch closes the tab's inline preview first
+  (`actions::spawn_inline_editor` → `viewer::close_in_tab`) so the two do not stack.
 - **Title-bar action buttons** (`ui.rs` `TitleAction`/`title_action_spans`): VS Code-style
   hover buttons at the header's top-right (Explorer: New File / New Folder / Refresh /
   Collapse All; SCM: Refresh / Collapse All), left of the standalone ⚙. Terminals emit NO

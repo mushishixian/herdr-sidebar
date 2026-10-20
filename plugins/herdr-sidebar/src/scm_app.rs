@@ -3989,51 +3989,16 @@ impl App {
     /// mode, on click) the file opens in that editor with
     /// `HERDR_SIDEBAR_OPEN_DIFF=1`; otherwise, or when the editor cannot be
     /// launched, the diff goes to the preview pane.
+    /// Show a changed file's diff. This is READ-ONLY viewing, so it always uses
+    /// the built-in preview: routing it to the custom editor made "look at this
+    /// diff" hand the file to the editor instead, where nothing (or a live-diff
+    /// overlay that needs its own plugin) appeared, and the preview it displaced
+    /// had to be closed again (user-reported). Opening a FILE - tree click, Quick
+    /// Open, a search hit - still goes to the editor when one is configured.
     fn open_diff(&mut self, repo: usize, entry: &FileEntry, staged: bool) {
-        let Some(r) = self.repos.get(repo) else {
-            return;
-        };
-        let root = r.git.root().to_path_buf();
-        let exists = root.join(&entry.path).exists();
-        let want_editor =
-            self.sidebar_state.custom_editor_on_click && self.sidebar_state.custom_editor_inline;
-        let editor_configured = want_editor && actions::configured_editor().is_some();
-        if diff_opens_in_editor(
-            self.sidebar_state.custom_editor_on_click,
-            self.sidebar_state.custom_editor_inline,
-            editor_configured,
-            entry.letter,
-            exists,
-        ) {
-            self.open_diff_in_editor(repo, &root, entry, staged);
-        } else {
-            self.open_diff_viewer(repo, entry, staged);
-        }
+        self.open_diff_viewer(repo, entry, staged);
     }
 
-    /// Hand the file to the custom editor, asking it to show its diff vs HEAD.
-    /// On failure the flash shows the error and the diff opens in the viewer.
-    fn open_diff_in_editor(&mut self, repo: usize, root: &Path, entry: &FileEntry, staged: bool) {
-        let name = entry
-            .path
-            .rsplit('/')
-            .next()
-            .unwrap_or(entry.path.as_str())
-            .to_string();
-        let file = root.join(&entry.path);
-        let env: &[(&str, &str)] = if editor_live_diff(entry.letter) {
-            &[(OPEN_DIFF_ENV, "1")]
-        } else {
-            &[]
-        };
-        match actions::open_in_editor_inline_env(root, &file, env) {
-            Ok(()) => self.flash = Some((format!("opened diff in editor: {name}"), false)),
-            Err(error) => {
-                self.flash = Some((format!("custom editor failed: {error}"), true));
-                self.open_diff_viewer(repo, entry, staged);
-            }
-        }
-    }
 
     /// Show a file's diff in the preview pane beside the sidebar. Staged
     /// rows show the staged diff; untracked files render as one addition.
@@ -6607,31 +6572,6 @@ fn no_repo_layout(area: Rect, merged: bool) -> [Rect; 2] {
     .areas(area)
 }
 
-/// Env var telling the custom editor to open a file and show its diff vs HEAD.
-/// Contract shared with the editor integration: `1` means "show the diff".
-const OPEN_DIFF_ENV: &str = "HERDR_SIDEBAR_OPEN_DIFF";
-
-/// Whether a changed-file row opens in the custom editor (with its diff)
-/// instead of the preview pane. A deleted file has nothing on disk to open,
-/// and a picture or video stays in the diff viewer (a text editor cannot show it).
-fn diff_opens_in_editor(
-    on_click: bool,
-    inline: bool,
-    editor_configured: bool,
-    letter: char,
-    exists: bool,
-) -> bool {
-    on_click && inline && editor_configured && letter != 'D' && exists
-}
-
-/// Whether the editor is asked for a live diff vs HEAD (`OPEN_DIFF_ENV`). A
-/// conflicted file (`!`) must open as the plain working-tree file: the live
-/// diff overlays would paint over the conflict markers that the editor's
-/// inline merge resolver needs to show.
-fn editor_live_diff(letter: char) -> bool {
-    letter != '!'
-}
-
 /// Stage everything the repository has (nested-repo safe), then ask OpenCommit
 /// for a message describing the staged changes. Runs on a worker thread.
 fn ai_commit_outcome(git: &Git) -> AiOutcome {
@@ -6688,39 +6628,6 @@ mod tests {
     fn max_scroll_returns_last_index_for_row_taller_than_viewport() {
         assert_eq!(max_scroll_for(&[1, 1, 5], 3), 2);
         assert_eq!(max_scroll_for(&[1], 1), 0);
-    }
-
-    #[test]
-    fn diff_routes_to_editor_only_when_every_condition_holds() {
-        assert!(diff_opens_in_editor(true, true, true, 'M', true));
-        assert!(diff_opens_in_editor(true, true, true, 'U', true));
-        // Each condition alone breaks the route.
-        assert!(!diff_opens_in_editor(false, true, true, 'M', true));
-        assert!(!diff_opens_in_editor(true, false, true, 'M', true));
-        assert!(!diff_opens_in_editor(true, true, false, 'M', true));
-        assert!(!diff_opens_in_editor(true, true, true, 'M', false));
-        // A deletion, on either side, keeps the viewer.
-        assert!(!diff_opens_in_editor(true, true, true, 'D', true));
-    }
-
-    /// A changed picture USED to be routed to the diff viewer (it can draw
-    /// media). Every open now goes to the editor, so the decision no longer
-    /// looks at the file type at all.
-    #[test]
-    fn a_changed_picture_opens_in_the_editor_too() {
-        assert!(diff_opens_in_editor(true, true, true, 'M', true));
-        assert!(diff_opens_in_editor(true, true, true, '!', true));
-    }
-
-    #[test]
-    fn conflicted_file_opens_in_editor_without_live_diff() {
-        // Conflicts (`!`) still route to the editor...
-        assert!(diff_opens_in_editor(true, true, true, '!', true));
-        // ...but must not request the live diff, which would fight the
-        // inline conflict resolver. Ordinary changes still do.
-        assert!(!editor_live_diff('!'));
-        assert!(editor_live_diff('M'));
-        assert!(editor_live_diff('U'));
     }
 
     #[test]
