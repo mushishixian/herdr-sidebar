@@ -1065,6 +1065,15 @@ HACKING.md — budget time for that before promising a patched build.
   because a diff cannot resolve anything, while Fresh's inline resolver is what does
   (Alt+C / Alt+I / Alt+M). A conflict that is a pure deletion has no file to open and keeps
   the diff; the context menu's explicit "Open Diff" still means diff.
+  **A conflicted row's marker counts what is left**: `status_marker` (`scm_app`)
+  renders `!N` while N `<<<<<<<` blocks remain and `✓` once none do — git still says
+  `UU` until the file is staged, so without the count a resolved file would look
+  unresolvable. `count_conflict_blocks` (`git.rs`, 4 MiB cap, `None` = unreadable →
+  plain `!`) runs in `refresh_conflict_counts`, which re-reads only conflicted entries
+  on the 2 s focused refresh and rebuilds when a count changed; the marker state is
+  NOT git status, so it must never be folded into `Status` equality.
+  `RowLook` carries `(staged, conflicts)` into the row builders, and `file_hover_action_start`
+  takes the marker width because the hover buttons sit to its left (`!12` is 3 cells).
 - **Title-bar action buttons** (`ui.rs` `TitleAction`/`title_action_spans`): VS Code-style
   hover buttons at the header's top-right (Explorer: New File / New Folder / Refresh /
   Collapse All; SCM: Refresh / Collapse All), left of the standalone ⚙. Terminals emit NO

@@ -9,6 +9,7 @@
 //! When herdr-aa-filetree is also installed, the panel can merge with it into
 //! a single "Sidebar" pane with an activity-bar view switcher (see sidebar.rs).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 
@@ -1353,6 +1354,11 @@ pub struct App {
     /// double click pins that exact tab instead of re-opening it (mirrors the
     /// file explorer's pin).
     last_preview: Option<(String, herdr_sidebar::viewer::PreviewTarget)>,
+    /// Remaining conflict blocks per conflicted (`!`) working-tree file, keyed
+    /// by absolute path. NOT git state: resolving every block leaves the file
+    /// unmerged until it is staged, so this is re-read on each refresh and
+    /// decides between `!N` and `✓` in the row's marker.
+    conflict_counts: HashMap<PathBuf, usize>,
     page: usize,
     last_width: u16,
     /// Previous `pane.layout` snapshot. Divider-only resizes leave the tab area
@@ -1521,6 +1527,7 @@ impl App {
             mouse_pos: None,
             last_click: None,
             last_preview: None,
+            conflict_counts: HashMap::new(),
             page: 20,
             last_width: sidebar_state.sidebar_width,
             last_layout,
@@ -1677,11 +1684,65 @@ impl App {
         if let Some(e) = error {
             self.flash = Some((e, true));
         }
-        if !changed {
+        // Git's status cannot see a resolution: a fully resolved file stays
+        // `UU` until it is staged, so the marker is re-read every refresh.
+        let counts_changed = self.refresh_conflict_counts();
+        if !changed && !counts_changed {
             return;
         }
         self.reload_expanded_drawers();
         self.rebuild();
+    }
+
+    /// Recount the conflict blocks left in every conflicted (`!`) file and
+    /// return whether any of them changed. Cheap: only conflicted entries are
+    /// read, on the refresh path (2 s while focused), never per frame.
+    fn refresh_conflict_counts(&mut self) -> bool {
+        let mut counts = HashMap::new();
+        for repo in &self.repos {
+            for entry in &repo.status.unstaged {
+                if entry.letter != '!' {
+                    continue;
+                }
+                let path = repo.git.root().join(&entry.path);
+                if let Some(blocks) = herdr_sidebar::git::count_conflict_blocks(&path) {
+                    counts.insert(path, blocks);
+                }
+            }
+        }
+        if counts == self.conflict_counts {
+            return false;
+        }
+        self.conflict_counts = counts;
+        true
+    }
+
+    /// Conflict blocks still in `entry`'s file, or `None` when it is not a
+    /// conflicted row (or its file could not be scanned).
+    fn conflicts_for(&self, repo: usize, entry: &FileEntry) -> Option<usize> {
+        if entry.letter != '!' {
+            return None;
+        }
+        let path = self.repos.get(repo)?.git.root().join(&entry.path);
+        self.conflict_counts.get(&path).copied()
+    }
+
+    /// Columns the row's right-aligned marker occupies (`!3` is 2, `✓` is 1).
+    /// The hover buttons are laid out to its left, so hit-testing needs it.
+    fn marker_width_of(&self, repo: usize, staged: bool, index: usize) -> u16 {
+        let entry = self.repos.get(repo).and_then(|r| {
+            if staged {
+                r.status.staged.get(index)
+            } else {
+                r.status.unstaged.get(index)
+            }
+        });
+        let Some(entry) = entry else { return 1 };
+        let width = status_marker(entry.letter, self.conflicts_for(repo, entry))
+            .0
+            .chars()
+            .count();
+        u16::try_from(width).unwrap_or(1)
     }
 
     /// The branch-moved probe: cheap (one small file per repo), so the event
@@ -2535,8 +2596,17 @@ impl App {
                     self.focus = Focus::List;
                     self.select(index);
                     if let Some(entry) = self.repos[r].status.staged.get(i).cloned() {
+                        let conflicts = self.conflicts_for(r, &entry);
+                        let marker_width = status_marker(entry.letter, conflicts).0.chars().count();
                         match (self.hovered == Some(index))
-                            .then(|| file_hover_action_at(x, self.last_width, true))
+                            .then(|| {
+                                file_hover_action_at(
+                                    x,
+                                    self.last_width,
+                                    true,
+                                    marker_width as u16,
+                                )
+                            })
                             .flatten()
                         {
                             Some(FileHoverAction::Open) => self.open_entry(r, &entry, true),
@@ -2557,8 +2627,17 @@ impl App {
                     self.focus = Focus::List;
                     self.select(index);
                     if let Some(entry) = self.repos[r].status.unstaged.get(i).cloned() {
+                        let conflicts = self.conflicts_for(r, &entry);
+                        let marker_width = status_marker(entry.letter, conflicts).0.chars().count();
                         match (self.hovered == Some(index))
-                            .then(|| file_hover_action_at(x, self.last_width, false))
+                            .then(|| {
+                                file_hover_action_at(
+                                    x,
+                                    self.last_width,
+                                    false,
+                                    marker_width as u16,
+                                )
+                            })
                             .flatten()
                         {
                             Some(FileHoverAction::Open) => self.open_entry(r, &entry, false),
@@ -5138,12 +5217,20 @@ impl App {
                 dir_hover_action_at(x, self.last_width, false, count)
                     .map(FileHoverAction::footer_hint)
             }
-            Row::Staged(..) => {
-                file_hover_action_at(x, self.last_width, true).map(FileHoverAction::footer_hint)
-            }
-            Row::Unstaged(..) => {
-                file_hover_action_at(x, self.last_width, false).map(FileHoverAction::footer_hint)
-            }
+            Row::Staged(repo, i) => file_hover_action_at(
+                x,
+                self.last_width,
+                true,
+                self.marker_width_of(repo, true, i),
+            )
+            .map(FileHoverAction::footer_hint),
+            Row::Unstaged(repo, i) => file_hover_action_at(
+                x,
+                self.last_width,
+                false,
+                self.marker_width_of(repo, false, i),
+            )
+            .map(FileHoverAction::footer_hint),
             _ => None,
         }
     }
@@ -5827,10 +5914,19 @@ impl App {
                         tree_dir_item(dir, width, theme, false, row_hovered, hovered_action)
                     }
                     Row::Staged(r, i) => {
+                        let entry = &self.repos[r].status.staged[i];
+                        let conflicts = self.conflicts_for(r, entry);
+                        let marker_width = status_marker(entry.letter, conflicts).0.chars().count();
                         let hovered_action = row_hovered
                             .then(|| {
-                                mouse_pos
-                                    .and_then(|(x, _)| file_hover_action_at(x, width as u16, true))
+                                mouse_pos.and_then(|(x, _)| {
+                                    file_hover_action_at(
+                                        x,
+                                        width as u16,
+                                        true,
+                                        marker_width as u16,
+                                    )
+                                })
                             })
                             .flatten();
                         if self.tree_view {
@@ -5840,30 +5936,45 @@ impl App {
                                 .copied()
                                 .unwrap_or(0);
                             tree_file_item(
-                                &self.repos[r].status.staged[i],
+                                entry,
                                 depth,
                                 width,
                                 theme,
-                                true,
                                 row_hovered,
                                 hovered_action,
+                                RowLook {
+                                    staged: true,
+                                    conflicts,
+                                },
                             )
                         } else {
                             file_item(
-                                &self.repos[r].status.staged[i],
+                                entry,
                                 width,
                                 theme,
-                                true,
                                 row_hovered,
                                 hovered_action,
+                                RowLook {
+                                    staged: true,
+                                    conflicts,
+                                },
                             )
                         }
                     }
                     Row::Unstaged(r, i) => {
+                        let entry = &self.repos[r].status.unstaged[i];
+                        let conflicts = self.conflicts_for(r, entry);
+                        let marker_width = status_marker(entry.letter, conflicts).0.chars().count();
                         let hovered_action = row_hovered
                             .then(|| {
-                                mouse_pos
-                                    .and_then(|(x, _)| file_hover_action_at(x, width as u16, false))
+                                mouse_pos.and_then(|(x, _)| {
+                                    file_hover_action_at(
+                                        x,
+                                        width as u16,
+                                        false,
+                                        marker_width as u16,
+                                    )
+                                })
                             })
                             .flatten();
                         if self.tree_view {
@@ -5873,22 +5984,28 @@ impl App {
                                 .copied()
                                 .unwrap_or(0);
                             tree_file_item(
-                                &self.repos[r].status.unstaged[i],
+                                entry,
                                 depth,
                                 width,
                                 theme,
-                                false,
                                 row_hovered,
                                 hovered_action,
+                                RowLook {
+                                    staged: false,
+                                    conflicts,
+                                },
                             )
                         } else {
                             file_item(
-                                &self.repos[r].status.unstaged[i],
+                                entry,
                                 width,
                                 theme,
-                                false,
                                 row_hovered,
                                 hovered_action,
+                                RowLook {
+                                    staged: false,
+                                    conflicts,
+                                },
                             )
                         }
                     }
@@ -6277,16 +6394,24 @@ fn file_hover_actions(staged: bool) -> &'static [FileHoverAction] {
     if staged { STAGED } else { UNSTAGED }
 }
 
-fn file_hover_action_start(width: u16, staged: bool) -> Option<u16> {
+/// First column of the row's hover actions. The right-aligned tail is
+/// `marker` + one space, and the marker can be two cells wide (`!3`).
+fn file_hover_action_start(width: u16, staged: bool, marker_width: u16) -> Option<u16> {
     const ACTION_WIDTH: u16 = 3;
     const MIN_FILE_CONTENT: u16 = 8;
     let actions_width = file_hover_actions(staged).len() as u16 * ACTION_WIDTH;
-    (width >= MIN_FILE_CONTENT + actions_width + 2).then_some(width - actions_width - 2)
+    (width >= MIN_FILE_CONTENT + actions_width + 1 + marker_width)
+        .then_some(width - actions_width - 1 - marker_width)
 }
 
-fn file_hover_action_at(x: u16, width: u16, staged: bool) -> Option<FileHoverAction> {
+fn file_hover_action_at(
+    x: u16,
+    width: u16,
+    staged: bool,
+    marker_width: u16,
+) -> Option<FileHoverAction> {
     const ACTION_WIDTH: u16 = 3;
-    let start = file_hover_action_start(width, staged)?;
+    let start = file_hover_action_start(width, staged, marker_width)?;
     if x < start {
         return None;
     }
@@ -6568,20 +6693,42 @@ fn drawer_line(kind: Drawer, text: &str) -> ListItem<'static> {
 }
 
 /// A file row: icon, name colored by status, dimmed parent directory, and a
-/// right-aligned status letter — VS Code Source Control's row anatomy.
+/// The right-aligned marker and its color: git's letter, except on a conflicted
+/// file — `!N` while N conflict blocks remain, `✓` once none do (the file stays
+/// unmerged until it is staged, so git's own status cannot say "resolved").
+fn status_marker(letter: char, conflicts: Option<usize>) -> (String, Color) {
+    match (letter, conflicts) {
+        ('!', Some(0)) => ('✓'.to_string(), status_color('✓')),
+        ('!', Some(blocks)) => (format!("!{blocks}"), status_color('!')),
+        _ => (letter.to_string(), status_color(letter)),
+    }
+}
+
+/// The two per-row facts a file row draws from beyond its entry: which list it
+/// came from (hover actions differ) and how many conflict blocks are left.
+#[derive(Clone, Copy)]
+struct RowLook {
+    staged: bool,
+    conflicts: Option<usize>,
+}
+
+/// A file row: icon, name colored by status, dimmed parent directory, and a
+/// right-aligned status marker — VS Code Source Control's row anatomy.
 fn file_item(
     entry: &FileEntry,
     width: usize,
     theme: IconTheme,
-    staged: bool,
     hovered: bool,
     hovered_action: Option<FileHoverAction>,
+    look: RowLook,
 ) -> ListItem<'static> {
+    let staged = look.staged;
     let (dir, name) = match entry.path.rsplit_once('/') {
         Some((dir, name)) => (Some(dir), name),
         None => (None, entry.path.as_str()),
     };
-    let color = status_color(entry.letter);
+    let (marker, color) = status_marker(entry.letter, look.conflicts);
+    let marker_width = marker.chars().count();
     let file_icon = icon(theme, name, false, false);
     let icon_style = ui_icon_style(file_icon.rgb);
     let mut spans = vec![
@@ -6589,9 +6736,10 @@ fn file_item(
         Span::styled(format!("{} ", file_icon.glyph), icon_style),
     ];
     let actions = file_hover_actions(staged);
-    let show_actions = hovered && file_hover_action_start(width as u16, staged).is_some();
+    let show_actions =
+        hovered && file_hover_action_start(width as u16, staged, marker_width as u16).is_some();
     let actions_width = usize::from(show_actions) * actions.len() * 3;
-    let tail = 2 + actions_width;
+    let tail = 1 + marker_width + actions_width;
     let prefix_width: usize = spans.iter().map(Span::width).sum();
     let content_width = width.saturating_sub(prefix_width + tail);
     let visible_name = truncate_to(name.to_string(), content_width);
@@ -6605,7 +6753,7 @@ fn file_item(
             spans.push(Span::styled(text, Style::default().dim()));
         }
     }
-    let letter = Span::styled(entry.letter.to_string(), Style::default().fg(color).bold());
+    let marker_span = Span::styled(marker, Style::default().fg(color).bold());
     let left_width: usize = spans.iter().map(Span::width).sum();
     let pad = width.saturating_sub(left_width + tail);
     spans.push(Span::raw(" ".repeat(pad)));
@@ -6617,7 +6765,7 @@ fn file_item(
             ));
         }
     }
-    spans.push(letter);
+    spans.push(marker_span);
     spans.push(Span::raw(" "));
     ListItem::new(Line::from(spans))
 }
@@ -6645,15 +6793,17 @@ fn tree_file_item(
     depth: usize,
     width: usize,
     theme: IconTheme,
-    staged: bool,
     hovered: bool,
     hovered_action: Option<FileHoverAction>,
+    look: RowLook,
 ) -> ListItem<'static> {
+    let staged = look.staged;
     let name = match entry.path.rsplit_once('/') {
         Some((_, name)) => name,
         None => entry.path.as_str(),
     };
-    let color = status_color(entry.letter);
+    let (marker, color) = status_marker(entry.letter, look.conflicts);
+    let marker_width = marker.chars().count();
     let file_icon = icon(theme, name, false, false);
     let icon_style = ui_icon_style(file_icon.rgb);
     let indent = "  ".repeat(depth);
@@ -6662,14 +6812,15 @@ fn tree_file_item(
         Span::styled(format!("{} ", file_icon.glyph), icon_style),
     ];
     let actions = file_hover_actions(staged);
-    let show_actions = hovered && file_hover_action_start(width as u16, staged).is_some();
+    let show_actions =
+        hovered && file_hover_action_start(width as u16, staged, marker_width as u16).is_some();
     let actions_width = usize::from(show_actions) * actions.len() * 3;
-    let tail = 2 + actions_width;
+    let tail = 1 + marker_width + actions_width;
     let prefix_width: usize = spans.iter().map(Span::width).sum();
     let content_width = width.saturating_sub(prefix_width + tail);
     let visible_name = truncate_to(name.to_string(), content_width);
     spans.push(Span::styled(visible_name, Style::default().fg(color)));
-    let letter = Span::styled(entry.letter.to_string(), Style::default().fg(color).bold());
+    let marker_span = Span::styled(marker, Style::default().fg(color).bold());
     let left_width: usize = spans.iter().map(Span::width).sum();
     let pad = width.saturating_sub(left_width + tail);
     spans.push(Span::raw(" ".repeat(pad)));
@@ -6681,7 +6832,7 @@ fn tree_file_item(
             ));
         }
     }
-    spans.push(letter);
+    spans.push(marker_span);
     spans.push(Span::raw(" "));
     ListItem::new(Line::from(spans))
 }
@@ -6917,31 +7068,48 @@ mod tests {
 
     #[test]
     fn file_hover_actions_match_their_rendered_columns() {
-        assert_eq!(file_hover_action_start(18, false), None);
-        assert_eq!(file_hover_action_start(30, false), Some(19));
+        assert_eq!(file_hover_action_start(18, false, 1), None);
+        assert_eq!(file_hover_action_start(30, false, 1), Some(19));
         assert_eq!(
-            file_hover_action_at(19, 30, false),
+            file_hover_action_at(19, 30, false, 1),
             Some(FileHoverAction::Open)
         );
         assert_eq!(
-            file_hover_action_at(23, 30, false),
+            file_hover_action_at(23, 30, false, 1),
             Some(FileHoverAction::Discard)
         );
         assert_eq!(
-            file_hover_action_at(27, 30, false),
+            file_hover_action_at(27, 30, false, 1),
             Some(FileHoverAction::Stage)
         );
-        assert_eq!(file_hover_action_at(28, 30, false), None);
+        assert_eq!(file_hover_action_at(28, 30, false, 1), None);
 
-        assert_eq!(file_hover_action_start(30, true), Some(22));
+        assert_eq!(file_hover_action_start(30, true, 1), Some(22));
         assert_eq!(
-            file_hover_action_at(22, 30, true),
+            file_hover_action_at(22, 30, true, 1),
             Some(FileHoverAction::Open)
         );
         assert_eq!(
-            file_hover_action_at(26, 30, true),
+            file_hover_action_at(26, 30, true, 1),
             Some(FileHoverAction::Unstage)
         );
+
+        // A conflicted row's marker is two cells wide (`!2`), so the buttons
+        // shift one column left with it.
+        assert_eq!(file_hover_action_start(30, false, 2), Some(18));
+        assert_eq!(
+            file_hover_action_at(18, 30, false, 2),
+            Some(FileHoverAction::Open)
+        );
+    }
+
+    #[test]
+    fn a_conflicted_row_shows_the_remaining_blocks_then_a_check() {
+        assert_eq!(status_marker('!', Some(3)).0, "!3");
+        assert_eq!(status_marker('!', Some(0)).0, "✓");
+        // An unreadable file keeps git's plain letter: never claim "resolved".
+        assert_eq!(status_marker('!', None).0, "!");
+        assert_eq!(status_marker('M', None).0, "M");
     }
 
     #[test]

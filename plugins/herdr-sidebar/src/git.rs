@@ -1116,6 +1116,32 @@ fn ignored_scan_fallback_path(root: &Path) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
+/// How many merge-conflict blocks a working-tree file still holds: one per
+/// line starting with `<<<<<<<` (git's diff3 marker too). Source Control uses
+/// it to show `!N` and to turn the letter into `✓` once the last block is gone
+/// — the file stays unmerged (`UU`) until it is staged, so git's own status
+/// cannot tell the two states apart.
+///
+/// At most [`CONFLICT_SCAN_BYTES`] are read, on the caller's worker/refresh
+/// path (never per frame). `None` means "cannot tell" (unreadable file, or one
+/// far too large to scan): the caller keeps showing plain `!` rather than
+/// claiming the conflict is resolved.
+pub fn count_conflict_blocks(path: &Path) -> Option<usize> {
+    const CONFLICT_SCAN_BYTES: u64 = 4 * 1024 * 1024;
+    let file = File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(CONFLICT_SCAN_BYTES).read_to_end(&mut bytes).ok()?;
+    Some(count_conflict_markers(&String::from_utf8_lossy(&bytes)))
+}
+
+/// The line scan behind [`count_conflict_blocks`], split out so it is testable
+/// without a filesystem.
+pub fn count_conflict_markers(text: &str) -> usize {
+    text.lines()
+        .filter(|line| line.starts_with("<<<<<<<"))
+        .count()
+}
+
 /// Parse `git status --porcelain -z --branch` output. Entries are NUL-separated
 /// `XY path`; a rename/copy is followed by a second NUL-separated field holding
 /// the source path. X is the index (staged) state, Y the worktree state.
@@ -1321,6 +1347,15 @@ fn child_dirs(dir: &Path, depth: usize) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflict_blocks_count_only_their_own_markers() {
+        let diff3 = "keep\n<<<<<<< HEAD\nours\n||||||| base\nbase\n=======\ntheirs\n>>>>>>> other\n<<<<<<<\n";
+        assert_eq!(count_conflict_markers(diff3), 2);
+        // The closing markers and diff3's base section must not count.
+        assert_eq!(count_conflict_markers("=======\n>>>>>>> other\n"), 0);
+        assert_eq!(count_conflict_markers("no conflicts here\n"), 0);
+    }
 
     /// Issue #87: repository discovery must not descend through directory
     /// symlinks (a link into a stalled cloud mount hung the sidebar).

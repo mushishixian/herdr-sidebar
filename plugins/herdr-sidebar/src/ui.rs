@@ -375,6 +375,9 @@ pub fn status_color(letter: char) -> Color {
         'R' | 'C' => colors.renamed,
         'D' => colors.deleted,
         '!' => colors.conflict,
+        // Not a git letter: a conflicted file with no blocks left (Source
+        // Control's "resolved, still unmerged" mark reads as success).
+        '✓' => colors.added,
         'I' => colors.ignored,
         _ => Color::Reset,
     }
