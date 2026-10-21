@@ -4,6 +4,7 @@
 //! so the repo-relative paths porcelain reports resolve even when the pane's
 //! cwd is a subdirectory.
 
+use std::cmp::Reverse;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -166,24 +167,29 @@ impl Git {
         }
     }
 
-    /// VS Code's Sync Changes: pull (rebase, autostash) then push. Returns a
-    /// short human summary; the caller runs this on a background thread.
+    /// VS Code's Sync Changes: pull then push. Returns a short human summary;
+    /// the caller runs this on a background thread.
+    ///
+    /// The pull passes NO strategy flag on purpose: whether a pull merges or
+    /// rebases is the user's `pull.rebase` / `merge.ff` configuration, and a
+    /// tool that quietly adds `--rebase` rewrites their history for them
+    /// (user-reported).
     pub fn sync(&self) -> Result<String, String> {
-        run_in(&self.root, &["pull", "--rebase", "--autostash"])?;
+        run_in(&self.root, PULL_ARGS)?;
         run_in(&self.root, &["push"])?;
         Ok("synced with remote".to_string())
     }
 
-    /// The commit button's "pull first": a plain `git pull` (merge, no rebase),
-    /// as asked for that button. Returns the footer summary on success. Fails
-    /// fast instead of waiting on a credential prompt — this runs on a worker,
-    /// so a hang would leave a stray process behind.
+    /// The commit button's "pull first". Returns the footer summary on success.
+    /// Fails fast instead of waiting on a credential prompt — this runs on a
+    /// worker, so a hang would leave a stray process behind.
+    ///
+    /// `PULL_ARGS` deliberately carries no merge/rebase strategy flag: the
+    /// user's git config decides, and git's own refusal (a `pull.rebase=true`
+    /// machine will not rebase onto a staged index) is reported verbatim instead
+    /// of being papered over with `--no-rebase`.
     pub fn pull(&self) -> Result<String, String> {
-        // `--no-rebase` is not cosmetic: a machine-global `pull.rebase=true`
-        // (this repo's own dotfiles set it) turns a bare `pull` into a REBASE
-        // that refuses to run while anything is staged — exactly the state the
-        // commit button is in when it offers this pull.
-        let out = git_command(&self.root, &["pull", "--no-rebase", "--no-edit"])
+        let out = git_command(&self.root, PULL_ARGS)
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(std::process::Stdio::null())
             .output()
@@ -550,15 +556,33 @@ impl Git {
     }
 
     pub fn branches(&self) -> Result<Vec<String>, String> {
-        lines(run_in(
+        let out = run_in(
             &self.root,
             &[
                 "branch",
                 "-a",
                 "--sort=-committerdate",
-                "--format=%(HEAD) %(refname:short)",
+                "--format=%(HEAD)%00%(refname:short)",
             ],
-        )?)
+        )?;
+        // Rebuild the `"* name"` / `"  name"` lines the drawer parses, in
+        // creation order (see `ref_created_at`).
+        let mut entries: Vec<(String, String)> = out
+            .lines()
+            .filter_map(|line| {
+                let (head, name) = line.split_once('\0')?;
+                Some((head.trim().to_string(), name.trim().to_string()))
+            })
+            .filter(|(_, name)| !name.is_empty())
+            .collect();
+        let created = ref_created_at(&self.root);
+        entries.sort_by_key(|(_, name)| Reverse(created.get(name).copied().unwrap_or(i64::MIN)));
+        Ok(entries
+            .into_iter()
+            .map(|(head, name)| {
+                format!("{} {name}", if head == "*" { "*" } else { " " })
+            })
+            .collect())
     }
 
     /// Branches suitable for an interactive checkout picker. Symbolic remote
@@ -575,7 +599,17 @@ impl Git {
                 "refs/remotes",
             ],
         )?;
-        Ok(parse_branch_choices(&out))
+        // Newest-CREATED first: git's committerdate sort puts a branch made from
+        // an old commit near the bottom, which is not the order anybody picks
+        // from (user-requested). `parse_branch_choices` then rotates the current
+        // branch to the front and keeps locals before remotes, stably.
+        let created = ref_created_at(&self.root);
+        let mut rows: Vec<&str> = out.lines().collect();
+        rows.sort_by_key(|line| {
+            let name = line.split('\0').nth(1).unwrap_or("").trim();
+            Reverse(created.get(name).copied().unwrap_or(i64::MIN))
+        });
+        Ok(parse_branch_choices(&rows.join("\n")))
     }
 
     /// Delete a branch without forcing. `NotMerged` is reported separately so
@@ -1087,6 +1121,52 @@ fn terminate_child(child: &mut Child, job: Option<&ChildJob>) -> bool {
         false
     }
 }
+
+/// Creation time (unix seconds) of every ref git keeps a reflog for.
+///
+/// Git records no branch creation date, so the OLDEST reflog entry is the first
+/// time it wrote anything for that ref — that is the closest thing to "when this
+/// branch was created", and it is what orders the branch lists. Refs without a
+/// reflog (`core.logAllRefUpdates=false`, a bare-ish checkout) are simply absent
+/// and sort last. One process, no per-branch calls: `--all` walks every reflog
+/// and `%gd` carries the entry's date as `ref@{unix}`.
+fn ref_created_at(root: &Path) -> std::collections::HashMap<String, i64> {
+    let mut created = std::collections::HashMap::new();
+    let Ok(out) = run_in(
+        root,
+        &["reflog", "show", "--all", "--date=unix", "--format=%gd"],
+    ) else {
+        return created;
+    };
+    for line in out.lines() {
+        // `main@{1700000000}`, `refs/heads/x@{1700}`, `HEAD@{1700}`, …
+        let Some((name, stamp)) = line.trim().rsplit_once("@{") else {
+            continue;
+        };
+        let name = name.trim();
+        let name = name
+            .strip_prefix("refs/heads/")
+            .or_else(|| name.strip_prefix("refs/remotes/"))
+            .unwrap_or(name);
+        let stamp = stamp.trim_end_matches('}');
+        let Ok(stamp) = stamp.parse::<i64>() else {
+            continue;
+        };
+        if name.is_empty() || name == "HEAD" {
+            continue;
+        }
+        // Entries arrive newest first per ref, so the smallest stamp wins.
+        created
+            .entry(name.to_string())
+            .and_modify(|known: &mut i64| *known = (*known).min(stamp))
+            .or_insert(stamp);
+    }
+    created
+}
+
+/// Every `git pull` this crate runs. `--no-edit` only keeps a merge from
+/// opening an editor in a TUI with no stdin; it picks no strategy.
+const PULL_ARGS: &[&str] = &["pull", "--no-edit"];
 
 fn git_command(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
@@ -1721,11 +1801,11 @@ mod tests {
         );
         git(&one, &["push", "-q"]);
 
-        // The exact runtime shape: a machine-global `pull.rebase=true` (this
-        // repo's own dotfiles set it) plus something staged. A bare `git pull`
-        // refuses that — "cannot pull with rebase: Your index contains uncommitted
-        // changes" — which is what `--no-rebase` is there for.
-        git(&two, &["config", "pull.rebase", "true"]);
+        // We no longer pick a strategy, so the pull behaves exactly as this
+        // clone's config says: pin merge here instead of inheriting whatever the
+        // machine has globally (a global `pull.rebase=true` refuses a pull with a
+        // staged index, which is the user's choice to make, not ours).
+        git(&two, &["config", "pull.rebase", "false"]);
         std::fs::write(two.join("c.txt"), "c\n").unwrap();
         git(&two, &["add", "c.txt"]);
 
@@ -1737,6 +1817,71 @@ mod tests {
         // Second pull: nothing new.
         assert_eq!(clone.pull(), Ok("Already up to date.".to_string()));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn branch_choices_and_the_drawer_are_newest_created_first() {
+        let git = repo_with_head("branch-creation-order");
+        // Distinct reflog stamps without sleeping: `update-ref --create-reflog`
+        // dates the entry from GIT_COMMITTER_DATE. Their COMMIT dates are all
+        // HEAD's, and their names sort the wrong way round, so a list ordered by
+        // committerdate or alphabetically cannot pass this.
+        for (name, stamp) in [
+            ("alpha", "1000000000"),
+            ("beta", "1000100000"),
+            ("gamma", "1000200000"),
+        ] {
+            let out = git_command(
+                &git.root,
+                &[
+                    "update-ref",
+                    "--create-reflog",
+                    "-m",
+                    "created",
+                    &format!("refs/heads/{name}"),
+                    "HEAD",
+                ],
+            )
+            .env("GIT_COMMITTER_DATE", format!("{stamp} +0000"))
+            .output()
+            .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+
+        let choices: Vec<String> = git
+            .branch_choices()
+            .unwrap()
+            .into_iter()
+            .filter(|branch| !branch.current)
+            .map(|branch| branch.name)
+            .collect();
+        assert_eq!(choices, vec!["gamma", "beta", "alpha"]);
+
+        // The drawer reads the same thing, in the same order.
+        let drawer = git.branches().unwrap();
+        let position = |name: &str| {
+            drawer
+                .iter()
+                .position(|line| line.trim_start_matches(['*', ' ']).trim() == name)
+                .unwrap_or(usize::MAX)
+        };
+        assert!(
+            position("gamma") < position("beta") && position("beta") < position("alpha"),
+            "drawer order: {drawer:?}"
+        );
+    }
+
+    #[test]
+    fn a_pull_never_dictates_a_merge_or_rebase_strategy() {
+        // The user's git config decides how a pull lands. A tool that quietly
+        // adds `--rebase` (or `--no-rebase`) rewrites history for them.
+        for arg in PULL_ARGS {
+            assert!(
+                !arg.contains("rebase") && !arg.contains("ff") && *arg != "--merge",
+                "PULL_ARGS must not pick a strategy: {PULL_ARGS:?}"
+            );
+        }
+        assert!(PULL_ARGS.contains(&"pull"));
     }
 
     #[test]

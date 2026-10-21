@@ -1201,8 +1201,8 @@ HACKING.md — budget time for that before promising a patched build.
   y/N prompt. Hovered file rows show a `+`/`−` glyph (click zone = last 5 columns) and the
   section headers a section-wide one (last 6); a dim "ctrl+rclick for menus" hint sits on
   the « footer line whenever the footer is otherwise empty.
-- **Sync Changes** (`S` or the ⇅ button, shown only when ahead/behind ≠ 0): `pull --rebase
-  --autostash` then `push`, on a background thread polled from tick(). Ahead/behind parse
+- **Sync Changes** (`S` or the ⇅ button, shown only when ahead/behind ≠ 0): `pull` then `push`,
+  on a background thread polled from tick(). Ahead/behind parse
   from the porcelain `## branch...upstream [ahead N, behind M]` header.
 - **The ✓ Commit button offers a pull when the branch is behind.** Behind ≠ 0 AND something
   staged (so the button reads `✓ Commit · N↓` rather than Sync Changes) makes a click / ⏎ open
@@ -1210,9 +1210,14 @@ HACKING.md — budget time for that before promising a patched build.
   first?"): `y` runs a plain `git pull` on a worker and then commits, anything else commits
   immediately. `commit_with_pull_offer` is the only entry point that asks — the AI-commit path
   and `Cmd::CommitNow` call `commit_repo` directly — and a failed pull never commits (the branch
-  is not where the user thinks it is). `Git::pull` MUST pass `--no-rebase`: this repo's own
-  `dotfiles/config/git/dotfiles.gitconfig` sets `pull.rebase=true` machine-wide, and a rebase
-  pull REFUSES to run while anything is staged — exactly this state (found live). The behind
+  is not where the user thinks it is). **Every pull here goes through `PULL_ARGS`
+  (`["pull", "--no-edit"]`) and picks NO strategy** — user-reported: "don't quietly add `rebase`".
+  Whether it merges or rebases is the user's `pull.rebase`/`merge.ff` config, and the
+  consequence is reported verbatim instead of papered over: this machine's
+  `dotfiles/config/git/dotfiles.gitconfig` sets `pull.rebase=true`, so "Pull first?" on a staged
+  index comes back with git's own `cannot pull with rebase: Your index contains uncommitted
+  changes.` (verified by the test that used to need `--no-rebase`). `--no-edit` stays: it only
+  keeps a merge from opening an editor in a TUI with no stdin. The behind
   count comes from git's remote-tracking refs, so it is only as fresh as the last `git fetch`
   (Sync, or a drawer's fetch); the button does not fetch on its own.
 - Branch labels are actions, not decoration: clicking the Source Control panel header, a
@@ -1344,11 +1349,20 @@ and asks separately before `-D` (#78). Keep `--` before branch names in both pat
   decoration refresh is on its worker (`is_refreshing_decorations`). Measured live: SCM header
   ~65 ms, Explorer footer ~0.5 s (both were 2-3 s). Never put a `git` process on that fast
   path: it runs several times a second per repo.
-- **Branch lists are locals-first.** `parse_branch_choices` rotates the current branch to the
-  front and then stably partitions locals before remotes, so a popup's default selection (row 0)
-  is the current branch or the most recently used LOCAL one; remotes stay at the bottom, still in
-  recency order. Git's own `--sort=-committerdate` interleaves the two, which is why this is done
-  in the parser and not in the popup.
+- **Branch lists are locals-first and newest-CREATED first.** `parse_branch_choices` rotates the
+  current branch to the front and then stably partitions locals before remotes, so a popup's
+  default selection (row 0) is the current branch or the newest LOCAL one; remotes stay at the
+  bottom, in the same creation order. Git's own `--sort=-committerdate` interleaves the two, which
+  is why this is done in the parser and not in the popup.
+  Ordering *within* each group comes from `ref_created_at`: **git stores no branch creation date**,
+  so it reads every reflog once (`git reflog show --all --date=unix --format=%gd`) and takes each
+  ref's OLDEST entry, i.e. the first time git wrote anything for it. Refs without a reflog are
+  absent and sort last; equal stamps keep the incoming `--sort=-committerdate` order (stable sort).
+  Newest-created first is what people actually pick from — a branch created from an old commit used
+  to sit at the bottom (user-requested). `Git::branches()` (the drawer) and `Git::branch_choices()`
+  (the popups) both apply it, so the two lists agree; the test creates three branches with
+  `update-ref --create-reflog` under distinct `GIT_COMMITTER_DATE`s, so it needs no sleeping and a
+  committer-date or alphabetical order cannot pass.
 Preview Space/`b` page down/up (#73); Shift+Space is indistinguishable in legacy
 terminal keyboard mode and must not be used as the sole page-up gesture.
 

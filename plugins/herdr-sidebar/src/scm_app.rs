@@ -5062,7 +5062,8 @@ impl App {
         self.pulling = Some((index, rx));
         self.flash = Some(("Pulling…".to_string(), false));
     }
-    /// VS Code's Sync Changes (pull --rebase, then push) on a background
+    /// VS Code's Sync Changes (pull, then push — no strategy flag, so the
+    /// user's git config decides) on a background
     /// thread; tick() collects the outcome.
     fn sync_changes(&mut self) {
         self.sync_repo(self.active);
