@@ -57,6 +57,7 @@ image = { version = "0.25", default-features = false, features = [
 # Reads herdr's own config.toml exactly as herdr does (the preview mirrors
 # `[ui] copy_on_select`); a hand-rolled reader missed valid TOML spellings.
 toml = { version = "1.1.7", default-features = false, features = ["parse", "serde", "std"] }
+notify = "8"
 
 # Raw euid() for scoping private runtime directories (rundir.rs) to the
 # owning user; already present transitively, so this adds no new download.

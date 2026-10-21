@@ -52,6 +52,8 @@ export DOTFILES_IDE_BIN="$bin_dir"
 # Outside herdr there is no pane to host previews in: plain attach, as before.
 if [ -z "$host_pane" ]; then
   push_kitty
+  # fresh-pause may have paused this daemon while its workspace was unfocused.
+  fresh_resume "$name"
   exec fresh -a "$name"
 fi
 
@@ -124,8 +126,12 @@ run_viewer() { # file
 # the client. Exits when this script does (its pid is checked each tick).
 watch_requests() {
   local shell=$$
+  # A private fd that never gets data: `read -t` on it waits 0.2 s without
+  # forking, where an external sleep forked five times a second, forever.
+  local tick_fd
+  exec {tick_fd}<> <(:)
   while kill -0 "$shell" 2>/dev/null; do
-    sleep 0.2
+    read -r -t 0.2 -u "$tick_fd" _ || true
     [ -f "$req" ] || continue
     if pgrep -P "$shell" -x fresh >/dev/null 2>&1; then
       mv -f "$req" "$run" 2>/dev/null || continue
@@ -161,6 +167,8 @@ while :; do
     continue
   fi
   push_kitty
+  # fresh-pause may have paused this daemon while its workspace was unfocused.
+  fresh_resume "$name"
   fresh -a "$name" || true
   # Suspended for a preview: loop around and run it. Anything else (quit,
   # detach, daemon killed) ends the host, back to the shell as before.

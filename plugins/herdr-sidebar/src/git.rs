@@ -748,7 +748,7 @@ impl Git {
 
     /// The repository's git directory. In a worktree or a submodule `.git` is a
     /// FILE holding `gitdir: <path>`, not a directory.
-    fn git_dir(&self) -> Option<PathBuf> {
+    pub fn git_dir(&self) -> Option<PathBuf> {
         let dot_git = self.root.join(".git");
         if dot_git.is_dir() {
             return Some(dot_git);

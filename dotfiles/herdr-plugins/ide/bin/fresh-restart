@@ -139,6 +139,8 @@ restart_one() {
   saved=$(saved_entry "$daemon")
 
   if daemon_alive "$daemon"; then
+    # fresh-pause may have paused this daemon; a paused one would never answer the kill.
+    fresh_resume "$daemon"
     if ! fresh --cmd daemon kill "$daemon" >/dev/null 2>&1; then
       warn "$project: fresh --cmd daemon kill $daemon failed; pane $pane left running"
       return 1

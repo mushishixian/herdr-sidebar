@@ -469,10 +469,12 @@ editor.registerCommand(
 // else $HOME/.local/state. When that file is the active buffer, the request
 // is consumed and Fresh's built-in Live Diff runs vs HEAD for it.
 //
-// Two triggers. active_buffer_changed and after_file_open catch a file that
-// fresh-open is opening now. A file that is already the active buffer fires
-// neither, so a short poll also checks while the request file exists. The poll
-// costs one stat per tick and is skipped when no request exists.
+// Requests are checked only on active_buffer_changed and after_file_open. There
+// is deliberately NO timer: a 400 ms setInterval made every idle editor run JS
+// and re-render about 2.5 times a second. Consequence: a request for a file that
+// is ALREADY the active buffer is not picked up until the next buffer switch or
+// open. That is acceptable, because fresh-open opens the file (which fires the
+// events) and the sidebar no longer sends these requests.
 //
 // Consuming writes the file empty (replaceFile is the only write that can
 // overwrite; the API has no delete). Empty, malformed, expired or unwritable
@@ -480,8 +482,6 @@ editor.registerCommand(
 
 /** A request older than this is ignored (fresh-open writes it just before handing off). */
 const LIVE_DIFF_REQUEST_MAX_AGE_S = 15;
-/** Poll period while a request may be pending. */
-const LIVE_DIFF_POLL_MS = 400;
 
 /**
  * This daemon's request file. fresh-ide exports FRESH_IDE_DAEMON (the daemon
@@ -536,10 +536,8 @@ function liveDiffCheck(): void {
   }
 }
 
-registerHandler("selection_live_diff_check", liveDiffCheck);
 registerHandler("selection_live_diff_opened", liveDiffCheck);
 editor.on("after_file_open", "selection_live_diff_opened");
-editor.setInterval(LIVE_DIFF_POLL_MS, "selection_live_diff_check");
 
 /* ── Inline merge conflicts ─────────────────────────────────────────────── */
 //

@@ -61,6 +61,8 @@ fi
 target=$file${line:+:$line}${col:+:$col}
 
 hand_off() { # daemon
+  # fresh-pause may have paused this daemon; a paused one would never answer.
+  fresh_resume "$1"
   timeout 10 fresh --cmd daemon open-file "$1" "$target" </dev/null >/dev/null 2>&1
 }
 

@@ -55,3 +55,14 @@ command = ["./bin/ide-save-sizes"]
 [[events]]
 on = "tab.focused"
 command = ["./bin/ide-save-sizes"]
+
+# Pause the Fresh editors of the workspaces you are not in: a paused editor uses
+# no CPU, and focusing its workspace again wakes it. Focus events arrive in
+# bursts, so the hook reads the CURRENT focus and serialises on a lock.
+[[events]]
+on = "workspace.focused"
+command = ["./bin/fresh-pause"]
+
+[[events]]
+on = "tab.focused"
+command = ["./bin/fresh-pause"]

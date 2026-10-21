@@ -537,8 +537,8 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   alphabetical, capped at 48 chars; a workspace with no agent pane is cleared with an
   explicit `null`. EVERY workspace in `pane.list` is re-reported each beat instead of
   diffing, which is what keeps the TTL alive, so a killed sidebar's value can never
-  outlive 20 s; a second reporter is unnecessary, because duplicate reports are identical
-  and `report_metadata` merges.
+  outlive 20 s. Only ONE sidebar per session reports (`session_reporter`, see *Idle CPU* under
+  Terminal/TUI gotchas); every sidebar used to send the same reports.
 - **A name therefore has only two sources: herdr's own agent detection, or the pane's
   `display_agent` metadata.** herdr detects only the agents it ships an integration for
   (`herdr integration status`: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode,
@@ -650,9 +650,10 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   greater, and a future-dated seq (I tried 9e15 ≈ year 2286) blocks even a RESTARTED pi from
   reporting; and **the state must be re-asserted every beat**, because from our first report
   onward the hook's own reports are the dropped ones — the sidebar OWNS that pane's agent
-  state until the pi process restarts. Every sidebar reports EVERY pi pane in `pane.list`
-  (session-wide, not just its own workspace; duplicate reports from several sidebars are
-  identical). Consequences to keep in mind: pi panes keep the old behaviour only when no
+  state until the pi process restarts. The ONE elected session reporter (`session_reporter`)
+  reports EVERY pi pane in `pane.list` (session-wide, not just its own workspace); when it dies
+  the kernel drops its lock and the next sidebar's beat takes over, so `seq` from a new process
+  still increases (`next_seq` is clock-based). Consequences to keep in mind: pi panes keep the old behaviour only when no
   sidebar runs anywhere in the session, killing every sidebar freezes those panes' state
   until pi restarts, and pi's `herdr:blocked` permission state is masked while we report (inert on
   this machine — nothing emits that event).
@@ -766,6 +767,56 @@ HACKING.md — budget time for that before promising a patched build.
   resets the baseline and immediately adopts the deterministic neighbour on the next beat.
 - Source Control pauses cwd-follow while any repository has a non-empty commit-message draft;
   rebuilding the app for another cwd would otherwise destroy that in-memory draft.
+
+### Idle CPU (measured live 2026-10-21, herdr 0.9.5, 4 IDE workspaces)
+
+- **The sidebars cost almost nothing themselves but drive herdr's CPU.** Freezing all four
+  idle sidebars (`kill -STOP`, then `-CONT`, under the 20 s heartbeat limit) cut the herdr
+  server from ~30 to ~12 ticks per 8 s. Server CPU per request: `pane.list` ≈1.2 ms (it
+  serializes every pane), `pane.get` ≈0.5 ms, any `*.report_metadata` ≈0.8–0.9 ms. So:
+  - **Never `pane.list` just to read ONE pane** — `ipc::pane_focused` uses `pane.get` (its
+    `focused` flag matched `pane.list` for all 16 panes, live) and falls back to `pane.list`
+    only when `pane.get` gives no answer. The SCM view probes focus every 400 ms.
+  - **Session-wide reporters run in ONE sidebar** (`src/session_reporter.rs`): `agent_tokens`
+    and `pi_state` report the whole session, and every sidebar used to repeat the identical
+    `pane.list` + per-workspace/per-pi-pane reports. The election is a `try_lock` on
+    `<rundir>/reporters/session-reporter-<FNV-1a of HERDR_SOCKET_PATH>.lock`, held in a
+    process-wide static. It cannot be a struct field: flock is per open file, so a second
+    handle in the same process would lose, and the unified sidebar rebuilds its App on every
+    view switch. A dead leader's lock is freed by the kernel, and the next sidebar's beat
+    takes over. `grep ":$(stat -c %i <lock>) " /proc/locks` shows the holder.
+  - Result: the sidebars' share of herdr CPU went from ~18 to ~7 ticks per 8 s.
+- **Fresh's idle CPU was our own plugin.** `selection_share.ts` ran a 400 ms `setInterval`
+  (live-diff request poll), and every plugin action makes Fresh evaluate JS AND re-render,
+  focused or not: ~2.5 renders/s and ~4 KB/s of log per editor. The log shows it (`grep -c
+  "start_action: BEGIN" ~/.local/state/fresh/logs/fresh-server-<pid>.log`). A bare scratch
+  Fresh went from 20 to 9 ticks per 20 s without it (`--no-plugins`: 4). The rest is Fresh's
+  bundled `liveSessionsTick` (5 s, a boolean check while the dock is closed). **Never add a
+  `setInterval` to a Fresh plugin; hook events.** `git_statusbar` was disabled for the same
+  reason (a `git` spawn per status-bar refresh). A plugin change applies only to a restarted
+  daemon (`fresh-restart`).
+- **Editors in unfocused workspaces are SIGSTOPped** (`dotfiles/herdr-plugins/ide/bin/fresh-pause`,
+  details in `docs/herdr-ide.md` "Editors of other workspaces are paused"). Facts it rests on, all
+  verified: the Fresh server is its own session AND process-group leader and every language
+  server (plus tsserver's children) is in that group, so `kill -STOP -- -<pid>` freezes the
+  whole editor; a stopped `fresh -a` client's non-interactive bash parent just keeps waiting,
+  but stopping `fresh-ide`'s group would make the pane's interactive zsh take the terminal
+  back; `fresh --cmd daemon list` only checks pids (no hang), while attach / `open-file` /
+  `daemon kill` block on a stopped server, hence `fresh_resume` before each. Re-focusing the
+  ALREADY focused tab (`herdr tab focus <current>`) emits NO `tab.focused` event, so it cannot
+  be used to fire the hook in a test; run `bin/fresh-pause` directly. A linked plugin's new
+  `[[events]]` were live immediately (no re-link or reload). Testing in a scratch Fresh: keep
+  `XDG_RUNTIME_DIR` short (a long scratch path overflows `sun_path` and the daemon dies at
+  startup), and LSPs only start in a folder trusted via
+  `$XDG_DATA_HOME/fresh/workspaces/<path with / → _>/trust.json` = `{"level": "trusted"}`.
+- `fresh-ide`'s preview-host watcher used to fork `sleep 0.2` five times a second per editor
+  pane. It waits with `read -t 0.2` on a private never-written fd now (`exec {fd}<> <(:)`
+  once), which forks nothing.
+- Measuring: per-process CPU = delta of `/proc/<pid>/stat` fields 14+15 over a window (`top`
+  snapshots are too noisy at these levels); bytes a pane program writes = delta of
+  `wchar` in `/proc/<pid>/io`. A scratch Fresh for A/B runs needs a pty: `script -qfc
+  "stty rows 40 cols 120; exec fresh …" /dev/null < <(sleep 40)` with `XDG_CONFIG_HOME` /
+  `XDG_STATE_HOME` pointed at a scratch dir holding the plugin variant.
 
 ### Pane liveness (heartbeat tokens)
 
@@ -1233,12 +1284,27 @@ HACKING.md — budget time for that before promising a patched build.
   Local choices use a normal checkout; a remote choice creates its local tracking branch.
   Symbolic `<remote>/HEAD` aliases are omitted. Dirty-worktree checkout failures surface intact
   and never force, stash, discard, or otherwise mutate work to make the switch succeed.
-- **Only the FOCUSED pane reads `git status`** — immediately when it GAINS focus, then every
+- **File and git changes arrive as OS events, focused or not** (`src/fswatch.rs`, notify 8). Each
+  Explorer/SCM app owns one `FsWatch`: the tree's root + expanded dirs non-recursively, each repo
+  work tree (Linux: one non-recursive inotify watch per NON-ignored dir from an `ignore` walk,
+  capped at 4000, new dirs adopted; elsewhere recursive with `.git`/`target`/`node_modules`
+  dropped), and the real git dir + `refs/`. Three flags, debounced 150 ms (max 1 s): `tree`
+  (the path's directory is SHOWN — only then the Explorer re-reads listings), `git` (any change:
+  decorations / `git status`), `refs` (inside a git dir, minus `*.lock`/`objects`/`logs`: SCM
+  drawers). Measured live: an unfocused Source Control view listed a new file 326 ms after it
+  was written and dropped it 436 ms after deletion; a scratch Explorer showed a new file in
+  673 ms (150 ms debounce + its 500 ms idle loop); 44–706 watches per sidebar; watcher threads
+  0 ticks while idle. This only works because every background git read uses
+  `GIT_OPTIONAL_LOCKS=0`: a status that refreshed `.git/index` would fire our own watcher in a
+  loop. The focus-gated 2 s polls below stay as the fallback for filesystems with no events
+  (WSL `/mnt/c`, network shares). An event-driven tree rebuild does NOT persist `tree.json`, so
+  a background sidebar cannot overwrite the focused one's selection.
+- **Only the FOCUSED pane POLLS `git status`** — immediately when it GAINS focus, then every
   2 s (`scm_app::FOCUSED_REFRESH`). An unfocused pane reads NOTHING (one session holds a sidebar
   per IDE tab; polling them all multiplied git processes). Two details make that feel instant:
   the event loop runs a uniform, git-free probe every `IDLE_TICK` (400 ms) — herdr delivers no
   per-pane focus events (verified: nothing arrives on a pane's stdin when `pane.focus` moves) so
-  focus is polled through `pane.list` — and `tick` refreshes at once on a false→true focus
+  focus is polled through `pane.get` (`ipc::pane_focused`, one pane, NOT `pane.list`) — and `tick` refreshes at once on a false→true focus
   transition instead of waiting out the 2 s. Measured: `Changes` appears ~0.4 s after focusing a
   pane that had gone stale, and ≤2 s while it stays focused. `refresh()` also skips
   `reload_expanded_drawers` + `rebuild` unless a repo's `Status` actually changed (one `git
@@ -2171,6 +2237,17 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   the sidebar reported "opened in custom editor" and then did nothing at all. The variables are
   `$lbl`/`$tab`/`$ws` now; see `dotfiles/AGENTS.md` for the full failure chain and the other
   reserved names to avoid.
+- **Two keymap-bound plugins are NOT in this repo and NOT gated by `verify.sh`**: `ctrl+alt+g`
+  (`herdr-sidebar`'s keymap → `tareqmlx.lazygit-viewer.branch-popup`) and `ctrl+alt+v`
+  (`herdr-file-viewer.open-file-viewer`). Both are community plugins installed per machine with
+  `herdr plugin install tareqmlx/herdr-lazygit-viewer --yes` / `herdr plugin install
+  smarzban/herdr-file-viewer --yes`. **The GitHub repo name ≠ the plugin id**: installing
+  `tareqmlx/lazygit-viewer` answers 404 — the repo carries the `herdr-` prefix while the bound
+  action keeps `tareqmlx.lazygit-viewer`. They are listed in `docs/herdr-ide.md`'s Install section
+  on purpose rather than installed by `install.sh` (a network clone + Rust build per machine), so
+  `verify.sh` only gates `herdr-sidebar` and `dotfiles-ide`; a dead key reads as a silent no-op
+  and is diagnosed with `herdr plugin action list | grep -E 'lazygit-viewer|herdr-file-viewer'`.
+  `lazygit` itself is the apt package and must be on `PATH` for `ctrl+alt+g`/`alt+w`/`ctrl+alt+h`.
 - **A herdr server restart turns the whole IDE into labeled corpses.** herdr resumes panes as plain
   shells: labels (`Fresh`/`Terminal`/`Agent`) survive, metadata tokens do NOT, and the Fresh
   clients/daemons are gone (observed live: five workspaces, every `Fresh` pane a bare prompt,

@@ -73,6 +73,30 @@ docs/install-herdr-ide.sh            # --help for options (--no-lsp, --no-packag
 then ends with `dotfiles/verify.sh`, which fails the run if the machine does not match the repo
 afterwards. See *Syncing a machine with the repo* below.
 
+**Two community plugins the keymap binds are NOT in this repo (install per machine).** The
+keymap points at two plugins the installer cannot manage, so neither `install.sh` nor
+`verify.sh` touches them — a fresh machine has to install them once, or those two keys are
+silent no-ops:
+
+```bash
+herdr plugin install tareqmlx/herdr-lazygit-viewer --yes   # ctrl+alt+g  lazygit branch panel (popup)
+herdr plugin install smarzban/herdr-file-viewer   --yes   # ctrl+alt+v  git-aware file viewer beside the pane
+```
+
+- The **GitHub repo name is not the plugin id**: the bound action is
+  `tareqmlx.lazygit-viewer.branch-popup`, but the repo is `tareqmlx/herdr-lazygit-viewer`
+  (`herdr plugin install tareqmlx/lazygit-viewer` answers 404). `herdr-file-viewer` happens to
+  match on both sides.
+- Installation clones into `~/.config/herdr/plugins/github-installations/…` and BUILDS the plugin
+  (Rust, a few minutes the first time; the launcher downloads a prebuilt asset when one exists
+  for the target). Update with `herdr plugin update`.
+- They are machine-level, so `verify.sh` deliberately does not fail on them: it gates only what
+  the repo manages (`herdr-sidebar`, `dotfiles-ide`). When one of those keys seems dead,
+  `herdr plugin action list | grep -E 'lazygit-viewer|herdr-file-viewer'` tells you whether the
+  action exists at all, and `herdr plugin list` whether the plugin is enabled.
+- `lazygit` itself is the apt package (`lazygit`, in the install list) and must be on `PATH` for
+  `ctrl+alt+g`, `alt+w` and `ctrl+alt+h`.
+
 **Python tools come from `uv`, pinned.** `dotfiles/packages.lock` is the only place a Python
 version lives; `docs/install-herdr-ide.sh` (or `dotfiles/install.sh`) runs `uv tool install` for each
 entry, so nothing touches the system Python and no virtualenv exists. `uv-with` lines add a
@@ -98,6 +122,18 @@ machines behave identically. Anything that cannot be identical everywhere — SD
 aliases, a different prompt — goes in `~/.zshrc.local`, which the managed rc sources (above the
 highlight plugins, which must stay last) and the installer never touches. `--no-zshrc` skips the
 shell step entirely; `~/.gitconfig` is the one exception, only ever getting an `include.path` added.
+
+**The prompt follows branch switches made elsewhere.** A prompt already on screen used to keep the
+old branch after a switch from the sidebar, a popup, lazygit or an agent, until you pressed Enter.
+The managed `zshrc` resolves the repository's `HEAD` file on `cd` (linked worktrees included) and a
+`sched` tick compares it once a second while the shell idles at the prompt; on a change
+`zle reset-prompt` redraws starship's prompt and keeps a half-typed line. The tick only reads a file
+and starts no process. Shells started before the managed rc was linked need `exec zsh` once.
+
+**The sidebar updates as files change.** The Explorer tree, its git markers and the Source Control
+lists follow file-system events within about half a second, also while the sidebar is not focused
+(details in `AGENTS.md`). Filesystems that report no events (WSL `/mnt/c`, network shares) still get
+the old 2 s refresh while the sidebar is focused.
 
 Language servers are installed by default (`dotfiles/install-lsp.sh`, see
 *Language servers (LSP)*). `--no-lsp` skips them; `--no-packages` also skips their apt step.
@@ -520,6 +556,33 @@ Two things that surprise people:
 - `bin/herdr-rpc METHOD JSON` is a tiny Python client for socket methods the
   CLI does not wrap (`pane.focus` by id, `pane.send_input`).
 
+### Editors of other workspaces are paused
+
+- `bin/fresh-pause` runs on `workspace.focused` / `tab.focused`. Every Fresh daemon
+  whose `Fresh` panes are all in OTHER workspaces is SIGSTOPped: its client
+  (`fresh -a NAME`) and the server's whole process group, which holds its language
+  servers too, so a paused editor uses exactly 0% CPU. Focusing its workspace again
+  wakes it (≈0.25 s, the hook's own run time). Verified live: four editors, the three
+  in other workspaces at 0 ticks, rust-analyzer/tsserver included.
+- Nothing is recorded. Each run decides from the current focus, and a stopped
+  `ide-*` daemon with no `Fresh` pane anywhere (pane closed, herdr restarted) is
+  woken, so a daemon can never stay paused by mistake. A run that finds no focused
+  pane changes nothing.
+- `fresh-ide`, `fresh-open` and `fresh-restart` wake a daemon themselves before they
+  talk to it (`fresh_resume` in `lib.sh`): attach, `open-file` and `daemon kill`
+  would otherwise wait on a stopped server. `fresh --cmd daemon list` does not hang
+  on one.
+- Verified on a scratch daemon: after a 60–90 s pause the client, the language
+  servers (same pids, still answering) and typing all work, and a file changed on
+  disk while paused is auto-reverted the moment it wakes. A language-server reply
+  to a request Fresh had given up on is logged once as `unknown request id`, which
+  is harmless.
+- Only the client is stopped inside the pane, never `fresh-ide` itself: the pane's
+  interactive zsh would see a stopped job and take the terminal back.
+- Off switch: `touch ~/.local/state/herdr/plugins/dotfiles-ide/fresh-pause-off`
+  wakes every editor at the next focus change and pauses nothing; delete the file to
+  turn pausing back on. `bin/fresh-pause --dry-run` prints what it would do.
+
 ### Previews cover the Fresh pane
 
 With the IDE layout, a sidebar preview opens **inside the Fresh pane** instead of
@@ -710,9 +773,11 @@ built-in command, so the command itself is not repeated there).
   fallback is `~/code/herdr-sidebar/dotfiles/herdr-plugins/ide/bin`.
 - **`recent_tab`** (`ctrl+tab`, `when: normal`): switches to the previously used open file tab; again goes
   back. It never opens files.
-- **Live diff on request**: polls `$XDG_STATE_HOME/fresh-ide/live-diff-request-<FRESH_IDE_DAEMON>` every
-  400 ms. A request at most 15 s old runs `live_diff_vs_head` on the file it names. `fresh-open` writes
-  these (sidebar clicks on git changes).
+- **Live diff on request**: checks `$XDG_STATE_HOME/fresh-ide/live-diff-request-<FRESH_IDE_DAEMON>` when
+  a buffer is opened or becomes active. A request at most 15 s old runs `live_diff_vs_head` on the file it
+  names. `fresh-open` writes these when launched with `HERDR_SIDEBAR_OPEN_DIFF=1` (the sidebar no longer
+  does). There is deliberately no timer: the old 400 ms poll made every idle editor run plugin JS and
+  re-render about 2.5 times a second.
 - **Inline merge conflicts** (namespace `inline-conflict`): scans on buffer activate, open, revert and
   modify, debounced 150 ms. Accepting a side is a deleteRange + insertText, then the cursor auto-jumps to
   the next unresolved block. When a file is clean it is saved, and the next file from
@@ -876,6 +941,7 @@ Two things break that loop, both worth knowing:
 
 | Symptom | Check |
 |---|---|
+| An editor looks frozen after switching to its workspace | it is still paused (`ps -o stat= -p <server pid>` shows `T`). Focus another tab and back, or run `dotfiles/herdr-plugins/ide/bin/fresh-pause` by hand; `--dry-run` shows the plan. `touch ~/.local/state/herdr/plugins/dotfiles-ide/fresh-pause-off` disables pausing |
 | Preview still splits a new pane in the IDE tab | Restart Fresh with `fresh-restart --all` (a Fresh pane started before the host loop has no host). `herdr pane list` should show `hs-preview-host` in the Fresh pane's tokens |
 | Spaces rail shows no agent name for a CLI that is clearly running | Add its command word to `AGENT_OF` at the top of `dotfiles/herdr-plugins/ide/bin/ide-agent-title` (then run the agent again — the hook fires per typed command). herdr only auto-detects the agents in `herdr integration status`; everything else is named solely by this table's `--display-agent` |
 | Spaces rail shows no state for CodeBuddy (`·` instead of `◐`/`○`) | its hooks must be installed AND codebuddy restarted (it snapshots settings at startup): `jq -r '.hooks \| keys[]' ~/.codebuddy/settings.json` should list SessionStart, UserPromptSubmit, PreToolUse, Stop, PermissionRequest, Notification and SessionEnd, each pointing at `~/.codebuddy/hooks/herdr-agent-state.sh` (rerun `dotfiles/install.sh` to restore them). `herdr pane list` shows `agent: codebuddy` once a hook has reported |

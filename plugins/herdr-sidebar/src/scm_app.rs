@@ -26,6 +26,7 @@ use herdr_sidebar::actions::{self, ClipboardWrite, copy_to_clipboard, open_exter
 use herdr_sidebar::branch_ui::{
     BranchPicker, FooterZones, PickerAction, draw_git_footer, sync_glyph,
 };
+use herdr_sidebar::fswatch::{FsWatch, WatchSet};
 use herdr_sidebar::git::{DeleteRefused, FileEntry, Git, Status};
 use herdr_sidebar::icons::{IconTheme, icon};
 use herdr_sidebar::pane_menu::{self, PaneAction};
@@ -1475,6 +1476,13 @@ pub struct App {
     /// Seen focused on the previous tick: a false -> true transition refreshes
     /// at once.
     was_focused: bool,
+    /// OS file-change watcher over the repos' work trees and git dirs
+    /// (event-driven refresh, runs regardless of focus). `None` until started.
+    fs_watch: Option<FsWatch>,
+    /// The set `fs_watch` was last given, so unchanged repos cost nothing.
+    fs_watch_set: Option<WatchSet>,
+    /// The watcher could not be created; focused polling is the only refresh.
+    fs_watch_failed: bool,
 }
 
 const MY_VIEW: View = View::SourceControl;
@@ -1623,6 +1631,9 @@ impl App {
             ),
             last_git_read: None,
             was_focused: false,
+            fs_watch: None,
+            fs_watch_set: None,
+            fs_watch_failed: false,
         };
         app.apply_identity();
         app.refresh();
@@ -1898,9 +1909,7 @@ impl App {
         let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.as_str()) else {
             return true;
         };
-        herdr_sidebar::ipc::call_text("pane.list", serde_json::json!({}))
-            .ok()
-            .is_some_and(|json| pane_focused_in(&json, pane_id))
+        herdr_sidebar::ipc::pane_focused(pane_id).unwrap_or(false)
     }
 
     fn follow_sibling_cwd(&mut self) {
@@ -1936,6 +1945,7 @@ impl App {
     /// pick up external changes, and collect finished ✧ suggestion / sync runs.
     pub fn tick(&mut self) {
         self.collect_editor_failures();
+        self.collect_fs_watch();
         let shared = sidebar::load_state();
         self.sidebar_state.custom_editor_on_click = shared.custom_editor_on_click;
         self.sidebar_state.custom_editor_inline = shared.custom_editor_inline;
@@ -2061,6 +2071,58 @@ impl App {
     fn collect_editor_failures(&mut self) {
         if let Some(failure) = actions::take_editor_failures().pop() {
             self.flash = Some((failure, true));
+        }
+    }
+
+    /// The repos' work trees and git dirs, as the file-change watcher sees them.
+    fn fs_watch_set(&self) -> WatchSet {
+        WatchSet {
+            tree_dirs: Vec::new(),
+            repo_roots: self
+                .repos
+                .iter()
+                .map(|r| r.git.root().to_path_buf())
+                .collect(),
+            git_dirs: self.repos.iter().filter_map(|r| r.git.git_dir()).collect(),
+        }
+    }
+
+    /// Keep the watcher on the current repos. Starts it on first use and only
+    /// calls `update` when the set actually changed.
+    fn sync_fs_watch(&mut self) {
+        if self.fs_watch_failed {
+            return;
+        }
+        let set = self.fs_watch_set();
+        if self.fs_watch_set.as_ref() == Some(&set) {
+            return;
+        }
+        match &self.fs_watch {
+            Some(watch) => watch.update(set.clone()),
+            None => match FsWatch::start(set.clone()) {
+                Some(watch) => self.fs_watch = Some(watch),
+                None => {
+                    self.fs_watch_failed = true;
+                    return;
+                }
+            },
+        }
+        self.fs_watch_set = Some(set);
+    }
+
+    /// Event-driven refresh, ahead of the focus gate in `tick` so unfocused
+    /// views stay current too. Idle (no git process) while nothing changes. A
+    /// ref-changing git operation (commit, checkout, merge) rewrites git-dir
+    /// files, so those events also reload the drawers.
+    fn collect_fs_watch(&mut self) {
+        self.sync_fs_watch();
+        let Some(watch) = &self.fs_watch else { return };
+        let changes = watch.take();
+        if changes.tree || changes.git {
+            self.refresh();
+        }
+        if changes.refs {
+            self.refresh_refs();
         }
     }
 
@@ -2370,10 +2432,7 @@ impl App {
         let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone()) else {
             return;
         };
-        if let Ok(json) = herdr_sidebar::ipc::call_text("pane.list", serde_json::json!({}))
-            && json.contains(&format!("\"{pane_id}\""))
-            && !pane_focused_in(&json, &pane_id)
-        {
+        if herdr_sidebar::ipc::pane_focused(&pane_id) == Some(false) {
             self.on_focus_lost();
         }
     }
@@ -7092,26 +7151,6 @@ fn tree_dir_item(
     ListItem::new(Line::from(spans))
 }
 
-fn pane_focused_in(pane_list_json: &str, pane_id: &str) -> bool {
-    let Ok(value) =
-        serde_json::from_str::<serde_json::Value>(pane_list_json.trim_start_matches('\u{feff}'))
-    else {
-        return false;
-    };
-    value
-        .get("result")
-        .and_then(|result| result.get("panes"))
-        .and_then(|panes| panes.as_array())
-        .and_then(|panes| {
-            panes
-                .iter()
-                .find(|pane| pane.get("pane_id").and_then(|id| id.as_str()) == Some(pane_id))
-        })
-        .and_then(|pane| pane.get("focused"))
-        .and_then(|focused| focused.as_bool())
-        .unwrap_or(false)
-}
-
 fn no_repo_layout(area: Rect, merged: bool) -> [Rect; 2] {
     Layout::vertical([
         Constraint::Length(if merged { 3 } else { 0 }),
@@ -7400,16 +7439,6 @@ mod tests {
         let draft = ['d', 'r', 'a', 'f', 't'];
         assert!(!commit_draft_present([empty, empty]));
         assert!(commit_draft_present([empty, draft.as_slice()]));
-    }
-
-    #[test]
-    fn focused_pane_detection_is_scoped_to_our_pane_id() {
-        let panes = r#"{"result":{"panes":[
-            {"pane_id":"w1:p1","focused":false},
-            {"pane_id":"w1:p2","focused":true}
-        ]}}"#;
-        assert!(!pane_focused_in(panes, "w1:p1"));
-        assert!(pane_focused_in(panes, "w1:p2"));
     }
 
     #[test]

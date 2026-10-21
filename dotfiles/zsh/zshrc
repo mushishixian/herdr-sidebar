@@ -40,6 +40,56 @@ export FZF_DEFAULT_COMMAND='fd --type f --hidden --exclude .git'
 export FZF_CTRL_T_COMMAND=$FZF_DEFAULT_COMMAND
 export FZF_DEFAULT_OPTS='--layout=reverse --height=40% --border'
 
+# ── Prompt follows branch switches made outside this shell ─────────────
+# A prompt already on screen keeps the old branch when the branch is switched
+# from elsewhere (a sidebar popup, lazygit, an agent in another pane) until Enter.
+# zsh's sched runs while the shell idles at the prompt, so a 1 s tick compares the
+# repo's HEAD file and redraws on a change; zle reset-prompt keeps a half-typed
+# line. Reading a file forks nothing, so the tick costs nothing measurable.
+if [[ -o interactive ]]; then
+  zmodload zsh/sched 2>/dev/null
+  autoload -Uz add-zsh-hook
+  typeset -g _prompt_head_file='' _prompt_head_sig=''
+  # Nearest .git above $PWD -> the HEAD file to watch ('' = not in a repo).
+  # A .git FILE (linked worktree, submodule) reads "gitdir: <path>", relative to its dir.
+  _prompt_head_resolve() {
+    local d=$PWD gd
+    _prompt_head_file=''
+    while :; do
+      if [[ -d $d/.git ]]; then _prompt_head_file=$d/.git/HEAD; break; fi
+      if [[ -f $d/.git ]]; then
+        gd=$(<$d/.git); gd=${gd#gitdir: }
+        [[ $gd != /* ]] && gd=$d/$gd
+        _prompt_head_file=$gd/HEAD; break
+      fi
+      [[ $d == / ]] && break
+      d=${d:h}
+    done
+    _prompt_head_sig=''
+    [[ -n $_prompt_head_file && -r $_prompt_head_file ]] && _prompt_head_sig=$(<$_prompt_head_file)
+  }
+  _prompt_head_tick() {
+    local s=''
+    [[ -n $_prompt_head_file && -r $_prompt_head_file ]] && s=$(<$_prompt_head_file)
+    if [[ $s != $_prompt_head_sig ]]; then
+      _prompt_head_sig=$s
+      zle && zle reset-prompt
+    fi
+    sched +1 _prompt_head_tick
+  }
+  # Re-sourcing this file must not stack a second tick: drop the old entries first.
+  typeset -a _ph_idx=(); _ph_line=
+  for _ph_line in ${(f)"$(sched 2>/dev/null)"}; do
+    [[ $_ph_line == *_prompt_head_tick* ]] || continue
+    _ph_idx+=( ${${(z)_ph_line}[1]} )   # "  1 Wed Oct ..." -> 1
+  done
+  for _ph_line in ${(On)_ph_idx}; do sched -$_ph_line; done
+  unset _ph_idx _ph_line
+  add-zsh-hook chpwd _prompt_head_resolve
+  _prompt_head_resolve
+  _prompt_head_tick
+fi
+
 # ── Aliases ────────────────────────────────────────────────────────────
 # --hyperlink makes every name Ctrl+clickable in herdr (files open in Fresh).
 alias ls='eza --group-directories-first --hyperlink'

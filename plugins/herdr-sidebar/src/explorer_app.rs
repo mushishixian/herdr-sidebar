@@ -24,6 +24,7 @@ use herdr_sidebar::file_search::{
     QUICK_OPEN_FILE_LIMIT, QuickFile, QuickIndex, collect_quick_files, quick_matches,
     truncate_path_tail,
 };
+use herdr_sidebar::fswatch::{FsWatch, WatchSet};
 use herdr_sidebar::git::{Git, Status};
 use herdr_sidebar::gitdeco::{Decorations, RepoStatus};
 use herdr_sidebar::icons::{IconTheme, icon};
@@ -479,6 +480,16 @@ pub struct App {
     /// One background decoration refresh. Keeping at most one receiver avoids
     /// multiplying git processes when a slow repository overlaps the timer.
     deco_rx: Option<std::sync::mpsc::Receiver<DecorationRefresh>>,
+    /// A file-change event arrived while a decoration read was in flight; the
+    /// read is repeated once it lands so the change is not lost.
+    deco_pending: bool,
+    /// OS file-change watcher over the tree's directories and the repos
+    /// (event-driven refresh, runs regardless of focus). `None` until started.
+    fs_watch: Option<FsWatch>,
+    /// The set `fs_watch` was last given, so unchanged directories cost nothing.
+    fs_watch_set: Option<WatchSet>,
+    /// The watcher could not be created; polling is the only refresh path.
+    fs_watch_failed: bool,
     /// Status for the containing repository, populated by the same bounded
     /// background refresh that drives decorations.
     git_footer_status: Option<Status>,
@@ -620,6 +631,10 @@ impl App {
             last_deco: std::time::Instant::now(),
             last_tree_sync: std::time::Instant::now(),
             deco_rx: None,
+            deco_pending: false,
+            fs_watch: None,
+            fs_watch_set: None,
+            fs_watch_failed: false,
             git_footer_status: None,
             git_footer_zones: FooterZones::default(),
             has_repo: Git::is_initialized(&tree_root_for_presence),
@@ -660,6 +675,7 @@ impl App {
         self.collect_content_search();
         self.collect_git_sync();
         self.start_content_search_if_due();
+        self.collect_fs_watch();
         self.collect_decorations();
         if self.last_deco.elapsed() < DECO_REFRESH {
             return;
@@ -957,15 +973,80 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => self.deco_rx = None,
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
+        if self.deco_rx.is_none() && std::mem::take(&mut self.deco_pending) {
+            self.request_decorations(true);
+        }
+    }
+
+    /// The directories the file-change watcher observes: the tree's root and
+    /// expanded directories, plus each repository's work tree and git dir.
+    fn fs_watch_set(&self) -> WatchSet {
+        WatchSet {
+            tree_dirs: std::iter::once(self.tree.root_path())
+                .chain(self.tree.expanded_paths())
+                .collect(),
+            repo_roots: self.repos.iter().map(|r| r.root().to_path_buf()).collect(),
+            git_dirs: self.repos.iter().filter_map(Git::git_dir).collect(),
+        }
+    }
+
+    /// Keep the watcher on the current directories. Starts it on first use
+    /// and only calls `update` when the set actually changed.
+    fn sync_fs_watch(&mut self) {
+        if self.fs_watch_failed {
+            return;
+        }
+        let set = self.fs_watch_set();
+        if self.fs_watch_set.as_ref() == Some(&set) {
+            return;
+        }
+        match &self.fs_watch {
+            Some(watch) => watch.update(set.clone()),
+            None => match FsWatch::start(set.clone()) {
+                Some(watch) => self.fs_watch = Some(watch),
+                None => {
+                    self.fs_watch_failed = true;
+                    return;
+                }
+            },
+        }
+        self.fs_watch_set = Some(set);
+    }
+
+    /// Event-driven refresh. A tree change re-reads the listing and rebuilds
+    /// WITHOUT persisting the tree state (another sidebar on this root may be
+    /// focused, and its selection must not be overwritten by a background
+    /// rebuild); any change repeats the git decorations, ignoring focus.
+    fn collect_fs_watch(&mut self) {
+        self.sync_fs_watch();
+        let Some(watch) = &self.fs_watch else { return };
+        let changes = watch.take();
+        if !changes.tree && !changes.git {
+            return;
+        }
+        if changes.tree {
+            self.tree.refresh();
+            self.invalidate_quick_index();
+            self.hovered = None;
+            rebuild_tree_rows(
+                &mut self.tree,
+                &mut self.rows,
+                &mut self.selected,
+                &mut self.scroll,
+            );
+        }
+        if self.deco_rx.is_some() {
+            self.deco_pending = true;
+        } else {
+            self.request_decorations(true);
+        }
     }
 
     fn pane_is_focused(&self) -> bool {
         let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.as_str()) else {
             return true;
         };
-        ipc::call_text("pane.list", serde_json::json!({}))
-            .ok()
-            .is_some_and(|json| pane_focused_in(&json, pane_id))
+        ipc::pane_focused(pane_id).unwrap_or(false)
     }
 
     /// Rediscover the repositories under the current root — after a re-root,
@@ -1346,9 +1427,7 @@ impl App {
         let Some(pane_id) = self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone()) else {
             return;
         };
-        if let Ok(json) = ipc::call_text("pane.list", serde_json::json!({}))
-            && pane_listed_unfocused(&json, &pane_id)
-        {
+        if ipc::pane_focused(&pane_id) == Some(false) {
             self.on_focus_lost();
         }
     }
@@ -4891,32 +4970,6 @@ fn search_toolbar_icons(theme: IconTheme) -> (&'static str, &'static str, &'stat
     }
 }
 
-/// The pane is in the list and NOT focused. A failed or partial reply is not
-/// evidence of lost focus, so it never closes a popup.
-fn pane_listed_unfocused(pane_list_json: &str, pane_id: &str) -> bool {
-    pane_list_json.contains(&format!("\"{pane_id}\"")) && !pane_focused_in(pane_list_json, pane_id)
-}
-
-fn pane_focused_in(pane_list_json: &str, pane_id: &str) -> bool {
-    let Ok(value) =
-        serde_json::from_str::<serde_json::Value>(pane_list_json.trim_start_matches('\u{feff}'))
-    else {
-        return false;
-    };
-    value
-        .get("result")
-        .and_then(|result| result.get("panes"))
-        .and_then(|panes| panes.as_array())
-        .and_then(|panes| {
-            panes
-                .iter()
-                .find(|pane| pane.get("pane_id").and_then(|id| id.as_str()) == Some(pane_id))
-        })
-        .and_then(|pane| pane.get("focused"))
-        .and_then(|focused| focused.as_bool())
-        .unwrap_or(false)
-}
-
 /// The right-aligned decoration for a status letter (issue #19): the letter
 /// itself for a file, a filled dot for a directory whose DESCENDANTS changed
 /// (VS Code's dirty-folder badge), and nothing at all for ignored paths —
@@ -5286,24 +5339,6 @@ mod tests {
             root.join("src")
         );
         assert_eq!(create_target_dir(None, root.clone()), root);
-    }
-
-    #[test]
-    fn focused_pane_detection_is_scoped_to_our_pane_id() {
-        let panes = r#"{"result":{"panes":[
-            {"pane_id":"w1:p1","focused":false},
-            {"pane_id":"w1:p2","focused":true}
-        ]}}"#;
-        assert!(!pane_focused_in(panes, "w1:p1"));
-        assert!(pane_focused_in(panes, "w1:p2"));
-        assert!(!pane_focused_in("garbage", "w1:p2"));
-        assert!(pane_listed_unfocused(panes, "w1:p1"));
-        assert!(!pane_listed_unfocused(panes, "w1:p2"), "focused");
-        assert!(
-            !pane_listed_unfocused(panes, "w1:p9"),
-            "not listed: no evidence"
-        );
-        assert!(!pane_listed_unfocused("garbage", "w1:p1"));
     }
 
     /// The rendered text of a row, decorations included.

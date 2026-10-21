@@ -44,6 +44,96 @@ daemon_alive() {
   fresh --cmd daemon list 2>/dev/null | sed -n 's/^  //p' | grep -qx -- "$1"
 }
 
+# True when pid $1's argv is exactly `fresh ARG...` (argv[0] may be a full path
+# to the binary). Compares whole arguments, so `ide-abc` never matches
+# `ide-abc-s2`. pgrep only pre-filters; this is the real test.
+fresh_argv_is() { # pid arg...
+  local pid=$1 i
+  shift
+  local -a want=("$@") argv=()
+  mapfile -d '' -t argv < <(cat "/proc/$pid/cmdline" 2>/dev/null)
+  [ "${#argv[@]}" -eq $((${#want[@]} + 1)) ] && [ "${argv[0]##*/}" = fresh ] || return 1
+  for i in "${!want[@]}"; do
+    [ "${argv[i + 1]}" = "${want[i]}" ] || return 1
+  done
+}
+
+# One line per Fresh SERVER process: "NAME PID" (the server is
+# `fresh --server --session-name NAME`, a process group leader whose language
+# servers share its group). Empty when none runs.
+fresh_server_list() {
+  local pid
+  local -a argv
+  for pid in $(pgrep -f -- '--server --session-name' 2>/dev/null); do
+    mapfile -d '' -t argv < <(cat "/proc/$pid/cmdline" 2>/dev/null)
+    # Exactly four arguments: fresh --server --session-name NAME.
+    [ "${#argv[@]}" -eq 4 ] && fresh_argv_is "$pid" --server --session-name "${argv[3]}" \
+      && printf '%s %s\n' "${argv[3]}" "$pid"
+  done
+  return 0
+}
+
+# PID of the Fresh server for daemon $1, or nothing.
+fresh_server_pid() {
+  fresh_server_list | awk -v n="$1" '$1 == n { print $2; exit }'
+}
+
+# PIDs of the Fresh CLIENTS attached to daemon $1 (argv exactly `fresh -a NAME`).
+fresh_client_pids() {
+  local pid
+  for pid in $(pgrep -f -- "-a $1" 2>/dev/null); do
+    fresh_argv_is "$pid" -a "$1" && printf '%s\n' "$pid"
+  done
+  return 0
+}
+
+# "STATE PGID" of pid $1 from /proc/<pid>/stat, nothing when it is gone. The
+# comm field may hold spaces and parentheses, so fields are read after the
+# LAST ')'. STATE is R/S/D/Z, or T while stopped.
+proc_fields() {
+  local stat rest state pgrp
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+  rest=${stat##*) }
+  read -r state _ pgrp _ <<<"$rest"
+  printf '%s %s\n' "$state" "$pgrp"
+}
+
+# Pause daemon $1 (its clients, then its server's process group). A stopped
+# client just waits. The server group also holds the language servers, so they
+# stop too and use no CPU. Only a group leader (pgid == pid) gets a group
+# signal; anything else gets the pid alone. Never fails.
+fresh_pause() { # name
+  local pid pgid
+  for pid in $(fresh_client_pids "$1"); do kill -STOP "$pid" 2>/dev/null || true; done
+  pid=$(fresh_server_pid "$1") || true
+  [ -n "$pid" ] || return 0
+  read -r _ pgid <<<"$(proc_fields "$pid")"
+  if [ "${pgid:-}" = "$pid" ]; then
+    kill -STOP -- "-$pid" 2>/dev/null || true
+  else
+    kill -STOP "$pid" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# Resume daemon $1: the server (its group first) and then its clients. The
+# reverse of fresh_pause, so a client never wakes before its server. A cheap
+# no-op when nothing is stopped. Never fails.
+fresh_resume() { # name
+  local pid pgid
+  pid=$(fresh_server_pid "$1") || true
+  if [ -n "$pid" ]; then
+    read -r _ pgid <<<"$(proc_fields "$pid")"
+    if [ "${pgid:-}" = "$pid" ]; then
+      kill -CONT -- "-$pid" 2>/dev/null || true
+    else
+      kill -CONT "$pid" 2>/dev/null || true
+    fi
+  fi
+  for pid in $(fresh_client_pids "$1"); do kill -CONT "$pid" 2>/dev/null || true; done
+  return 0
+}
+
 # Where the explicit Agent-column choice lives (first line = the command).
 agent_config_file() {
   local dir=''

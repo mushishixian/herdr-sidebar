@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# fresh-pause [--dry-run] — workspace.focused / tab.focused hook: pause the
+# Fresh editors of the workspaces you are not in.
+#
+# A paused editor uses no CPU. Its client and its server are SIGSTOPped, and the
+# server's process group takes its language servers down with it. Focusing the
+# workspace again resumes the editor, and fresh-ide, fresh-open and
+# fresh-restart resume a daemon themselves before they talk to it.
+#
+# Stateless and self-healing: each run decides from the CURRENT focus alone
+# (`herdr pane list` plus /proc), so nothing records what was paused. Every
+# running ide-* server is one of three things:
+#   keep   its Fresh pane is in the focused workspace (woken if stopped),
+#   pause  its Fresh panes all live in other workspaces,
+#   resume it has no Fresh pane at all (closed, or another herdr session):
+#          woken if stopped, otherwise left alone.
+# Wakes run before pauses, so a quick workspace switch never leaves the target
+# asleep any longer than needed.
+#
+# Off switch: create $STATE/fresh-pause-off to wake every stopped editor and
+# pause nothing.
+#
+# Always silent and exit 0: this is a hook. Without a focused pane, or when
+# `herdr pane list` fails, nothing changes.
+#
+# --dry-run prints the plan (keep / resume / pause NAME) and signals nothing.
+# Its test inputs are honoured only in that mode: FRESH_PAUSE_PANES_JSON (a file
+# that replaces `herdr pane list`) and FRESH_PAUSE_SERVERS (a file of
+# "NAME STATE" lines that replaces the /proc scan).
+set -uo pipefail
+here=$(dirname "$(readlink -f "$0")")
+. "$here/lib.sh"
+
+dry=0
+[ "${1:-}" = --dry-run ] && dry=1
+
+# True for a /proc state letter that means stopped (SIGSTOP leaves T; t is a
+# stop under a tracer).
+is_stopped() {
+  case ${1:-} in
+    T | t) return 0 ;;
+  esac
+  return 1
+}
+
+# "NAME STATE" for every running ide-* Fresh server. A server that exits
+# during the scan is skipped.
+scan_servers() {
+  local name pid st
+  if [ "$dry" = 1 ] && [ -n "${FRESH_PAUSE_SERVERS:-}" ]; then
+    cat "$FRESH_PAUSE_SERVERS"
+    return 0
+  fi
+  while read -r name pid; do
+    case $name in
+      ide-*) ;;
+      *) continue ;;
+    esac
+    read -r st _ <<<"$(proc_fields "$pid")"
+    [ -n "$st" ] || continue
+    printf '%s %s\n' "$name" "$st"
+  done < <(fresh_server_list)
+  return 0
+}
+
+# The pane list, read once per run. Non-zero when herdr cannot answer.
+pane_snapshot() {
+  if [ "$dry" = 1 ] && [ -n "${FRESH_PAUSE_PANES_JSON:-}" ]; then
+    cat "$FRESH_PAUSE_PANES_JSON"
+    return 0
+  fi
+  "$HERDR" pane list 2>/dev/null
+}
+
+# The plan, as "VERB NAME" lines in execution order, from the pane list (JSON
+# on stdin) and the running servers ($1, "NAME STATE" lines). Pure: no signals,
+# no herdr call. Prints nothing when no pane is focused or the JSON is unreadable,
+# because then nothing may change.
+#   keep NAME    a Fresh pane of NAME is in the focused workspace
+#   resume NAME  a kept or orphaned server that is stopped
+#   pause NAME   every Fresh pane of NAME is in another workspace
+fresh_pause_plan() { # servers
+  local servers=$1 panes ws name keep all
+  local -A state_of=()
+  panes=$(cat)
+  ws=$(jq -r 'first(.result.panes[]? | select(.focused == true) | .workspace_id) // empty' \
+    <<<"$panes" 2>/dev/null) || return 0
+  [ -n "$ws" ] || return 0
+  keep=$(jq -r --arg ws "$ws" --arg lbl "$FRESH_LABEL" '
+    [.result.panes[]? | select(.workspace_id == $ws and .label == $lbl
+      and (.tokens.fresh_daemon // "") != "") | .tokens.fresh_daemon] | unique | .[]' \
+    <<<"$panes") || return 0
+  all=$(jq -r --arg lbl "$FRESH_LABEL" '
+    [.result.panes[]? | select(.label == $lbl and (.tokens.fresh_daemon // "") != "")
+      | .tokens.fresh_daemon] | unique | .[]' <<<"$panes") || return 0
+  while read -r name state; do
+    [ -n "$name" ] && state_of[$name]=$state
+  done <<<"$servers"
+
+  while read -r name; do
+    [ -n "$name" ] || continue
+    printf 'keep %s\n' "$name"
+    is_stopped "${state_of[$name]:-}" && printf 'resume %s\n' "$name"
+  done <<<"$keep"
+  # Servers with no Fresh pane anywhere: woken if stopped, otherwise untouched.
+  for name in $(printf '%s\n' "${!state_of[@]}" | sort); do
+    grep -qxF -- "$name" <<<"$all" && continue
+    is_stopped "${state_of[$name]}" && printf 'resume %s\n' "$name"
+  done
+  while read -r name; do
+    [ -n "$name" ] || continue
+    grep -qxF -- "$name" <<<"$keep" && continue
+    printf 'pause %s\n' "$name"
+  done <<<"$all"
+  return 0
+}
+
+# Carry out one plan line. Signals only when a change is needed: a running
+# editor is not paused again, and only a stopped one is woken.
+act() { # verb name
+  local pid st
+  case $1 in
+    resume)
+      fresh_resume "$2" ;;
+    pause)
+      pid=$(fresh_server_pid "$2") || true
+      [ -n "$pid" ] || return 0
+      read -r st _ <<<"$(proc_fields "$pid")"
+      is_stopped "$st" || fresh_pause "$2" ;;
+  esac
+  return 0
+}
+
+if [ "$dry" = 0 ]; then
+  # Hook events come in bursts, so runs are serialised. A run that cannot
+  # get the lock in 5 s gives up, and the next focus event decides again.
+  mkdir -p "$STATE" 2>/dev/null || exit 0
+  exec 9>"$STATE/fresh-pause.lock" || exit 0
+  flock -w 5 9 || exit 0
+fi
+
+servers=$(scan_servers)
+
+# Off switch: wake whatever is stopped, pause nothing.
+if [ -e "$STATE/fresh-pause-off" ]; then
+  while read -r name state; do
+    [ -n "$name" ] || continue
+    is_stopped "$state" || continue
+    if [ "$dry" = 1 ]; then printf 'resume %s\n' "$name"; else fresh_resume "$name"; fi
+  done <<<"$servers"
+  exit 0
+fi
+
+panes=$(pane_snapshot) || exit 0
+plan=$(fresh_pause_plan "$servers" <<<"$panes") || exit 0
+while read -r verb name; do
+  [ -n "$name" ] || continue
+  if [ "$dry" = 1 ]; then
+    printf '%s %s\n' "$verb" "$name"
+  else
+    act "$verb" "$name"
+  fi
+done <<<"$plan"
+exit 0

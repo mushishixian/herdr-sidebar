@@ -22,8 +22,9 @@
 //! - [`describe_pads`] — pure: `pane.list` JSON → workspace id → `$pad` value.
 //! - [`report_params`] — pure: the `workspace.report_metadata` params object (both tokens).
 //! - [`AgentTokens::report_if_due`] — the 5 s-throttled reporter both sidebar
-//!   apps call from their heartbeat. Only the sidebar apps report; the ensure
-//!   sidecar and the preview viewer never do.
+//!   apps call from their heartbeat. Only the sidebar apps report, and only the
+//!   one elected sidebar per herdr session does ([`crate::session_reporter`]);
+//!   the ensure sidecar and the preview viewer never do.
 //!
 //! Contract (also documented in the root `AGENTS.md`): token key `agents`,
 //! `source = "herdr-sidebar"`, `ttl_ms` 20 s, value format `label · label` with
@@ -223,9 +224,13 @@ impl AgentTokens {
     /// EVERY workspace seen in `pane.list` is (re)reported each beat, with
     /// [`NO_AGENT`] for the ones that have no agent pane. Reporting instead of diffing
     /// keeps the 20 s TTL alive, so a killed sidebar's value can never outlive
-    /// the TTL; and duplicate reports from the several sidebar processes of one
-    /// session are harmless because the values are identical and the API merges
-    /// them.
+    /// the TTL.
+    ///
+    /// Only the elected sidebar of the session reports
+    /// ([`crate::session_reporter`]): every sidebar used to repeat the same
+    /// identical reports, which multiplied herdr server CPU by the number of
+    /// sidebars. A dead reporter's lock is released by the kernel, and the next
+    /// sidebar's beat takes over.
     pub fn report_if_due(&mut self) {
         if self
             .last
@@ -234,6 +239,9 @@ impl AgentTokens {
             return;
         }
         self.last = Some(Instant::now());
+        if !crate::session_reporter::is_session_reporter() {
+            return;
+        }
         let Ok(json) = crate::ipc::call_text("pane.list", serde_json::json!({})) else {
             return;
         };

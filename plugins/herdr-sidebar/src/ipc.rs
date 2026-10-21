@@ -291,6 +291,89 @@ fn exchange_with_thread_timeout<S: Read + Write + Send + 'static>(
     })
 }
 
+/// Whether herdr reports `pane_id` as focused, from ONE cheap call.
+///
+/// `pane.get` answers for a single pane, whereas `pane.list` serializes every
+/// pane in the session (about 1.2 ms of server CPU per call against about
+/// 0.5 ms for `pane.get`), and the focus probes run every few hundred
+/// milliseconds. Hosts without `pane.get`, or a reply missing the field, fall
+/// back to one `pane.list`. `None` means herdr gave no answer for this pane.
+pub fn pane_focused(pane_id: &str) -> Option<bool> {
+    if let Ok(reply) = call_text("pane.get", serde_json::json!({ "pane_id": pane_id }))
+        && let Some(focused) = parse_pane_get_focused(&reply)
+    {
+        return Some(focused);
+    }
+    let reply = call_text("pane.list", serde_json::json!({})).ok()?;
+    parse_pane_list_focused(&reply, pane_id)
+}
+
+/// `pane.get` reply → the pane's `focused` flag. An error object (for example
+/// a pane that no longer exists) has no `result.pane`, so it yields `None`.
+pub fn parse_pane_get_focused(reply: &str) -> Option<bool> {
+    let value: serde_json::Value =
+        serde_json::from_str(reply.trim_start_matches('\u{feff}')).ok()?;
+    value.get("result")?.get("pane")?.get("focused")?.as_bool()
+}
+
+/// `pane.list` reply → the `focused` flag of `pane_id`. `None` when the reply
+/// is unparseable or the pane is not listed; a listed pane without a boolean
+/// `focused` counts as unfocused, as it always has.
+pub fn parse_pane_list_focused(reply: &str, pane_id: &str) -> Option<bool> {
+    let value: serde_json::Value =
+        serde_json::from_str(reply.trim_start_matches('\u{feff}')).ok()?;
+    let pane = value
+        .get("result")?
+        .get("panes")?
+        .as_array()?
+        .iter()
+        .find(|pane| pane.get("pane_id").and_then(|id| id.as_str()) == Some(pane_id))?;
+    Some(
+        pane.get("focused")
+            .and_then(|focused| focused.as_bool())
+            .unwrap_or(false),
+    )
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    #[test]
+    fn pane_get_reads_the_focused_flag() {
+        let reply =
+            r#"{"id":"x","result":{"type":"pane_info","pane":{"pane_id":"wF:p3","focused":true}}}"#;
+        assert_eq!(parse_pane_get_focused(reply), Some(true));
+        let unfocused = reply.replace("true", "false");
+        assert_eq!(parse_pane_get_focused(&unfocused), Some(false));
+        let bom = format!("\u{feff}{reply}");
+        assert_eq!(parse_pane_get_focused(&bom), Some(true));
+    }
+
+    #[test]
+    fn pane_get_error_or_garbage_has_no_answer() {
+        let missing = r#"{"id":"x","error":{"code":"pane_not_found","message":"no"}}"#;
+        assert_eq!(parse_pane_get_focused(missing), None);
+        assert_eq!(parse_pane_get_focused("garbage"), None);
+        let no_flag = r#"{"result":{"pane":{"pane_id":"w1:p1"}}}"#;
+        assert_eq!(parse_pane_get_focused(no_flag), None);
+    }
+
+    #[test]
+    fn pane_list_fallback_is_scoped_to_our_pane_id() {
+        let panes = r#"{"result":{"panes":[
+            {"pane_id":"w1:p1","focused":false},
+            {"pane_id":"w1:p2","focused":true}
+        ]}}"#;
+        assert_eq!(parse_pane_list_focused(panes, "w1:p1"), Some(false));
+        assert_eq!(parse_pane_list_focused(panes, "w1:p2"), Some(true));
+        assert_eq!(parse_pane_list_focused(panes, "w1:p9"), None, "not listed");
+        assert_eq!(parse_pane_list_focused("garbage", "w1:p1"), None);
+        let no_flag = r#"{"result":{"panes":[{"pane_id":"w1:p1"}]}}"#;
+        assert_eq!(parse_pane_list_focused(no_flag, "w1:p1"), Some(false));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

@@ -33,7 +33,9 @@
 //! - [`next_seq`] — the only legal way to build a report sequence (see below).
 //! - [`report_params`] — pure: the `pane.report_agent` params object.
 //! - [`PiState::report_if_due`] — the reporter both sidebar apps call from their
-//!   heartbeat.
+//!   heartbeat. Only the one sidebar elected per herdr session reports
+//!   ([`crate::session_reporter`]), so N sidebars do not repeat the same
+//!   `pane.list` and `pane.report_agent` traffic.
 //!
 //! ## Transcript rules (pi session format v3)
 //!
@@ -474,7 +476,9 @@ pub struct PiState {
 impl PiState {
     /// Report every pi pane's state if due. Never panics, never retries, and
     /// ignores every failure: the rail is decoration, and the next beat (or
-    /// pi's own hook) fixes a transient error.
+    /// pi's own hook) fixes a transient error. Only the elected session
+    /// reporter sends the reports; the throttle still advances on the others,
+    /// so they re-check once per interval rather than every loop iteration.
     pub fn report_if_due(&mut self) {
         if self
             .last_beat
@@ -483,6 +487,9 @@ impl PiState {
             return;
         }
         self.last_beat = Some(Instant::now());
+        if !crate::session_reporter::is_session_reporter() {
+            return;
+        }
         let Ok(json) = crate::ipc::call_text("pane.list", serde_json::json!({})) else {
             return;
         };
