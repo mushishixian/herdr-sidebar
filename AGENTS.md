@@ -72,7 +72,13 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   repository-scoped `File::try_lock()` to avoid Git index lock collisions from rapid keystrokes.
 - AI commit (`--git-commit`, action `git-commit-ai`, `src/ai_commit.rs`): the action never commits.
   It writes a per-tab request file (`<rundir>/ai_commit/tab-<tab>.req`, root + unix stamp, claimed by
-  rename, 30 s freshness) and activates that tab's Source Control view (`ensure::Mode::Activate`).
+  rename, 30 s freshness) and activates that tab's Source Control view (`ensure::Mode::Activate`)
+  **without taking the user's focus**: activation can focus the pane (docking a new one always does),
+  so `request_ai_commit` remembers the focused pane first and `restore_focus` gives it back —
+  but only when focus really moved onto one of OUR panes (`focus_to_restore`, pure and unit-tested),
+  so a user who moved on in the meantime is never overridden. This works because the request is a
+  file on disk and `take_ai_request` has no focus gate; verified live (focus stayed on the shell pane
+  while an unfocused sidebar generated the message and committed).
   The SCM TUI polls its tab's request every 300 ms, runs `stage_under(root)` plus `has_staged`
   on a worker, and generates the message WITHOUT committing via OpenCommit's prepare-commit-msg
   hook mode: oco treats itself as the hook when `argv[1]` equals `<hooks path>/prepare-commit-msg`,

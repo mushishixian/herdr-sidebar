@@ -228,15 +228,59 @@ fn request_ai_commit(git: &Git, repo_name: &str, tip: &str) {
         notify(&format!("{fail_title}{tip}"), &e.to_string());
         return;
     }
+    // Activating the view may focus its pane (and docking a NEW pane always
+    // does). The request is a file on disk and `take_ai_request` has no focus
+    // gate, so an unfocused sidebar still does the work — put the user back
+    // where they were instead of yanking them into Source Control mid-edit.
+    let before = focused_pane_id();
     let target = crate::ensure::Mode::Activate(crate::ensure::Target::SourceControl);
     if let Err(e) = crate::ensure::run(target) {
         notify(&format!("{fail_title}{tip}"), &e.to_string());
         return;
     }
+    restore_focus(before);
     notify(
         &format!("{title}{tip}"),
         "Generating the message in Source Control…",
     );
+}
+
+/// The server's focused pane, or `None` when the snapshot is unavailable.
+fn focused_pane_id() -> Option<String> {
+    let list = crate::ipc::call_text("pane.list", serde_json::json!({})).ok()?;
+    let pane = crate::launch::server_focused_pane_id(&list);
+    (!pane.is_empty()).then_some(pane)
+}
+
+/// Which pane to re-focus after a quiet activation, if any.
+///
+/// Focus is only given back when the activation itself took it: the user may
+/// have moved on in the meantime, and a pane that is not ours must never be
+/// overridden. Pure, so the decision is testable without a herdr server.
+pub fn focus_to_restore(
+    before: Option<&str>,
+    now: &str,
+    now_is_sidebar: bool,
+) -> Option<String> {
+    let before = before.filter(|pane| !pane.is_empty())?;
+    if now.is_empty() || now == before || !now_is_sidebar {
+        return None;
+    }
+    Some(before.to_string())
+}
+
+/// Give focus back to `before` when our activation stole it.
+fn restore_focus(before: Option<String>) {
+    let Ok(list) = crate::ipc::call_text("pane.list", serde_json::json!({})) else {
+        return;
+    };
+    let now = crate::launch::server_focused_pane_id(&list);
+    let Some(pane) =
+        focus_to_restore(before.as_deref(), &now, crate::launch::pane_has_token(&list, &now))
+    else {
+        return;
+    };
+    let _ = crate::ipc::call_text("pane.focus", serde_json::json!({ "pane_id": pane }));
 }
 
 /// The tab the commit belongs to: the action's own tab, else the focused pane's.
@@ -477,6 +521,23 @@ mod tests {
             summarize_oco_failure(stdout, ""),
             "OpenCommit is not configured. Run `oco setup` in a terminal to choose an AI provider. Changes are left staged."
         );
+    }
+
+    #[test]
+    fn ai_commit_gives_focus_back_only_when_the_activation_took_it() {
+        // The activation focused our sidebar pane: put the user back.
+        assert_eq!(
+            focus_to_restore(Some("w1:p1"), "w1:p9", true),
+            Some("w1:p1".to_string())
+        );
+        // Focus never moved (the sidebar was already focused, or the view was).
+        assert_eq!(focus_to_restore(Some("w1:p1"), "w1:p1", true), None);
+        // Nothing to restore / no snapshot.
+        assert_eq!(focus_to_restore(None, "w1:p9", true), None);
+        assert_eq!(focus_to_restore(Some(""), "w1:p9", true), None);
+        assert_eq!(focus_to_restore(Some("w1:p1"), "", true), None);
+        // The user moved to a pane that is not ours: never override that.
+        assert_eq!(focus_to_restore(Some("w1:p1"), "w1:p5", false), None);
     }
 
     #[test]
