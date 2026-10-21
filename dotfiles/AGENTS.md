@@ -24,6 +24,7 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 | A Fresh plugin (`dotfiles/config/fresh/plugins/*.ts`) | The *Fresh plugins* section of `docs/herdr-ide.md`; a `plan` line in `dotfiles/install.sh` if it should be checked (`verify.sh` then asserts it); the plugin link loop in `dotfiles/install.sh` picks new `*.ts` files up automatically, but a rerun is still needed |
 | `~/.zshrc` (managed whole-file, like every other config) | `dotfiles/zsh/zshrc`; the *Install* note and the `~/.zshrc.local` gotcha in `docs/herdr-ide.md`. Keep the `~/.zshrc.local` source line above the plugin sources |
 | A script the user runs by name from PATH (`dotfiles/herdr-plugins/ide/bin/*`) | The `for script in …` link list in `dotfiles/install.sh`. Scripts that only herdr runs (manifest `command = ["./bin/…"]`) need no link |
+| What a machine's own copy of a managed file should become | `dotfiles/adopt.sh --apply` puts it back into the repo (`git` is the backup) and re-links, then commit |
 | A Python tool (or a harlequin adapter) | `dotfiles/packages.lock` (`uv` / `uv-with` lines) — never a version in a script; the *Install* note and the adapter gotcha in `docs/herdr-ide.md` |
 | An apt, npm or cargo dependency | `dotfiles/packages.txt` (apt) or the installer step (npm/cargo) in `dotfiles/install.sh` or `docs/install-herdr-ide.sh`; the *Install* section of `docs/herdr-ide.md`; a `plan TOOL` line in `install.sh`, which `verify.sh` asserts |
 | A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; a `plan TOOL` line in `install.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
@@ -59,6 +60,12 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   machine can no longer report a successful install.
 - `verify.sh` is read-only and safe to run any time (`--quiet` = problems only, `--plan` = the
   checklist). Use it instead of hand-checking after a pull.
+- **A user's edit through a managed path IS an edit of the repo file** (symlink), so "sync to the
+  repo" is a plain commit. What breaks it is an atomic save (`sed -i`, `cp`, some editors, Fresh's
+  settings UI) replacing the symlink with a copy — `verify.sh` calls that `is a copy`, and
+  `dotfiles/adopt.sh <path>` diffs the copy against the repo and, with `--apply`, writes it into the
+  repo and re-links. `adopt.sh --list` prints every managed path with its state. Machine-only
+  settings belong in unmanaged files (`~/.zshrc.local`, `~/.config/harlequin/`, `.env`).
 - **Windows has a HOST bootstrap, not a second installer.** `docs/install-herdr-ide.ps1` only does
   what WSL cannot do for itself (distro check, `winget` Windows Terminal + Nerd Font, the
   `herdr.cmd` launcher, unbinding the two Windows Terminal chords) and then runs

@@ -471,6 +471,7 @@ fi
 
 step "done"
 info "open a new shell (or: exec zsh), then run: herdr"
+info "changed a managed file by hand and it stopped being a symlink? dotfiles/adopt.sh <path>"
 info "in a project pane: ctrl+b i -> IDE layout, ctrl+b ? -> all keys"
 [ -d "$BACKUP" ] && info "replaced files are in $BACKUP"
 exit 0

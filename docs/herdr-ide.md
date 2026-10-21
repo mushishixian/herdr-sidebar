@@ -771,6 +771,21 @@ so an install cannot report success on a half-configured machine.
 `verify.sh --quiet` prints only problems (handy as a `git pull` post-step); `--plan` dumps
 the checklist it checks against.
 
+**Your own changes are repo changes.** A managed path is a symlink, so `vim ~/.zshrc` (or editing
+`~/.config/herdr/config.toml` in place) edits `dotfiles/…` directly — commit and push as usual, and
+every other machine picks it up with `git pull`. Nothing needs exporting.
+
+Two things break that loop, both worth knowing:
+
+- **An atomic save replaces the symlink with a copy.** `sed -i`, `cp`, some editors (anything that
+  writes a temp file and renames it) and Fresh's settings UI all do it; from then on that file is
+  the machine's own and pulls stop reaching it. `verify.sh` reports `is a copy, not a symlink`.
+  Fix: `dotfiles/adopt.sh ~/.zshrc` shows the diff between your copy and the repo file, and
+  `--apply` writes your version into the repo (git is the backup) and restores the link — then
+  commit. `adopt.sh --list` shows every managed path as `linked` / `COPY` / `missing`.
+- **Machine-only settings belong nowhere near a managed file.** `~/.zshrc.local` (sourced by the
+  managed rc), `~/.config/harlequin/`, `~/.local/state/…`, `.env` files: not managed, never in git.
+
 ## Gotchas (verified)
 
 - **A harlequin database adapter is not a tool.** `uv tool install harlequin-clickhouse` fails with

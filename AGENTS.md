@@ -2098,6 +2098,8 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   So a new managed artifact needs a `plan` line and nothing else — never a second manifest, never a
   check in `verify.sh` that duplicates one. `docs/install-herdr-ide.sh` ends with this gate and now
   exits non-zero on a half-configured machine (`--dry-run` there forwards to the plan and stops).
+  `dotfiles/adopt.sh <path>` is the way back when a machine's copy drifted (a save that replaced the
+  symlink): it diffs against the repo, then `--apply` writes the copy into the repo and re-links.
   Python tools are pinned in `dotfiles/packages.lock` (`uv`) and installed with `uv tool` — adapters
   are `uv-with` requirements, since an adapter provides no executables of its own.
   On Windows the HOST is set up by `docs/install-herdr-ide.ps1` (distro check, winget Windows
