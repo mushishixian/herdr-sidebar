@@ -14,6 +14,10 @@
 #
 # --lsp is still accepted as a no-op (language servers are the default).
 #
+# On Windows run docs/install-herdr-ide.ps1 instead: it sets up the HOST (Windows
+# Terminal, Nerd Font, the herdr launcher, the two keybinding unbinds) and then
+# calls this script inside the WSL distro.
+#
 # Idempotent: rerun after pulling. Replaced configs go to ~/.dotfiles-backup/<ts>/.
 set -euo pipefail
 
