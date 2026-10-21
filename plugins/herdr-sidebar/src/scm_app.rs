@@ -898,6 +898,46 @@ enum MenuTarget {
     },
 }
 
+/// The Branches drawer's menu, without the pane section.
+///
+/// Pure so the rules are testable: the current branch cannot be deleted; a
+/// remote-tracking ref (`origin/main`) can be neither deleted nor renamed — the
+/// delete used to reach git and come back as "branch not found"; and the
+/// "undo the last commit" shortcut belongs to the CHECKED OUT branch only, since
+/// `git reset --soft HEAD~1` acts on HEAD whatever the selection is.
+fn branch_menu_entries(current: bool, local: bool) -> Vec<MenuEntry> {
+    let mut entries = Vec::new();
+    if current {
+        entries.push(MenuEntry::Action(MenuAction::ShowRef, "Show Tip Commit"));
+        entries.push(MenuEntry::Action(
+            MenuAction::UndoLastCommit,
+            "Undo Last Commit (soft)…",
+        ));
+    } else {
+        entries.push(MenuEntry::Action(MenuAction::Checkout, "Checkout Branch"));
+        entries.push(MenuEntry::Action(
+            MenuAction::MergeInto,
+            "Merge into Current Branch",
+        ));
+        if local {
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::Action(
+                MenuAction::DeleteBranch,
+                "Delete Branch…",
+            ));
+        }
+    }
+    if local {
+        entries.push(MenuEntry::Action(
+            MenuAction::RenameBranch,
+            "Rename Branch…",
+        ));
+    }
+    entries.push(MenuEntry::Separator);
+    entries.push(MenuEntry::Action(MenuAction::CopyRef, "Copy Branch Name"));
+    entries
+}
+
 /// A row that owns no action of its own, with the hint `o` / `m` show for it.
 /// Section headers are keyboard stops (Enter folds them), so a user picks one up
 /// by accident and then presses a file key that used to be silent.
@@ -929,6 +969,11 @@ enum MenuAction {
     Checkout,
     MergeInto,
     DeleteBranch,
+    /// Rename the selected LOCAL branch (current or not) via an input dialog.
+    RenameBranch,
+    /// `git reset --soft HEAD~1` on the current branch: the commit goes, the
+    /// changes stay staged.
+    UndoLastCommit,
     CherryPick,
     Revert,
     ResetHere,
@@ -1036,6 +1081,14 @@ enum Overlay {
     PaneRename {
         input: String,
         /// Ctrl+A: the next edit replaces the whole name (`ui::SelectAll`).
+        select_all: SelectAll,
+    },
+    /// A new name for a local branch ("Rename Branch…"), prefilled with the old
+    /// one so a typo fix does not need retyping the whole name.
+    BranchRename {
+        repo: usize,
+        from: String,
+        input: String,
         select_all: SelectAll,
     },
 }
@@ -1712,6 +1765,17 @@ impl App {
         self.rebuild();
     }
 
+    /// Re-read the drawers and rebuild the list even when `git status` did not
+    /// change. Ref-changing operations (branch delete / rename, checkout, reset,
+    /// merge) leave the working tree exactly as it was, so `refresh()` alone
+    /// returned early and the Branches drawer kept listing a branch that no
+    /// longer existed (found live: `✓ deleted feature`, `feature` still on
+    /// screen).
+    fn refresh_refs(&mut self) {
+        self.reload_expanded_drawers();
+        self.rebuild();
+    }
+
     /// Recount the conflict blocks left in every conflicted (`!`) file and
     /// return whether any of them changed. Cheap: only conflicted entries are
     /// read, on the refresh path (2 s while focused), never per frame.
@@ -2290,7 +2354,11 @@ impl App {
     }
 
     pub fn has_transient_popup(&self) -> bool {
-        self.overlay.is_some() && !matches!(self.overlay, Some(Overlay::PaneRename { .. }))
+        self.overlay.is_some()
+            && !matches!(
+                self.overlay,
+                Some(Overlay::PaneRename { .. }) | Some(Overlay::BranchRename { .. })
+            )
     }
 
     /// Fallback for hosts that don't forward focus reports: while a popup is
@@ -2459,6 +2527,9 @@ impl App {
     /// means the user left that field.
     fn disarm_input_selection(&mut self) {
         if let Some(Overlay::PaneRename { select_all, .. }) = self.overlay.as_mut() {
+            select_all.disarm();
+        }
+        if let Some(Overlay::BranchRename { select_all, .. }) = self.overlay.as_mut() {
             select_all.disarm();
         }
         if let Some(repo) = self.active_repo_mut() {
@@ -2964,18 +3035,17 @@ impl App {
                 MenuEntry::Separator,
                 MenuEntry::Action(MenuAction::CopyRef, "Copy Hash"),
             ],
-            DrawerRef::Branch { current: true, .. } => vec![
-                MenuEntry::Action(MenuAction::ShowRef, "Show Tip Commit"),
-                MenuEntry::Action(MenuAction::CopyRef, "Copy Branch Name"),
-            ],
-            DrawerRef::Branch { current: false, .. } => vec![
-                MenuEntry::Action(MenuAction::Checkout, "Checkout Branch"),
-                MenuEntry::Action(MenuAction::MergeInto, "Merge into Current Branch"),
-                MenuEntry::Separator,
-                MenuEntry::Action(MenuAction::DeleteBranch, "Delete Branch…"),
-                MenuEntry::Separator,
-                MenuEntry::Action(MenuAction::CopyRef, "Copy Branch Name"),
-            ],
+            DrawerRef::Branch { name, current } => {
+                // `git branch -a` also lists remote-tracking refs (`origin/main`):
+                // deleting one ran `git branch -d -- origin/main` and failed with
+                // "branch not found" (user-reported), and renaming one is
+                // meaningless. The menu says which kind it is.
+                let local = self
+                    .repos
+                    .get(self.active)
+                    .is_some_and(|repo| repo.git.is_local_branch(name));
+                branch_menu_entries(*current, local)
+            }
             DrawerRef::Stash(_) => vec![
                 MenuEntry::Action(MenuAction::ShowRef, "Show Changes"),
                 MenuEntry::Separator,
@@ -3031,6 +3101,51 @@ impl App {
             CommitNow(usize),
             Picker(PickerAction),
             PaneRenameConfirmed,
+            BranchRenameConfirmed,
+        }
+
+        /// What the shared name-field handler decided.
+        enum FieldKey {
+            Nothing,
+            Close,
+            Confirm,
+        }
+
+        /// One text field of a dialog: caret-less editing, Ctrl+A = select all,
+        /// Esc drops the selection before it closes. Shared by the pane and
+        /// branch rename dialogs so the two cannot drift.
+        fn field_key(key: KeyEvent, input: &mut String, select_all: &mut SelectAll) -> FieldKey {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let alt = key.modifiers.contains(KeyModifiers::ALT);
+            match key.code {
+                KeyCode::Esc if select_all.armed() => {
+                    select_all.disarm();
+                    FieldKey::Nothing
+                }
+                KeyCode::Esc => FieldKey::Close,
+                KeyCode::Backspace => {
+                    if !take_selected(input, select_all) {
+                        input.pop();
+                    }
+                    FieldKey::Nothing
+                }
+                KeyCode::Char('a') if ctrl && !alt => {
+                    select_all.arm_if_nonempty(!input.is_empty());
+                    FieldKey::Nothing
+                }
+                KeyCode::Char('u') if ctrl && !alt => {
+                    select_all.disarm();
+                    input.clear();
+                    FieldKey::Nothing
+                }
+                KeyCode::Char(c) => {
+                    take_selected(input, select_all);
+                    input.push(c);
+                    FieldKey::Nothing
+                }
+                KeyCode::Enter => FieldKey::Confirm,
+                _ => FieldKey::Nothing,
+            }
         }
         let settings = self.settings_rows();
         let row_count = settings.len();
@@ -3097,39 +3212,17 @@ impl App {
             },
             Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.key(key)),
             Some(Overlay::PaneRename { input, select_all }) => {
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                let alt = key.modifiers.contains(KeyModifiers::ALT);
-                match key.code {
-                    // Esc first drops an armed Ctrl+A selection, then closes.
-                    KeyCode::Esc if select_all.armed() => {
-                        select_all.disarm();
-                        Cmd::Nothing
-                    }
-                    KeyCode::Esc => Cmd::Close,
-                    KeyCode::Backspace => {
-                        // An armed Ctrl+A means "replace it all".
-                        if !take_selected(input, select_all) {
-                            input.pop();
-                        }
-                        Cmd::Nothing
-                    }
-                    KeyCode::Char('a') if ctrl && !alt => {
-                        select_all.arm_if_nonempty(!input.is_empty());
-                        Cmd::Nothing
-                    }
-                    KeyCode::Char('u') if ctrl && !alt => {
-                        select_all.disarm();
-                        input.clear();
-                        Cmd::Nothing
-                    }
-                    KeyCode::Char(c) => {
-                        // Typing over a selection replaces the whole name.
-                        take_selected(input, select_all);
-                        input.push(c);
-                        Cmd::Nothing
-                    }
-                    KeyCode::Enter => Cmd::PaneRenameConfirmed,
-                    _ => Cmd::Nothing,
+                match field_key(key, input, select_all) {
+                    FieldKey::Close => Cmd::Close,
+                    FieldKey::Confirm => Cmd::PaneRenameConfirmed,
+                    FieldKey::Nothing => Cmd::Nothing,
+                }
+            }
+            Some(Overlay::BranchRename { input, select_all, .. }) => {
+                match field_key(key, input, select_all) {
+                    FieldKey::Close => Cmd::Close,
+                    FieldKey::Confirm => Cmd::BranchRenameConfirmed,
+                    FieldKey::Nothing => Cmd::Nothing,
                 }
             }
             Some(Overlay::ConfirmDiscard { repo, entry }) => match key.code {
@@ -3200,6 +3293,11 @@ impl App {
             Cmd::PaneRenameConfirmed => {
                 if let Some(Overlay::PaneRename { input, .. }) = self.overlay.take() {
                     self.confirm_pane_rename(&input);
+                }
+            }
+            Cmd::BranchRenameConfirmed => {
+                if let Some(Overlay::BranchRename { repo, from, input, .. }) = self.overlay.take() {
+                    self.confirm_branch_rename(repo, from, input);
                 }
             }
         }
@@ -4100,6 +4198,22 @@ impl App {
                 format!("Drop {spec}?"),
                 vec!["stash".into(), "drop".into(), "--".into(), spec],
             ),
+            MenuAction::RenameBranch => {
+                if matches!(dref, DrawerRef::Branch { .. }) {
+                    self.overlay = Some(Overlay::BranchRename {
+                        repo,
+                        from: spec.clone(),
+                        input: spec.clone(),
+                        select_all: SelectAll::default(),
+                    });
+                }
+            }
+            MenuAction::UndoLastCommit => self.confirm_git(
+                repo,
+                "Undo last commit",
+                format!("Undo the last commit on '{spec}'? Its changes stay staged."),
+                vec!["reset".into(), "--soft".into(), "HEAD~1".into()],
+            ),
             MenuAction::DeleteTag => self.confirm_git(
                 repo,
                 "Delete tag",
@@ -4122,6 +4236,8 @@ impl App {
             Err(e) => self.flash = Some((e, true)),
         }
         self.refresh();
+        // The command may have moved refs without touching the status.
+        self.refresh_refs();
     }
 
     /// Open the y/N dialog for a git command: `title` names the action on the
@@ -4133,6 +4249,27 @@ impl App {
             prompt,
             args,
         });
+    }
+
+    /// Rename a local branch from the Branches drawer — any of them, not only the
+    /// checked-out one — reporting git's own refusal verbatim.
+    fn confirm_branch_rename(&mut self, repo: usize, from: String, new: String) {
+        let new = new.trim().to_string();
+        if new.is_empty() || new == from {
+            return;
+        }
+        let Some(git) = self.repos.get(repo).map(|r| r.git.clone()) else {
+            self.flash = Some(("repository is gone".to_string(), true));
+            return;
+        };
+        match git.rename_branch(&from, &new) {
+            Ok(()) => {
+                self.flash = Some((format!("renamed {from} -> {new}"), false));
+                self.refresh();
+                self.refresh_refs();
+            }
+            Err(error) => self.flash = Some((error, true)),
+        }
     }
 
     /// The confirmed non-forcing delete. Unmerged commits are the one refusal
@@ -4150,10 +4287,12 @@ impl App {
             Ok(()) => {
                 self.flash = Some((format!("deleted {branch}"), false));
                 self.refresh();
+                self.refresh_refs();
             }
             Err(DeleteRefused::Failed(error)) => {
                 self.flash = Some((error, true));
                 self.refresh();
+                self.refresh_refs();
             }
             Err(DeleteRefused::NotMerged) => self.confirm_git(
                 repo,
@@ -5463,6 +5602,7 @@ impl App {
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
             Some(Overlay::Settings { .. }) => self.draw_settings(frame),
             Some(Overlay::PaneRename { .. }) => self.draw_pane_rename(frame),
+            Some(Overlay::BranchRename { .. }) => self.draw_branch_rename(frame),
             Some(Overlay::ConfirmDiscard { .. })
             | Some(Overlay::ConfirmDiscardAll { .. })
             | Some(Overlay::ConfirmGit { .. }) => self.draw_confirm(frame),
@@ -5515,6 +5655,19 @@ impl App {
         herdr_sidebar::ui::draw_input_dialog(
             frame,
             "Rename pane",
+            input.as_str(),
+            select_all.armed(),
+        );
+    }
+
+    /// The branch-rename field, drawn like the pane-rename one.
+    fn draw_branch_rename(&mut self, frame: &mut Frame) {
+        let Some(Overlay::BranchRename { input, select_all, .. }) = self.overlay.as_ref() else {
+            return;
+        };
+        herdr_sidebar::ui::draw_input_dialog(
+            frame,
+            "Rename branch",
             input.as_str(),
             select_all.armed(),
         );
@@ -7174,6 +7327,38 @@ mod tests {
         // An unreadable file keeps git's plain letter: never claim "resolved".
         assert_eq!(status_marker('!', None).0, "!");
         assert_eq!(status_marker('M', None).0, "M");
+    }
+
+    #[test]
+    fn a_remote_tracking_branch_offers_no_delete_or_rename() {
+        fn labels(entries: &[MenuEntry]) -> Vec<&'static str> {
+            entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    MenuEntry::Action(_, label) => Some(*label),
+                    MenuEntry::Separator => None,
+                })
+                .collect()
+        }
+
+        // The checked-out local branch: rename and undo, never delete.
+        let current = labels(&branch_menu_entries(true, true));
+        assert!(!current.iter().any(|l| l.starts_with("Delete")), "{current:?}");
+        assert!(current.iter().any(|l| l.starts_with("Rename")), "{current:?}");
+        assert!(current.iter().any(|l| l.starts_with("Undo")), "{current:?}");
+
+        // Another local branch: delete + rename, no undo (that one is HEAD's).
+        let other = labels(&branch_menu_entries(false, true));
+        assert!(other.iter().any(|l| l.starts_with("Delete")), "{other:?}");
+        assert!(other.iter().any(|l| l.starts_with("Rename")), "{other:?}");
+        assert!(!other.iter().any(|l| l.starts_with("Undo")), "{other:?}");
+
+        // A remote-tracking ref (`origin/main`): neither, which is the bug that
+        // reported "branch not found" after choosing Delete.
+        let remote = labels(&branch_menu_entries(false, false));
+        assert!(!remote.iter().any(|l| l.starts_with("Delete")), "{remote:?}");
+        assert!(!remote.iter().any(|l| l.starts_with("Rename")), "{remote:?}");
+        assert!(remote.contains(&"Copy Branch Name"), "{remote:?}");
     }
 
     #[test]

@@ -530,6 +530,25 @@ impl Git {
     }
 
     /// Local + remote branches, the current one first and starred.
+    /// Whether `name` is a LOCAL branch.
+    ///
+    /// `git branch -a` (what the Branches drawer lists) also yields
+    /// remote-tracking refs such as `origin/main`, and `git branch -d origin/main`
+    /// fails with "branch not found" — the drawer has to tell them apart before
+    /// offering a delete or a rename.
+    pub fn is_local_branch(&self, name: &str) -> bool {
+        run_in(
+            &self.root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{name}"),
+            ],
+        )
+        .is_ok()
+    }
+
     pub fn branches(&self) -> Result<Vec<String>, String> {
         lines(run_in(
             &self.root,

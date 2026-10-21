@@ -1177,6 +1177,20 @@ HACKING.md — budget time for that before promising a patched build.
   for a file row now, because a click no longer opens a diff document to pin.
   A row that owns no action — a section header, a repository header, the commit box — used to
   swallow `o`/`m` silently, which reads as a broken key: `section_row_hint` flashes what to do.
+- **The Branches drawer tells local branches from remote-tracking refs.** `git branch -a` lists
+  `origin/main` too, and the menu used to offer it a Delete that ran `git branch -d -- origin/main`
+  and came back "branch not found" (user-reported). `branch_menu_entries(current, local)` is now the
+  single, pure (unit-tested) rule set: `Git::is_local_branch` decides `local` (`rev-parse --verify
+  --quiet refs/heads/<name>`); a remote-tracking ref can neither be deleted nor renamed; the CURRENT
+  branch cannot be deleted; **Rename Branch…** (any local branch, `Git::rename_branch` through a
+  prefilled input dialog) and **Undo Last Commit (soft)…** (`reset --soft HEAD~1`, current branch
+  only, since it acts on HEAD whatever is selected) are offered instead. `o`-style confirmation still
+  goes through `Overlay::ConfirmGit`.
+- **A ref-changing git command changes no file, so `refresh()` alone leaves the drawers stale.**
+  `refresh()` early-returns when `git status` is unchanged (that is what keeps the 2 s poll cheap),
+  and a branch delete / rename / checkout / reset leaves the working tree as it was — live symptom:
+  `✓ deleted feature` with `feature` still listed. Every such path (delete, rename, `run_git`) now
+  also calls `refresh_refs()` (reload drawers + rebuild) so the list matches git immediately.
 - **Git drawers** (title-case names, incl. Worktrees): drawer lines carry parsed
   refs (`DrawerRef` — commit hash / stash index / branch / remote / tag / worktree path,
   see `parse_drawer_ref`). Click or ⏎ shows the ref
