@@ -76,6 +76,13 @@ fn sync_is_primary(status: &Status) -> bool {
         && status.ahead + status.behind > 0
 }
 
+/// A conflicted (`!`) entry is resolved in the editor, not in the diff viewer.
+/// The diff would only say "this file conflicts"; Fresh's inline merge resolver
+/// (Alt+C / Alt+I / Alt+M, Alt+D next) is what actually resolves it.
+fn opens_in_editor(entry: &FileEntry) -> bool {
+    entry.letter == '!'
+}
+
 fn sync_label_for_status(status: &Status, syncing: bool) -> Option<String> {
     if syncing {
         return Some(format!("{} Syncing…", sync_glyph(true)));
@@ -2357,7 +2364,7 @@ impl App {
             KeyCode::Char('A') => self.suggest_message(),
             KeyCode::Char('s') => self.open_settings(),
             KeyCode::Char('S') => self.sync_changes(),
-            KeyCode::Char('o') => self.open_selected_diff(),
+            KeyCode::Char('o') => self.open_selected_entry(),
             KeyCode::Char('m') => self.open_menu_for_selection(),
             KeyCode::Char('b') => self.hide(),
             KeyCode::Char('1') => return self.switch_to(View::Explorer),
@@ -2521,8 +2528,9 @@ impl App {
                         }
                     }
                 }
-                // Clicking a changed file shows its diff, like VS Code. Hover
-                // actions open, discard, stage, or unstage that exact entry.
+                // Clicking a changed file shows its diff, like VS Code — except
+                // a conflicted one, which opens in the editor to be resolved.
+                // Hover actions open, discard, stage, or unstage that exact entry.
                 Row::Staged(r, i) => {
                     self.focus = Focus::List;
                     self.select(index);
@@ -2531,7 +2539,7 @@ impl App {
                             .then(|| file_hover_action_at(x, self.last_width, true))
                             .flatten()
                         {
-                            Some(FileHoverAction::Open) => self.open_diff(r, &entry, true),
+                            Some(FileHoverAction::Open) => self.open_entry(r, &entry, true),
                             Some(FileHoverAction::Unstage) => {
                                 if let Err(error) = self.repos[r].git.unstage(&entry) {
                                     self.flash = Some((error, true));
@@ -2541,7 +2549,7 @@ impl App {
                             _ if double && self.pin_if_open(index) => {
                                 // pinned the first click's tab
                             }
-                            _ => self.open_diff(r, &entry, true),
+                            _ => self.open_entry(r, &entry, true),
                         }
                     }
                 }
@@ -2553,7 +2561,7 @@ impl App {
                             .then(|| file_hover_action_at(x, self.last_width, false))
                             .flatten()
                         {
-                            Some(FileHoverAction::Open) => self.open_diff(r, &entry, false),
+                            Some(FileHoverAction::Open) => self.open_entry(r, &entry, false),
                             Some(FileHoverAction::Discard) => {
                                 self.overlay = Some(Overlay::ConfirmDiscard { repo: r, entry });
                             }
@@ -2566,7 +2574,7 @@ impl App {
                             _ if double && self.pin_if_open(index) => {
                                 // pinned the first click's tab
                             }
-                            _ => self.open_diff(r, &entry, false),
+                            _ => self.open_entry(r, &entry, false),
                         }
                     }
                 }
@@ -4107,12 +4115,43 @@ impl App {
     /// mode, on click) the file opens in that editor with
     /// `HERDR_SIDEBAR_OPEN_DIFF=1`; otherwise, or when the editor cannot be
     /// launched, the diff goes to the preview pane.
+    /// The default action on a changed file (click, hover "open", `o`). A
+    /// conflicted file opens in the editor so Fresh's inline merge resolver can
+    /// take over; anything else shows the read-only diff preview.
+    fn open_entry(&mut self, repo: usize, entry: &FileEntry, staged: bool) {
+        if !opens_in_editor(entry) {
+            self.open_diff(repo, entry, staged);
+            return;
+        }
+        let Some(root) = self.repos.get(repo).map(|r| r.git.root().to_path_buf()) else {
+            return;
+        };
+        let pane_id = self.pane_ctl.as_ref().map(|c| c.pane_id.clone());
+        let file = root.join(&entry.path);
+        // A conflict can also be a deletion ("deleted by them"): there is no
+        // file to resolve in the editor, so that case keeps the diff.
+        if !file.exists() {
+            self.open_diff(repo, entry, staged);
+            return;
+        }
+        if let Err(error) = herdr_sidebar::file_popup::open_file_in_workspace(
+            pane_id.as_deref(),
+            &root,
+            &file,
+            None,
+        ) {
+            self.flash = Some((error, true));
+        }
+    }
+
     /// Show a changed file's diff. This is READ-ONLY viewing, so it always uses
     /// the built-in preview: routing it to the custom editor made "look at this
     /// diff" hand the file to the editor instead, where nothing (or a live-diff
     /// overlay that needs its own plugin) appeared, and the preview it displaced
     /// had to be closed again (user-reported). Opening a FILE - tree click, Quick
     /// Open, a search hit - still goes to the editor when one is configured.
+    /// A conflicted entry never reaches here from a click or `o` (see
+    /// `open_entry`): it opens in the editor so Fresh can resolve the merge.
     fn open_diff(&mut self, repo: usize, entry: &FileEntry, staged: bool) {
         self.open_diff_viewer(repo, entry, staged);
     }
@@ -4337,20 +4376,21 @@ impl App {
         saved
     }
 
-    /// `o`: open the diff for the currently selected file row.
-    fn open_selected_diff(&mut self) {
+    /// `o` on the selected file row: the same routing a click uses, so a
+    /// conflicted file opens in the editor and everything else as a diff.
+    fn open_selected_entry(&mut self) {
         let Some(&row) = self.selected.and_then(|i| self.rows.get(i)) else {
             return;
         };
         match row {
             Row::Staged(r, i) => {
                 if let Some(entry) = self.repos[r].status.staged.get(i).cloned() {
-                    self.open_diff(r, &entry, true);
+                    self.open_entry(r, &entry, true);
                 }
             }
             Row::Unstaged(r, i) => {
                 if let Some(entry) = self.repos[r].status.unstaged.get(i).cloned() {
-                    self.open_diff(r, &entry, false);
+                    self.open_entry(r, &entry, false);
                 }
             }
             _ => {}
@@ -6745,6 +6785,28 @@ fn same_path(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflicted_entries_open_in_the_editor_and_the_rest_as_diffs() {
+        let conflicted = FileEntry {
+            path: "src/merge.rs".into(),
+            orig: None,
+            letter: '!',
+        };
+        let modified = FileEntry {
+            path: "src/lib.rs".into(),
+            orig: None,
+            letter: 'M',
+        };
+        let untracked = FileEntry {
+            path: "new.rs".into(),
+            orig: None,
+            letter: 'U',
+        };
+        assert!(opens_in_editor(&conflicted));
+        assert!(!opens_in_editor(&modified));
+        assert!(!opens_in_editor(&untracked));
+    }
 
     #[test]
     fn max_scroll_is_zero_when_everything_fits() {

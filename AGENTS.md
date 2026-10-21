@@ -1060,6 +1060,11 @@ HACKING.md — budget time for that before promising a patched build.
   the Fresh plugin still exists, just unreached). **Opening a FILE** — tree click, Quick Open, a
   search hit — still goes to the editor, and that launch closes the tab's inline preview first
   (`actions::spawn_inline_editor` → `viewer::close_in_tab`) so the two do not stack.
+  **The one exception is a conflicted (`!`) entry**: `open_entry` (scm_app, the click /
+  hover-open / `o` router) sends it to `file_popup::open_file_in_workspace` — the editor —
+  because a diff cannot resolve anything, while Fresh's inline resolver is what does
+  (Alt+C / Alt+I / Alt+M). A conflict that is a pure deletion has no file to open and keeps
+  the diff; the context menu's explicit "Open Diff" still means diff.
 - **Title-bar action buttons** (`ui.rs` `TitleAction`/`title_action_spans`): VS Code-style
   hover buttons at the header's top-right (Explorer: New File / New Folder / Refresh /
   Collapse All; SCM: Refresh / Collapse All), left of the standalone ⚙. Terminals emit NO
@@ -1443,7 +1448,9 @@ It replaced the original pane-ID-keyed park/restore implementation; the optional
 
 - Clicking a changed file in Source Control (or `o`, or the context menu's Open Diff)
   shows its colored `git diff` in a preview tab, the same way the explorer opens
-  files: the control file carries typed requests (`file/<path>` /
+  files — except a conflicted (`!`) row, which a click or `o` opens in the editor so
+  Fresh's inline merge resolver (Alt+C / Alt+I / Alt+M) can resolve it; the diff is
+  still reachable from the context menu. The control file carries typed requests (`file/<path>` /
   `diff/<root>/<rel>/<kind>`, tab-separated), diffs render VS Code-style via the
   in-crate `diffview.rs` — OUR parse of plain `git diff` (dual old/new gutters,
   full-width red/green row tints, darker word-level tint on paired changed lines,
