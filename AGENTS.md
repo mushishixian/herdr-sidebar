@@ -2129,9 +2129,18 @@ own. Verified live on herdr 0.9.5 while choosing the placement — these are har
   `Database`-labelled pane in the workspace first and only opens a new tab when there is none.
 - **`plugin pane open --placement tab` triggers our own `tab.created` hook**, which docks a
   sidebar into the new tab. In a full-width GUI tab that is a 32-column strip, so `herdr-db`
-  writes the sidebar's per-tab snooze marker itself (`<plugin state dir>/snooze/<ws>_<tab>`, the
-  empty-file format `src/snooze.rs` uses for «) and then closes the copy that already docked by
-  sending it Ctrl+Q. Best effort: worst case the sidebar comes back on the next focus.
+  writes the sidebar's per-tab snooze marker itself and closes the copy that already docked by
+  sending it Ctrl+Q, on EVERY press (a dock that slipped through is cleaned up on the way back
+  in). Three details, all found the hard way live:
+  - the marker is an empty file named after the tab (`:` → `_`) in **the SIDEBAR plugin's**
+    state dir, `${XDG_STATE_HOME:-~/.local/state}/herdr/plugins/herdr-sidebar/snooze/`.
+    `$HERDR_PLUGIN_STATE_DIR` is the CALLING plugin's dir — in a `dotfiles-ide` action it names
+    `plugins/dotfiles-ide`, and markers written there are never read (symptom: the db tab got an
+    explorer pane again on the next focus, and a stray `dotfiles-ide/snooze/` appeared).
+  - that directory must be **0700**: `snooze::is_set` first demands `rundir::is_private`, so a
+    `mkdir -p` with a normal umask makes every marker in it invisible.
+  - the hook honors the marker only on its quiet path (`else if !snooze::is_set(…)`), i.e. an
+    ordinary focus dock; an explicit toggle/activate still opens one.
 
 Connection discovery lives in ONE place, `db-pane` (`--print` = the argv, `--summary` = one human
 line): `DATABASE_URL`/`DB_URL` from `.env.local` → `.env` → environment, then Laravel

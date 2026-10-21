@@ -20,6 +20,35 @@ bin=$(cd -- "$(dirname -- "$0")" && pwd)
 DB_LABEL=Database
 ACTION=dotfiles-ide.db
 
+# The herdr-sidebar plugin's OWN state dir. NOT $HERDR_PLUGIN_STATE_DIR: in a
+# dotfiles-ide action that names DOTFILES-IDE's dir, and the sidebar reads its
+# snooze markers from its own (`src/state.rs` prefers the env var, so the two
+# must not be confused — writing to the wrong one made the sidebar re-dock into
+# the db tab on the next focus).
+sidebar_state=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr-sidebar
+snooze_dir=$sidebar_state/snooze
+
+# Keep the db tab a database tab: snooze the sidebar for it (the same empty-file
+# marker the sidebar's « button writes, `src/snooze.rs`) and close any explorer
+# that already docked — the tab.created hook docks one into every new tab, and a
+# 32-column strip next to a full-width GUI is not what was asked for.
+drop_sidebar_in_tab() { # tab
+  local tab=$1 side i
+  [ -n "$tab" ] || return 0
+  # 0700 or the sidebar ignores the directory outright (`snooze::is_set` demands
+  # `rundir::is_private`), which is how a marker written here would silently do
+  # nothing on a machine where this dir did not exist yet.
+  mkdir -p "$snooze_dir" 2>/dev/null
+  chmod 700 "$snooze_dir" 2>/dev/null
+  : >"$snooze_dir/${tab//:/_}" 2>/dev/null
+  for i in 1 2 3 4 5 6; do
+    side=$(pane_with_label "$tab" Sidebar)
+    [ -n "$side" ] || return 0
+    "$HERDR" pane send-keys "$side" ctrl+q >/dev/null 2>&1
+    sleep 0.4
+  done
+}
+
 [ -n "${cur_ws:-}" ] || die "no workspace context — bind this to a herdr key"
 
 # The project the user is looking at: the caller pane's live cwd, not a stored one.
@@ -41,6 +70,9 @@ if [ -n "$existing" ]; then
   if ! "$HERDR" plugin pane focus "$existing" >/dev/null 2>&1; then
     focus_pane "$existing"
   fi
+  # A dock that slipped through before the marker existed (or before it was
+  # written) is cleaned up on the way back in, not left for the user to close.
+  drop_sidebar_in_tab "$(pane_field "$existing" tab_id)"
   exit 0
 fi
 
@@ -61,21 +93,7 @@ tab=$(pane_field "$pane" tab_id)
 
 # The new tab is `db`, not herdr's generated number.
 [ -n "$tab" ] && "$HERDR" tab rename "$tab" db >/dev/null 2>&1
-# The sidebar's tab.created hook docks an explorer into every new tab. In the DB
-# tab that is a 32-column strip next to a full-width GUI, so snooze it exactly
-# like the sidebar's own « button does (`src/snooze.rs`: one empty file per tab
-# under the plugin's state dir) and close the copy that already docked. Both are
-# best effort — the worst case is the sidebar coming back on the next focus.
-snooze="${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr-sidebar}/snooze"
-if [ -n "$tab" ]; then
-  mkdir -p "$snooze" 2>/dev/null && : >"$snooze/${tab//:/_}" 2>/dev/null
-  for _ in 1 2 3 4 5; do
-    side=$(pane_with_label "$tab" Sidebar)
-    [ -n "$side" ] || break
-    "$HERDR" pane send-keys "$side" ctrl+q >/dev/null 2>&1
-    sleep 0.4
-  done
-fi
+drop_sidebar_in_tab "$tab"
 
 if [ -n "$summary" ]; then
   tip "Database · $summary" "$ACTION"
