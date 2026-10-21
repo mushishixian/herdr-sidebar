@@ -17,20 +17,42 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 
 | When you change | Also update |
 |---|---|
-| A herdr key binding (`dotfiles/config/herdr/config.toml`) | The herdr key table in `docs/herdr-ide.md` (*Keys → herdr, global*); the verify list in `docs/install-herdr-ide.sh` if the action is one it should check. This file AND `config/herdr/scripts/` are installer symlinks into `~/.config/herdr/`: never edit the `~/.config` copies, a pull cannot reach them |
+| A herdr key binding (`dotfiles/config/herdr/config.toml`) | The herdr key table in `docs/herdr-ide.md` (*Keys → herdr, global*); a check `dotfiles/verify.sh` can make (it asserts the keymap's script references and `herdr config check`). This file AND `config/herdr/scripts/` are installer symlinks into `~/.config/herdr/`: never edit the `~/.config` copies, a pull cannot reach them |
 | A script under `config/herdr/scripts/` (a keymap popup runs `bash ~/.config/herdr/scripts/<name>.sh`) | Keep it plain bash (`bash -n`) with `~`/`$HOME` paths, never a hardcoded `/home/<user>`, or another machine's copy breaks. Record or drop its binding in the key table of `docs/herdr-ide.md`. Add scripts to this directory, not to `~/.config`: the installer symlinks the whole directory |
-| A herdr action or plugin entry point | The manifest that owns it (`plugins/herdr-sidebar/herdr-plugin.toml` or `dotfiles/herdr-plugins/ide/herdr-plugin.toml`); for a sidebar action with a keybinding, the flag mapping in `announce_flag` in `plugins/herdr-sidebar/src/shortcut_tip.rs` so its toast shows the key; the verify list in `docs/install-herdr-ide.sh` |
+| A herdr action or plugin entry point | The manifest that owns it (`plugins/herdr-sidebar/herdr-plugin.toml` or `dotfiles/herdr-plugins/ide/herdr-plugin.toml`); for a sidebar action with a keybinding, the flag mapping in `announce_flag` in `plugins/herdr-sidebar/src/shortcut_tip.rs` so its toast shows the key; a `plan PLUGIN`/`plan TOOL` line so `verify.sh` asserts it |
 | A Fresh key binding (`dotfiles/config/fresh/config.json`) | The Fresh key table in `docs/herdr-ide.md` (*Keys → Fresh*); the `fresh config show` grep list in `docs/install-herdr-ide.sh` |
-| A Fresh plugin (`dotfiles/config/fresh/plugins/*.ts`) | The *Fresh plugins* section of `docs/herdr-ide.md`; `docs/install-herdr-ide.sh` verify list if it should be checked; the plugin link loop in `dotfiles/install.sh` picks new `*.ts` files up automatically, but a rerun is still needed |
+| A Fresh plugin (`dotfiles/config/fresh/plugins/*.ts`) | The *Fresh plugins* section of `docs/herdr-ide.md`; a `plan` line in `dotfiles/install.sh` if it should be checked (`verify.sh` then asserts it); the plugin link loop in `dotfiles/install.sh` picks new `*.ts` files up automatically, but a rerun is still needed |
 | A script the user runs by name from PATH (`dotfiles/herdr-plugins/ide/bin/*`) | The `for script in …` link list in `dotfiles/install.sh`. Scripts that only herdr runs (manifest `command = ["./bin/…"]`) need no link |
-| An apt, npm or cargo dependency | `dotfiles/packages.txt` (apt) or the installer step (npm/cargo) in `dotfiles/install.sh` or `docs/install-herdr-ide.sh`; the *Install* section of `docs/herdr-ide.md`; a check in the verify step |
-| A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; the verify list in `docs/install-herdr-ide.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
+| An apt, npm or cargo dependency | `dotfiles/packages.txt` (apt) or the installer step (npm/cargo) in `dotfiles/install.sh` or `docs/install-herdr-ide.sh`; the *Install* section of `docs/herdr-ide.md`; a `plan TOOL` line in `install.sh`, which `verify.sh` asserts |
+| A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; a `plan TOOL` line in `install.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
 | A sidebar setting default | `dotfiles/herdr-sidebar/state.json`, and the *Sidebar defaults* paragraph in `docs/herdr-ide.md` (*herdr-sidebar fork*) |
 | Anything the sidebar (Rust) and the dotfiles scripts share (env vars such as `HERDR_SIDEBAR_OPEN_DIFF`, `HERDR_SIDEBAR_PREVIEW_HOSTED`, `FRESH_IDE_DAEMON`, `DOTFILES_IDE_BIN`; pane tokens such as `fresh_daemon`, `hs-preview-host`; request files such as the AI-commit request, the live-diff request, `preview-host/<pane>.req` and the dock-suppression stamp `<herdr-sidebar state dir>/dock/restore.stamp` that `ide-save-sizes` reads; `editor-command.txt`; the sidebar's `state.json` read at build time for `terminal_height` and `agent_width`) | Both sides in the same change. Document the contract in the root `AGENTS.md` (Rust side) and in `docs/herdr-ide.md` |
-| The CodeBuddy hook (`config/codebuddy/hooks/herdr-agent-state.sh`, the `codebuddy_hooks` merge in `install.sh`, the hook events it installs) | The *Which space's agent is busy* section and the Troubleshooting row of `docs/herdr-ide.md`; the verify list in `docs/install-herdr-ide.sh`; the `codebuddy` bullet in the repo `AGENTS.md`. Keep the merge limited to entries naming that script: everything else in `~/.codebuddy/settings.json` belongs to the user |
+| The CodeBuddy hook (`config/codebuddy/hooks/herdr-agent-state.sh`, the `codebuddy_hooks` merge in `install.sh`, the hook events it installs) | The *Which space's agent is busy* section and the Troubleshooting row of `docs/herdr-ide.md`; `verify.sh`'s codebuddy block; the `codebuddy` bullet in the repo `AGENTS.md`. Keep the merge limited to entries naming that script: everything else in `~/.codebuddy/settings.json` belongs to the user |
 | Pane labels `Fresh`, `Terminal`, `Agent`, or the plugin id `dotfiles-ide` | Do not rename them: scripts, state dirs and key bindings look them up. Show new display text through a metadata title (`pane report-metadata --title`) |
 | Any user-visible behaviour | `docs/herdr-ide.md`: the feature section, *Keys* and *Troubleshooting*; the fork commit table (*herdr-sidebar fork*): its `*uncommitted*` row until the user commits, then the hash |
-| Install, upgrade or migration behaviour | `docs/install-herdr-ide.sh` (and its `--help` text, the `sed -n '2,11p'` header) and `dotfiles/install.sh` (its `--help` header, `sed -n '2,14p'`); the *Install*, *Migrating* and *Updating* sections of `docs/herdr-ide.md` |
+| Install, upgrade or migration behaviour | `docs/install-herdr-ide.sh` (and its `--help` text, the `sed -n '2,14p'` header) and `dotfiles/install.sh` (its `--help` header, `sed -n '2,16p'`); the *Install*, *Migrating* and *Updating* sections of `docs/herdr-ide.md` |
+
+## Installer contract (dry run, plan, verify)
+
+`dotfiles/install.sh` is the ONE installer, and it is **declarative about what it manages**:
+
+- `--dry-run` changes nothing (no link, no package, no plugin registration, no server reload).
+- Every artifact it is responsible for is announced with `plan KIND fields…`, printed as
+  `PLAN<TAB>KIND<TAB>…`: `LINK dest src`, `GENERATED path`, `STATE path`, `EDITOR-COMMAND value`,
+  `TOOL cmd`, `PLUGIN id path`, `INTEGRATION agent`, `GIT-INCLUDE path` (and `UVTOOL` when uv
+  tools land).
+- `dotfiles/verify.sh` runs `install.sh --dry-run` and then **checks the real machine against
+  those lines**: symlink targets (a plain copy is drift — `git pull` would not reach it), tools
+  (herdr/fresh/zsh/git/jq are failures, everything else warns), plugin registrations, agent-state
+  integrations, the gitconfig include, the seeded sidebar `state.json` keys, and the keymap
+  itself (binding count, `herdr config check`, and every `scripts/*.sh` the keymap runs must
+  exist in this repo). Exit 1 means the machine is not what the repo describes.
+- Therefore: **never add a link/tool/plugin to the installer without a `plan` line, and never
+  add a check to `verify.sh` that duplicates one** — the plan IS the checklist, so the two
+  cannot drift. `docs/install-herdr-ide.sh` ends with `verify.sh` as its gate; a half-configured
+  machine can no longer report a successful install.
+- `verify.sh` is read-only and safe to run any time (`--quiet` = problems only, `--plan` = the
+  checklist). Use it instead of hand-checking after a pull.
 
 ## Verify before you finish
 
@@ -38,8 +60,9 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   `docs/install-herdr-ide.sh`). The zsh hook (`shell/agent-title.zsh`) gets `zsh -n`.
 - Rust (only if `plugins/herdr-sidebar` changed): from `plugins/herdr-sidebar`, run
   `cargo build --release && cargo test && cargo clippy -- -D warnings`.
-- Installer: run only the read-only verify part when you need it. Do not run the full install, and do not
-  run `dotfiles/install.sh` on the user's machine unless they ask.
+- Installer: `dotfiles/install.sh --dry-run` and `dotfiles/verify.sh` are read-only and expected after a
+  change to this layer. Do not run the full install, and do not run `dotfiles/install.sh` on the user's
+  machine unless they ask.
 - Live tests: only in throwaway herdr tabs (`herdr tab create --no-focus …`), closed afterwards.
   Never restart, kill or rename the user's own `ide-*` Fresh daemons. Use a throwaway daemon name for tests.
 - After deploying sidebar changes: `herdr plugin action invoke herdr-sidebar.redeploy` (or rebuild with

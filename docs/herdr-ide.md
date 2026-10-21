@@ -66,8 +66,12 @@ repo to fetch.
 ```bash
 git clone https://github.com/mushishixian/herdr-siderbar.git ~/code/herdr-sidebar
 cd ~/code/herdr-sidebar
-docs/install-herdr-ide.sh            # --help for options (--no-lsp, --no-packages, --no-claude, --no-oco)
+docs/install-herdr-ide.sh            # --help for options (--no-lsp, --no-packages, --no-claude, --no-oco, --dry-run)
 ```
+
+`--dry-run` prints the whole plan (links, tools, plugins, integrations) and stops; the installer
+then ends with `dotfiles/verify.sh`, which fails the run if the machine does not match the repo
+afterwards. See *Syncing a machine with the repo* below.
 
 Language servers are installed by default (`dotfiles/install-lsp.sh`, see
 *Language servers (LSP)*). `--no-lsp` skips them; `--no-packages` also skips their apt step.
@@ -712,6 +716,31 @@ There is no patch set to maintain: the fork and the dotfiles are one repo, so an
 normal git merge and `build.sh` builds whatever is checked out. A machine that gets this branch gets the
 full feature set, including the file-search popup, git pull / push / AI commit, the search and replace
 popups, and conflict routing.
+## Syncing a machine with the repo
+
+Every path this workbench uses is a **symlink into this repo** (configs, the herdr keymap
+`config/herdr/config.toml` + its `scripts/` directory, the Fresh plugins, `~/.local/bin`
+helpers), so `git pull` reaches a machine the moment the installer has run once. Two
+commands keep that honest:
+
+```bash
+dotfiles/install.sh --dry-run   # the plan: links, tools, plugins, integrations — changes nothing
+dotfiles/verify.sh              # is THIS machine really what the repo describes? exit 1 if not
+```
+
+`verify.sh` is read-only and builds its checklist from the `PLAN` lines that
+`install.sh --dry-run` prints, so there is no second manifest to keep in sync: adding a
+link, tool, plugin, integration or generated file to `install.sh` is what makes it
+verified. It checks, in order: every symlink (a plain copy counts as drift — a `git
+pull` would not reach it), tools on PATH (herdr/fresh/zsh/git/jq are failures, the rest
+warnings), plugin registrations, herdr agent-state integrations, the global gitconfig
+include, the seeded sidebar `state.json` keys, and the keymap itself — binding count,
+`herdr config check`, and that **every script the keymap runs exists in
+`dotfiles/config/herdr/scripts/`**. `docs/install-herdr-ide.sh` ends with this same gate,
+so an install cannot report success on a half-configured machine.
+
+`verify.sh --quiet` prints only problems (handy as a `git pull` post-step); `--plan` dumps
+the checklist it checks against.
 
 ## Gotchas (verified)
 

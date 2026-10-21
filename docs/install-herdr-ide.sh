@@ -6,7 +6,11 @@
 #   docs/install-herdr-ide.sh --no-packages   skip apt (passed to dotfiles)
 #   docs/install-herdr-ide.sh --no-claude     skip the Claude Code hook (passed to dotfiles)
 #   docs/install-herdr-ide.sh --no-oco        skip OpenCommit (oco) for the AI commit key
+#   docs/install-herdr-ide.sh --dry-run       print what dotfiles/install.sh would do, then stop
 #   docs/install-herdr-ide.sh -h|--help       this text
+#
+# Ends with dotfiles/verify.sh: the run only succeeds if the machine really matches
+# the repo afterwards (links, tools, plugins, integrations, keymap scripts).
 #
 # --lsp is still accepted as a no-op (language servers are the default).
 #
@@ -16,7 +20,7 @@ set -euo pipefail
 BIN="$HOME/.local/bin"
 export PATH="$BIN:$PATH"
 
-with_oco=1 with_lsp=1
+with_oco=1 with_lsp=1 dry_run=0
 passthrough=()
 while [ $# -gt 0 ]; do
   case $1 in
@@ -24,7 +28,8 @@ while [ $# -gt 0 ]; do
     --no-lsp) passthrough+=("$1"); with_lsp=0 ;;
     --lsp) ;;
     --no-oco) with_oco=0 ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    --dry-run) passthrough+=("$1"); dry_run=1 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -73,6 +78,10 @@ drift_check "$DOTFILES/config/herdr/scripts" "$HOME/.config/herdr/scripts"
 # ── 2. Dotfiles installer (packages, herdr, Fresh, configs, plugins) ───
 step "dotfiles installer"
 "$DOTFILES/install.sh" ${passthrough[@]+"${passthrough[@]}"}
+if [ "$dry_run" = 1 ]; then
+  info "dry run: stopping here, nothing was installed or linked"
+  exit 0
+fi
 
 # ── 3. OpenCommit (oco) for the Ctrl+Shift+A AI commit ─────────────────
 if [ "$with_oco" = 1 ]; then
@@ -218,6 +227,16 @@ if herdr server reload-config >/dev/null 2>&1; then
   ok "reloaded the running herdr server"
 else
   info "no running herdr server to reload (fine)"
+fi
+
+# ── 4b. Machine-vs-repo gate ───────────────────────────────────────────
+# The report above is install-time feedback; this is the actual contract: the
+# run is only a success if every managed link, tool, plugin, integration and
+# keymap script is present afterwards. dotfiles/verify.sh recomputes that list
+# from `install.sh --dry-run`, so it cannot go stale against the installer.
+step "machine vs repo"
+if ! "$DOTFILES/verify.sh"; then
+  die "this machine is still out of sync (see the failures above); rerun after fixing them"
 fi
 
 # ── 5. Next steps ──────────────────────────────────────────────────────

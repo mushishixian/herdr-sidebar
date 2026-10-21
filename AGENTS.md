@@ -2090,6 +2090,14 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
 - The Agent pane title comes from `pane report-metadata --title` (a metadata title beats the manual label on the border, so the "Agent" label the scripts rely on is untouched). `bin/ide-agent-title` sets it from the typed command, through a zsh preexec/precmd hook (`shell/agent-title.zsh`) that `herdr-ide` sources into that pane.
 - `dotfiles/` is not a Rust crate and the plugin manifest never references it, so `plugins/herdr-sidebar` stays upstream-shaped and standalone.
 - Entry points: `docs/install-herdr-ide.sh` runs `dotfiles/install.sh`, which runs `dotfiles/herdr-sidebar/build.sh` (builds this checkout and points herdr's `herdr-sidebar` registration at it).
+- **The installer declares what it manages; `dotfiles/verify.sh` asserts it.** `dotfiles/install.sh
+  --dry-run` prints `PLAN` lines (links, tools, plugins, integrations, the seeded sidebar state, the
+  `editor-command.txt`) and changes nothing; `verify.sh` runs that plan and checks the real machine
+  against it (a *copy* where a symlink belongs counts as drift, because `git pull` would not reach it),
+  plus `herdr config check` and that every script the keymap runs exists in `config/herdr/scripts/`.
+  So a new managed artifact needs a `plan` line and nothing else — never a second manifest, never a
+  check in `verify.sh` that duplicates one. `docs/install-herdr-ide.sh` ends with this gate and now
+  exits non-zero on a half-configured machine (`--dry-run` there forwards to the plan and stops).
 - Installs are symlinks into `~/.config` and `~/.local/bin`, so edits apply live. Rerunning the installer re-points links left at an old checkout, including the `dotfiles-ide` registration and `editor-command.txt`.
 - Keep the herdr plugin id `dotfiles-ide`: its state dir and key bindings use it.
 - Fresh's settings UI replaces the symlinked `config.json` with a plain copy. Merge the copy into `dotfiles/config/fresh/config.json`, then rerun the installer to re-link.

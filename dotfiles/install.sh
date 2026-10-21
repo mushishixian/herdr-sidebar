@@ -9,6 +9,8 @@
 #   ./install.sh --no-packages skip apt (configs, plugins and language servers' apt step)
 #   ./install.sh --no-claude   don't install herdr's Claude Code hook
 #   ./install.sh --lsp         accepted for older scripts; a no-op (LSP is the default)
+#   ./install.sh --dry-run     print the plan and change nothing; dotfiles/verify.sh
+#                              builds its checklist from those PLAN lines
 #
 # Idempotent: rerun after pulling. Any file it would replace is moved to
 # ~/.dotfiles-backup/<timestamp>/ first; symlinks it made earlier are reused.
@@ -19,14 +21,15 @@ BACKUP="$HOME/.dotfiles-backup/$(date +%Y%m%d-%H%M%S)"
 BIN="$HOME/.local/bin"
 export PATH="$BIN:$PATH"
 
-with_packages=1 with_lsp=1 with_claude=1
+with_packages=1 with_lsp=1 with_claude=1 dry_run=0
 for arg in "$@"; do
   case $arg in
     --no-packages) with_packages=0 ;;
     --no-lsp) with_lsp=0 ;;
     --lsp) ;;
     --no-claude) with_claude=0 ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    --dry-run) dry_run=1 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -34,6 +37,21 @@ done
 step() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 
+# dry / would / plan — `--dry-run` must touch NOTHING. Every mutation below sits
+# behind `dry`, and every artifact this script is responsible for is announced
+# with `plan`, whose output is exactly what dotfiles/verify.sh checks. So a new
+# link, tool or plugin belongs HERE (and in the matching install step) — there
+# is deliberately no second manifest that could drift out of sync.
+dry() { [ "$dry_run" = 1 ]; }
+would() { printf '    would %s\n' "$*"; }
+plan() {
+  [ "$dry_run" = 1 ] || return 0
+  local kind=$1 field
+  shift
+  printf 'PLAN\t%s' "$kind"
+  for field in "$@"; do printf '\t%s' "$field"; done
+  printf '\n'
+}
 # apt_has PKG — true when this release's apt has an install candidate for PKG.
 apt_has() {
   local cand
@@ -44,6 +62,12 @@ apt_has() {
 # link SRC DEST — symlink, backing up whatever was there.
 link() {
   local src=$DOTFILES/$1 dest=$2
+  plan LINK "$dest" "$src"
+  if dry; then
+    [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ] && return
+    would "link $dest -> $1"
+    return
+  fi
   mkdir -p "$(dirname "$dest")"
   if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then return; fi
   if [ -e "$dest" ] || [ -L "$dest" ]; then
@@ -121,37 +145,58 @@ grep -qi microsoft /proc/version 2>/dev/null || echo "note: not WSL; Windows bri
 if [ "$with_packages" = 1 ]; then
   step "apt packages"
   mapfile -t pkgs < <(grep -v '^\s*#' "$DOTFILES/packages.txt" | grep -v '^\s*$')
-  sudo apt-get update -qq
   # Older releases lack some packages (24.04 has no lazygit or starship): install what apt has.
   avail=() skipped=()
   for p in "${pkgs[@]}"; do
     if apt_has "$p"; then avail+=("$p"); else skipped+=("$p"); fi
   done
-  if [ "${#avail[@]}" -gt 0 ]; then
-    sudo apt-get install -y -qq "${avail[@]}"
+  if dry; then
+    would "apt-get update, then install: ${avail[*]:-(nothing)}"
+  else
+    sudo apt-get update -qq
+    if [ "${#avail[@]}" -gt 0 ]; then
+      sudo apt-get install -y -qq "${avail[@]}"
+    fi
   fi
   if [ "${#skipped[@]}" -gt 0 ]; then
     info "skipped (not in this Ubuntu's apt): ${skipped[*]} — see docs/herdr-ide.md"
   fi
 fi
 # Ubuntu renames these two; give them their upstream names.
-mkdir -p "$BIN"
-command -v fdfind >/dev/null && ln -sfn "$(command -v fdfind)" "$BIN/fd"
-command -v batcat >/dev/null && ln -sfn "$(command -v batcat)" "$BIN/bat"
+if dry; then
+  command -v fdfind >/dev/null && would "link $BIN/fd -> $(command -v fdfind)"
+  command -v batcat >/dev/null && would "link $BIN/bat -> $(command -v batcat)"
+else
+  mkdir -p "$BIN"
+  command -v fdfind >/dev/null && ln -sfn "$(command -v fdfind)" "$BIN/fd"
+  command -v batcat >/dev/null && ln -sfn "$(command -v batcat)" "$BIN/bat"
+fi
 
 # ── 2. herdr + Fresh (official installers, checksum-verified, into ~/.local) ─
 step "herdr and Fresh"
 if ! command -v herdr >/dev/null; then
-  curl -fsSL https://herdr.dev/install.sh | sh
+  if dry; then would "install herdr (herdr.dev/install.sh)"; else
+    curl -fsSL https://herdr.dev/install.sh | sh
+  fi
 else
   info "herdr $(herdr --version | awk '{print $2}') present (update: herdr update)"
 fi
 if ! command -v fresh >/dev/null; then
-  curl -fsSL https://raw.githubusercontent.com/sinelaw/fresh/refs/heads/master/scripts/install.sh \
-    | sh -s -- --no-desktop-integration
+  if dry; then would "install fresh (sinelaw/fresh install.sh)"; else
+    curl -fsSL https://raw.githubusercontent.com/sinelaw/fresh/refs/heads/master/scripts/install.sh \
+      | sh -s -- --no-desktop-integration
+  fi
 else
   info "fresh $(fresh --version | awk '{print $2}') present (update: fresh --cmd update)"
 fi
+
+# Tools every config in this repo expects on PATH (keymap scripts, Fresh
+# plugins, zshrc). `verify.sh` asserts each of these from the plan, so a new
+# dependency belongs here AND in packages.txt / the language installer — never
+# only in a doc.
+for tool in herdr fresh zsh git jq rg fd bat eza fzf zoxide delta lazygit starship node python3; do
+  plan TOOL "$tool"
+done
 
 # ── 3. Config files ────────────────────────────────────────────────────
 step "config files"
@@ -178,58 +223,93 @@ if ! command -v xdg-open >/dev/null || [ "$(readlink -f "$(command -v xdg-open)"
 fi
 
 include="$DOTFILES/config/git/dotfiles.gitconfig"
-if ! git config --global --get-all include.path 2>/dev/null | grep -qxF "$include"; then
+plan GIT-INCLUDE "$include"
+if dry; then
+  git config --global --get-all include.path 2>/dev/null | grep -qxF "$include" ||
+    would "git config --global --add include.path $include"
+elif ! git config --global --get-all include.path 2>/dev/null | grep -qxF "$include"; then
   git config --global --add include.path "$include"
   info "git: included $include"
 fi
 
 # ── 4. herdr plugins and integrations ──────────────────────────────────
 step "herdr plugins"
-mkdir -p "$HOME/.zfunc"
-herdr completion zsh > "$HOME/.zfunc/_herdr"
+plan GENERATED "$HOME/.zfunc/_herdr"
+if dry; then
+  would "write $HOME/.zfunc/_herdr (herdr completion zsh)"
+else
+  mkdir -p "$HOME/.zfunc"
+  herdr completion zsh > "$HOME/.zfunc/_herdr"
+fi
 
 plugins=$(herdr plugin list --json 2>/dev/null || echo '{}')
 
 # Patched fork: clicks open in Fresh without switching herdr tabs.
-"$DOTFILES/herdr-sidebar/build.sh"
-info "herdr-sidebar: built from this repo (update: git pull, then rerun)"
-# build.sh may have installed rustup; later steps (install-lsp.sh) must see it first.
-if [ -d "$HOME/.cargo/bin" ]; then export PATH="$HOME/.cargo/bin:$PATH"; fi
-root=$(jq -r '.result.plugins[]? | select(.plugin_id=="dotfiles-ide") | .plugin_root' <<<"$plugins" 2>/dev/null || true)
-if [ "$root" = "$DOTFILES/herdr-plugins/ide" ]; then
-  info "dotfiles-ide linked"
-elif [ -n "$root" ]; then
-  herdr plugin unlink dotfiles-ide >/dev/null
-  herdr plugin link "$DOTFILES/herdr-plugins/ide" >/dev/null
-  info "dotfiles-ide: re-linked from $root"
+# Patched fork: clicks open in Fresh without switching herdr tabs.
+REPO=$(cd "$DOTFILES/.." && pwd)
+plan PLUGIN herdr-sidebar "$REPO/plugins/herdr-sidebar"
+plan PLUGIN dotfiles-ide "$DOTFILES/herdr-plugins/ide"
+if dry; then
+  would "build herdr-sidebar from this repo (dotfiles/herdr-sidebar/build.sh)"
+  would "register dotfiles-ide -> $DOTFILES/herdr-plugins/ide"
 else
-  herdr plugin link "$DOTFILES/herdr-plugins/ide" >/dev/null
-  info "dotfiles-ide linked"
+  "$DOTFILES/herdr-sidebar/build.sh"
+  info "herdr-sidebar: built from this repo (update: git pull, then rerun)"
+  # build.sh may have installed rustup; later steps (install-lsp.sh) must see it first.
+  if [ -d "$HOME/.cargo/bin" ]; then export PATH="$HOME/.cargo/bin:$PATH"; fi
+  root=$(jq -r '.result.plugins[]? | select(.plugin_id=="dotfiles-ide") | .plugin_root' <<<"$plugins" 2>/dev/null || true)
+  if [ "$root" = "$DOTFILES/herdr-plugins/ide" ]; then
+    info "dotfiles-ide linked"
+  elif [ -n "$root" ]; then
+    herdr plugin unlink dotfiles-ide >/dev/null
+    herdr plugin link "$DOTFILES/herdr-plugins/ide" >/dev/null
+    info "dotfiles-ide: re-linked from $root"
+  else
+    herdr plugin link "$DOTFILES/herdr-plugins/ide" >/dev/null
+    info "dotfiles-ide linked"
+  fi
 fi
 
 # herdr-sidebar defaults: VS Code colours, and a click hands the file to the
 # Fresh pane in the same tab (fresh-open, run inline: no herdr tab opens).
 # Choices already made in its Settings win.
 state_dir="$HOME/.local/state/herdr/plugins/herdr-sidebar"
-mkdir -p "$state_dir"
 state="$state_dir/state.json"
-if [ -f "$state" ]; then
-  jq -s '.[0] + .[1]' "$DOTFILES/herdr-sidebar/state.json" "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+plan STATE "$state"
+plan EDITOR-COMMAND "$BIN/fresh-open {file}"
+if dry; then
+  would "seed $state (VS Code colours, git footer, click opens in Fresh)"
+  would "write $state_dir/editor-command.txt"
 else
-  cp "$DOTFILES/herdr-sidebar/state.json" "$state"
+  mkdir -p "$state_dir"
+  if [ -f "$state" ]; then
+    jq -s '.[0] + .[1]' "$DOTFILES/herdr-sidebar/state.json" "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  else
+    cp "$DOTFILES/herdr-sidebar/state.json" "$state"
+  fi
+  printf '%s {file}' "$BIN/fresh-open" > "$state_dir/editor-command.txt"
+  info "herdr-sidebar: click opens in Fresh ($(cat "$state_dir/editor-command.txt"))"
 fi
-printf '%s {file}' "$BIN/fresh-open" > "$state_dir/editor-command.txt"
-info "herdr-sidebar: click opens in Fresh ($(cat "$state_dir/editor-command.txt"))"
 
 if [ "$with_claude" = 1 ] && [ -d "$HOME/.claude" ]; then
-  herdr integration install claude >/dev/null && info "Claude Code hook installed (herdr integration status)"
+  plan INTEGRATION claude
+  if dry; then
+    would "herdr integration install claude"
+  else
+    herdr integration install claude >/dev/null && info "Claude Code hook installed (herdr integration status)"
+  fi
 fi
 
 # herdr gets an agent's state from these hooks. pi has "full lifecycle hook
 # authority", so herdr skips its screen heuristics for it: without the
 # integration the spaces rail shows pi idle forever. Rerun after a pi upgrade.
 if [ -d "$HOME/.pi" ]; then
-  herdr integration install pi >/dev/null && info "pi agent-state hook installed (herdr integration status)"
+  plan INTEGRATION pi
+  if dry; then
+    would "herdr integration install pi"
+  else
+    herdr integration install pi >/dev/null && info "pi agent-state hook installed (herdr integration status)"
+  fi
 fi
 
 # CodeBuddy is NOT one of herdr's integration targets (0.9.5 stops at its own
@@ -241,25 +321,48 @@ fi
 # the state AND the label, even without the zsh agent-title hook.
 if command -v codebuddy >/dev/null 2>&1 || [ -d "$HOME/.codebuddy" ]; then
   link config/codebuddy/hooks/herdr-agent-state.sh "$HOME/.codebuddy/hooks/herdr-agent-state.sh"
-  codebuddy_hooks "$HOME/.codebuddy/settings.json" "$HOME/.codebuddy/hooks/herdr-agent-state.sh" &&
-    info "codebuddy agent-state hook installed (idle/working/blocked in herdr)"
+  if dry; then
+    would "merge the agent-state hooks into $HOME/.codebuddy/settings.json"
+  else
+    codebuddy_hooks "$HOME/.codebuddy/settings.json" "$HOME/.codebuddy/hooks/herdr-agent-state.sh" &&
+      info "codebuddy agent-state hook installed (idle/working/blocked in herdr)"
+  fi
 fi
 
-herdr server reload-config >/dev/null 2>&1 && info "reloaded the running herdr server" || true
+if dry; then
+  would "herdr server reload-config"
+else
+  herdr server reload-config >/dev/null 2>&1 && info "reloaded the running herdr server" || true
+fi
 
 # ── 5. Language servers (default; --no-lsp skips) ─────────────────────
 if [ "$with_lsp" = 1 ]; then
   step "language servers"
   lsp_args=()
   [ "$with_packages" = 1 ] || lsp_args+=(--no-apt)
-  "$DOTFILES/install-lsp.sh" ${lsp_args[@]+"${lsp_args[@]}"} ||
-    info "some language servers failed (see the summary above; rerun dotfiles/install-lsp.sh)"
+  if dry; then
+    would "install language servers (dotfiles/install-lsp.sh ${lsp_args[*]:-})"
+  else
+    "$DOTFILES/install-lsp.sh" ${lsp_args[@]+"${lsp_args[@]}"} ||
+      info "some language servers failed (see the summary above; rerun dotfiles/install-lsp.sh)"
+  fi
 fi
 
 # ── 6. Login shell ─────────────────────────────────────────────────────
 if [ "$(getent passwd "$USER" | cut -d: -f7)" != "$(command -v zsh)" ]; then
   step "login shell"
-  chsh -s "$(command -v zsh)"
+  if dry; then
+    would "chsh -s $(command -v zsh)"
+  else
+    chsh -s "$(command -v zsh)"
+  fi
+fi
+
+if dry; then
+  step "dry run"
+  info "nothing was changed — the lines above are the plan"
+  info "check this machine for real: dotfiles/verify.sh"
+  exit 0
 fi
 
 step "done"
