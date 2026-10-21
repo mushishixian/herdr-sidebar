@@ -73,6 +73,15 @@ docs/install-herdr-ide.sh            # --help for options (--no-lsp, --no-packag
 then ends with `dotfiles/verify.sh`, which fails the run if the machine does not match the repo
 afterwards. See *Syncing a machine with the repo* below.
 
+**A machine that already has a shell config keeps it.** `~/.zshrc` is the one dotfile that almost
+always predates this IDE, so the installer does not replace it: an existing personal rc is ADOPTED
+as `~/.zshrc.local`, which the managed rc sources (above the highlight plugins, which must stay
+last), and only then is the symlink installed. If `~/.zshrc.local` already exists, the personal rc
+is left in `~/.dotfiles-backup/<ts>/zshrc` with a message instead of merging two unknown files.
+`--no-zshrc` skips the step entirely. Tool configs the IDE owns (`herdr`, `Fresh`, `lazygit`,
+`ripgrep`, `bat`) are whole-file symlinks, so a machine-specific version of those is backed up and
+replaced; `~/.gitconfig` is only touched by adding an `include.path`.
+
 Language servers are installed by default (`dotfiles/install-lsp.sh`, see
 *Language servers (LSP)*). `--no-lsp` skips them; `--no-packages` also skips their apt step.
 
@@ -743,6 +752,13 @@ so an install cannot report success on a half-configured machine.
 the checklist it checks against.
 
 ## Gotchas (verified)
+
+- **`~/.zshrc` is adopted, never replaced.** A plain symlink would move a machine's own rc into the
+  backup directory where nothing sources it, so its aliases, `PATH`s and prompt vanish on the next
+  shell. `install.sh`'s `link_zshrc` moves that file to `~/.zshrc.local` and links the managed rc,
+  which sources the overlay above the highlight plugins; `--no-zshrc` opts out, an already-existing
+  `~/.zshrc.local` wins (the personal rc goes to the backup dir instead), and `verify.sh` fails if
+  `~/.zshrc.local` exists while `dotfiles/zsh/zshrc` no longer sources it.
 
 - **Never wrap a Fresh command in a plugin that calls it by its own registered
   name.** `plugins/goto_symbol.ts` (removed) bound `alt+o` to an action whose

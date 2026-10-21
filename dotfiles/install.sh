@@ -11,6 +11,9 @@
 #   ./install.sh --lsp         accepted for older scripts; a no-op (LSP is the default)
 #   ./install.sh --dry-run     print the plan and change nothing; dotfiles/verify.sh
 #                              builds its checklist from those PLAN lines
+#   ./install.sh --no-zshrc    leave ~/.zshrc and ~/.zshrc.local completely alone
+#                              (otherwise an existing personal rc is ADOPTED as
+#                              ~/.zshrc.local, which the managed rc sources)
 #
 # Idempotent: rerun after pulling. Any file it would replace is moved to
 # ~/.dotfiles-backup/<timestamp>/ first; symlinks it made earlier are reused.
@@ -21,15 +24,16 @@ BACKUP="$HOME/.dotfiles-backup/$(date +%Y%m%d-%H%M%S)"
 BIN="$HOME/.local/bin"
 export PATH="$BIN:$PATH"
 
-with_packages=1 with_lsp=1 with_claude=1 dry_run=0
+with_packages=1 with_lsp=1 with_claude=1 with_zshrc=1 dry_run=0
 for arg in "$@"; do
   case $arg in
     --no-packages) with_packages=0 ;;
     --no-lsp) with_lsp=0 ;;
     --lsp) ;;
     --no-claude) with_claude=0 ;;
+    --no-zshrc) with_zshrc=0 ;;
     --dry-run) dry_run=1 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -74,6 +78,47 @@ link() {
     mkdir -p "$BACKUP"
     mv "$dest" "$BACKUP/$(basename "$dest")"
     info "backed up $dest"
+  fi
+  ln -s "$src" "$dest"
+  info "linked $dest"
+}
+
+# link_zshrc — install the managed rc WITHOUT taking a machine's shell away.
+#
+# `link` alone would swap ~/.zshrc for our symlink and leave the user's own rc
+# in the backup dir, unread: on a machine that already has a shell config that
+# silently drops its aliases, PATHs and prompt. So an existing personal rc is
+# ADOPTED instead — moved to ~/.zshrc.local, which the managed rc sources near
+# the end — and only a clean machine gets a bare symlink. `--no-zshrc` skips
+# the step entirely for a machine whose shell must not be touched at all.
+link_zshrc() {
+  local src=$DOTFILES/zsh/zshrc dest=$HOME/.zshrc overlay=$HOME/.zshrc.local
+  plan LINK "$dest" "$src"
+  plan OVERLAY "$overlay"
+  if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
+    [ -e "$overlay" ] && info "zsh: managed rc linked, $overlay is sourced from it"
+    return
+  fi
+  if dry; then
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      would "adopt your existing $dest as $overlay, then link $dest -> zsh/zshrc"
+    else
+      would "link $dest -> zsh/zshrc"
+    fi
+    return
+  fi
+  mkdir -p "$(dirname "$dest")"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ -e "$overlay" ]; then
+      # Two personal files. Never guess an order for them behind the user's
+      # back: keep the managed rc out of the way and say where theirs went.
+      mkdir -p "$BACKUP"
+      mv "$dest" "$BACKUP/zshrc"
+      info "kept your $overlay; moved $dest to $BACKUP/zshrc (merge it in by hand if it had anything)"
+    else
+      mv "$dest" "$overlay"
+      info "adopted your existing .zshrc as $overlay (the managed rc sources it last)"
+    fi
   fi
   ln -s "$src" "$dest"
   info "linked $dest"
@@ -200,7 +245,13 @@ done
 
 # ── 3. Config files ────────────────────────────────────────────────────
 step "config files"
-link zsh/zshrc                 "$HOME/.zshrc"
+# zsh is the ONE config that usually predates us: an existing personal rc is
+# adopted as ~/.zshrc.local rather than replaced (see link_zshrc).
+if [ "$with_zshrc" = 1 ]; then
+  link_zshrc
+else
+  info "zsh: left alone (--no-zshrc)"
+fi
 link config/herdr/config.toml  "$HOME/.config/herdr/config.toml"
 # The keymap's helper scripts (popup commands run `bash ~/.config/herdr/scripts/…`).
 # One directory symlink, so a pulled `git pull` reaches every machine's keymap.

@@ -65,7 +65,14 @@ while IFS=$'\t' read -r _ kind dest src; do
         bad "$dest -> $src, which does not exist in the repo"
       elif [ ! -L "$dest" ]; then
         if [ -e "$dest" ]; then
-          bad "$dest is a copy, not a symlink — a 'git pull' will not reach it (rerun install.sh to back it up and link it)"
+          case $dest in
+            */.zshrc)
+              bad "$dest is a copy, not a symlink — a 'git pull' will not reach it (rerun install.sh: it ADOPTS your rc as ~/.zshrc.local, then links)"
+              ;;
+            *)
+              bad "$dest is a copy, not a symlink — a 'git pull' will not reach it (rerun install.sh to back it up and link it)"
+              ;;
+          esac
         else
           bad "$dest is missing (rerun install.sh)"
         fi
@@ -76,6 +83,17 @@ while IFS=$'\t' read -r _ kind dest src; do
         else
           bad "$dest points at $got (expected $src)"
         fi
+      fi
+      ;;
+    OVERLAY)
+      # A machine's own rc, adopted by the installer: ours must still source it,
+      # or the adoption silently stops loading their aliases and PATHs.
+      if [ ! -e "$dest" ]; then
+        pass "no personal ~/.zshrc.local (clean machine)"
+      elif grep -qF '.zshrc.local' "$DOTFILES/zsh/zshrc"; then
+        pass "$dest is sourced by the managed rc"
+      else
+        bad "$dest exists but dotfiles/zsh/zshrc never sources it"
       fi
       ;;
     GENERATED)
