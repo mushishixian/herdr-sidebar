@@ -25,7 +25,7 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 | `~/.zshrc` (managed whole-file, like every other config) | `dotfiles/zsh/zshrc`; the *Install* note and the `~/.zshrc.local` gotcha in `docs/herdr-ide.md`. Keep the `~/.zshrc.local` source line above the plugin sources |
 | A script the user runs by name from PATH (`dotfiles/herdr-plugins/ide/bin/*`) | The `for script in …` link list in `dotfiles/install.sh`. Scripts that only herdr runs (manifest `command = ["./bin/…"]`) need no link |
 | What a machine's own copy of a managed file should become | `dotfiles/adopt.sh --apply` puts it back into the repo (`git` is the backup) and re-links, then commit |
-| A Python tool (or a harlequin adapter) | `dotfiles/packages.lock` (`uv` / `uv-with` lines) — never a version in a script; the *Install* note and the adapter gotcha in `docs/herdr-ide.md` |
+| A Python tool (or a `--with` requirement for one) | `dotfiles/packages.lock` (`uv` / `uv-with` lines) — never a version in a script; the *Install* note and the adapter gotcha in `docs/herdr-ide.md` |
 | An apt, npm or cargo dependency | `dotfiles/packages.txt` (apt) or the installer step (npm/cargo) in `dotfiles/install.sh` or `docs/install-herdr-ide.sh`; the *Install* section of `docs/herdr-ide.md`; a `plan TOOL` line in `install.sh`, which `verify.sh` asserts |
 | A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; a `plan TOOL` line in `install.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
 | A sidebar setting default | `dotfiles/herdr-sidebar/state.json`, and the *Sidebar defaults* paragraph in `docs/herdr-ide.md` (*herdr-sidebar fork*) |
@@ -41,9 +41,10 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 
 - `--dry-run` changes nothing (no link, no package, no plugin registration, no server reload).
 - `dotfiles/packages.lock` is the only place a PYTHON version lives: `uv <name> <version> [extras]`
-  installs a tool, `uv-with <name> <package==version>` is a `--with` requirement of that tool (an
-  adapter such as `harlequin-clickhouse` provides no executables, so it CANNOT be its own tool).
-  Both print `PLAN UVTOOL` / `PLAN UVWITH`, and `verify.sh` asserts the version plus every adapter.
+  installs a tool, `uv-with <name> <package==version>` is a `--with` requirement of that tool (a
+  package that provides no executables, e.g. an adapter, CANNOT be its own tool). Both print
+  `PLAN UVTOOL` / `PLAN UVWITH`, and `verify.sh` asserts the version plus every requirement. The file
+  is empty of entries right now: nothing Python is pinned.
 - Every artifact it is responsible for is announced with `plan KIND fields…`, printed as
   `PLAN<TAB>KIND<TAB>…`: `LINK dest src`, `GENERATED path`, `STATE path`, `EDITOR-COMMAND value`,
   `TOOL cmd`, `PLUGIN id path`, `INTEGRATION agent`, `GIT-INCLUDE path` (and `UVTOOL` when uv
@@ -65,7 +66,7 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   settings UI) replacing the symlink with a copy — `verify.sh` calls that `is a copy`, and
   `dotfiles/adopt.sh <path>` diffs the copy against the repo and, with `--apply`, writes it into the
   repo and re-links. `adopt.sh --list` prints every managed path with its state. Machine-only
-  settings belong in unmanaged files (`~/.zshrc.local`, `~/.config/harlequin/`, `.env`).
+  settings belong in unmanaged files (`~/.zshrc.local`, a tool's own state dir under `~/.config`, `.env`).
 - **Windows has a HOST bootstrap, not a second installer.** `docs/install-herdr-ide.ps1` only does
   what WSL cannot do for itself (distro check, `winget` Windows Terminal + Nerd Font, the
   `herdr.cmd` launcher, unbinding the two Windows Terminal chords) and then runs
@@ -114,8 +115,8 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 - Fresh's settings UI replaces the symlinked `~/.config/fresh/config.json` with a plain copy, and later
   dotfiles edits then do nothing. Merge the copy into `dotfiles/config/fresh/config.json`, then rerun the
   installer to re-link. Edit settings in the dotfiles file, not in the UI.
-- **`uv tool install <adapter>` fails: an adapter has no executables.** `harlequin-clickhouse` is a
-  plugin for harlequin, so it must be `--with 'harlequin-clickhouse==…'` on the harlequin install;
+- **`uv tool install <adapter>` fails: an adapter has no executables.** An adapter is a plugin for
+  another tool, so it must be `--with '<adapter>==…'` on that tool's install;
   installing it alone errors with "No executables are provided by package". Its presence is only
   visible through `uv tool list --show-with`, so the skip test reads
   `uv tool list --show-extras --show-with` (version, extras and adapters in one listing) and
@@ -141,8 +142,7 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   `ui_busy: a popup pane is already open`, an unfocused popup does not appear in `pane list` at all, and
   `plugin.pane.open` never reuses an entrypoint (a second call opens a new tab). So nothing that must
   stay alive and be "switched back to" can be a popup; use `--placement tab` and return with
-  `herdr plugin pane focus <pane_id>`. `bin/herdr-db` (the Database tab, `ctrl+alt+d`) does exactly that —
-  see the root AGENTS.md "Database GUI" section.
+  `herdr plugin pane focus <pane_id>`.
 - `pane report-metadata` MERGES tokens. Sending `{}` does nothing, and only an explicit null value removes
   a token. Token values must be strings.
 - `Ctrl+Alt+H` arrives as Alt+Backspace in terminals without the kitty protocol, so replace is on Ctrl+Alt+E.

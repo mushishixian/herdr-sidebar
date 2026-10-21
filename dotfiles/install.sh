@@ -12,9 +12,8 @@
 #   ./install.sh --dry-run     print the plan and change nothing; dotfiles/verify.sh
 #                              builds its checklist from those PLAN lines
 #   ./install.sh --no-zshrc    leave ~/.zshrc and ~/.zshrc.local completely alone
-#                              (also: dotfiles/packages.lock pins the uv tools —
-#                              today the harlequin DB client — and is installed
-#                              into ~/.local/bin through `uv tool`)
+#                              (also: dotfiles/packages.lock pins the `uv tool`
+#                              installs; nothing is pinned there right now)
 #                              (otherwise ~/.zshrc is replaced like any other
 #                              managed config; ~/.zshrc.local is never touched)
 #
@@ -89,12 +88,11 @@ link() {
 # uv_tools — install the Python tools pinned in dotfiles/packages.lock.
 #
 # `uv tool install` needs no virtualenv and brings its own interpreter, so this
-# is the whole Python story for the workbench (the DB client and its ClickHouse
-# adapter today). packages.lock is the only source of versions, and it also
-# carries the `--with` requirements: an adapter such as harlequin-clickhouse
-# provides NO executables, so installing it as its own tool fails — it has to go
-# into the client's environment. A machine whose tool already reports the pinned
-# version, extras and adapters is left alone.
+# is the whole Python story for the workbench. packages.lock is the only source
+# of versions, and it also carries `--with` requirements: a package that provides
+# NO executables (an adapter or plugin for another tool) cannot be its own tool —
+# it has to go into that tool's environment. A machine whose tool already reports
+# the pinned version, extras and requirements is left alone.
 uv_tools() {
   local lock=$DOTFILES/packages.lock kind name version extras spec list line have
   local withs=() args=() w match

@@ -36,25 +36,10 @@ description = "Open a clicked file:// link at its line in the IDE's Fresh."
 command = ["./bin/fresh-open", "--link"]
 
 [[actions]]
-id = "db"
-title = "Database"
-description = "Open or focus this workspace's Database tab (harlequin), connected from the project's .env."
-command = ["./bin/herdr-db"]
-
-[[actions]]
 id = "restart-fresh"
 title = "Restart Fresh"
 description = "Gracefully restart this tab's Fresh editor (unsaved work is kept)."
 command = ["./bin/fresh-restart"]
-
-# The Database tab: harlequin, the terminal DB GUI. Kept alive in its own tab —
-# herdr allows ONE popup per session and cannot show an unfocused one, so a
-# popup cannot be "left running and switched back to" (bin/herdr-db).
-[[panes]]
-id = "db"
-title = "Database"
-placement = "tab"
-command = ["./bin/db-pane"]
 
 [[link_handlers]]
 id = "file-link"

@@ -331,7 +331,15 @@ Pane geometry & CLI semantics:
   was the focused one, the old snapshot still reports it as focused, so deriving a
   split/layout target from it yields `pane_not_found`. Re-run `pane list` AFTER any close
   before computing where to open a replacement pane (bit both notes launchers' REPLACE path).
-- Panes are **tab-scoped only**. Plugin pane placements are exactly
+- - **A herdr popup cannot be "left running and switched back to".** Verified live on 0.9.5 while
+  trying to give the database GUI a home: there is exactly ONE popup per session
+  (`plugin.pane.open` answers `ui_busy: a popup pane is already open`), an unfocused popup is
+  **absent from `pane.list`** (the still-running `--file-popup` process was invisible) and
+  `plugin.pane.open` **never reuses an entrypoint** — a second call with the same
+  plugin/entrypoint opened a THIRD tab (`wV:t2` → `wV:t3`). Anything that must stay alive and be
+  switched back to therefore wants `--placement tab` (or a split) plus
+  `plugin pane focus <pane_id>`, which switches tab + workspace and focuses in one call.
+Panes are **tab-scoped only**. Plugin pane placements are exactly
   `overlay|popup|split|tab|zoomed` — plugins cannot add workspace-level chrome (e.g. a real
   sidebar next to herdr's own); the closest approximation is a per-tab dock via event hooks.
   There is also no way to insert a pane at a tab's layout root: a full-height left column is
@@ -2125,102 +2133,6 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   That file now also binds `ctrl+alt+f` to the same popup, and the `force-reset.sh` that
   used to own that chord lives on `ctrl+alt+shift+f`.
 
-
-### Database GUI (the `db` tab, `ctrl+alt+d`)
-
-`dotfiles/herdr-plugins/ide/bin/{herdr-db,db-pane}` run a terminal DB client in a keep-alive TAB
-of its own. **Client default is lazysql** (`HS_DB_CLIENT=harlequin` switches back): harlequin's
-result grid is a `textual_fastdatatable.DataTable` with no edit actions at all — it cannot change
-rows, which is what the user wanted (user-reported "没有实时表格修改"). lazysql 0.7.0 does: `c`
-change cell, `o`/`O` insert/duplicate, `d` delete, `Ctrl+S` commits pending changes, `V` column
-visibility per table, `Y` copy rows as SQL/JSON/CSV, `#` exact count, `Ctrl+E` SQL editor. Its
-default keymap is vim-style single keys and the ONLY overlap with our herdr config is `ctrl+q`,
-which lazysql does not use (it quits on plain `q`). No plugin system exists (0 occurrences of
-"plugin"; drivers are a Go interface), but the config is a real extension surface: `-config <file>`
-(TOML: `[[database]]`, `[keymap]` per group, `[theme]`, `[application]`, `hidden_columns`), a
-project-level `.lazysql.toml` found from CWD up to the git root, per-connection `Commands`
-(`WaitForPort`/`SaveOutputTo` = SSH tunnels and fetched passwords), and `SQL_EDITOR`/`EDITOR`.
-Installed from the pinned release: `lazysql_Linux_x86_64.tar.gz` v0.7.0,
-sha256 `ebc3edeb848c7e557f88177cf6b2ca7e492ef158e2aa1dce18eb137d1d0726fc` (installer pinning is
-still to do — it is a GitHub-release binary, not a `uv` tool).
-
-**lazysql gets the database INI as its own connection list**: `db-pane` generates
-`<our plugin state dir>/lazysql/config.toml` (`0600`, rebuilt only when db.ini's sha256 changes, so
-theme/keymap edits inside lazysql survive) with one `[[database]]` per section and passes
-`-config`, so `~/.config/lazysql/` is never touched. harlequin keeps the fzf picker instead.
-Three traps, all live: every generated entry needs `URL = "mysql://…"` — **the field list
-(Provider/Hostname/Port/DBName/Username/Password) is NOT enough**, because
-`app/config.go parseConfigURL` builds a URL from those fields for **MSSQL only**; without one the
-connection list renders and prints a red **"invalid database scheme"** (dburl) while nothing
-connects (user-reported). Passwords must be **percent-encoded** for the URL (they contain `#` =
-fragment start → truncated password, looks like an auth failure). SQLite goes as `file:/abs/x.db`
-(`sqlite3:///abs/x.db` → "unable to open database file: out of memory"). duckdb is harlequin-only,
-so `db-pane` switches client for it. The config stamp mixes a **generator revision** with db.ini's
-hash (`r2:<sha>`), so a change to the emitted format invalidates configs written by an older build;
-and lazysql's connection list is keyboard-first — a single click only moves the selection, `⏎`/`c`
-connects, and `q` asks Yes/No before quitting (`ConfirmOnQuit` defaults true). Verified live on herdr 0.9.5 while choosing the placement — these are hard constraints:
-
-- **A popup cannot be kept alive.** herdr allows exactly ONE popup per session
-  (`plugin.pane.open` answers `ui_busy: a popup pane is already open`), an unfocused popup is
-  **absent from `pane.list`** (the still-running `--file-popup` process was invisible), and
-  `plugin.pane.open` **never reuses an entrypoint** — a second call with the same plugin/entrypoint
-  opened a THIRD tab (`wV:t2` → `wV:t3`). A DB popup that stayed open would also block `ctrl+q`,
-  `ctrl+alt+f` and `ctrl+alt+q` for as long as it lived.
-- **A tab (or split) does keep it alive**: the process survives focus changes and tab switches,
-  and `herdr plugin pane focus <pane_id>` (CLI, and the `plugin.pane.focus` socket method) switches
-  tab + workspace and focuses it in one call. So the launcher looks for a live
-  `Database`-labelled pane in the workspace first and only opens a new tab when there is none.
-- **`plugin pane open --placement tab` triggers our own `tab.created` hook**, which docks a
-  sidebar into the new tab. In a full-width GUI tab that is a 32-column strip, so `herdr-db`
-  writes the sidebar's per-tab snooze marker itself and closes the copy that already docked by
-  sending it Ctrl+Q, on EVERY press (a dock that slipped through is cleaned up on the way back
-  in). Three details, all found the hard way live:
-  - the marker is an empty file named after the tab (`:` → `_`) in **the SIDEBAR plugin's**
-    state dir, `${XDG_STATE_HOME:-~/.local/state}/herdr/plugins/herdr-sidebar/snooze/`.
-    `$HERDR_PLUGIN_STATE_DIR` is the CALLING plugin's dir — in a `dotfiles-ide` action it names
-    `plugins/dotfiles-ide`, and markers written there are never read (symptom: the db tab got an
-    explorer pane again on the next focus, and a stray `dotfiles-ide/snooze/` appeared).
-  - that directory must be **0700**: `snooze::is_set` first demands `rundir::is_private`, so a
-    `mkdir -p` with a normal umask makes every marker in it invisible.
-  - the hook honors the marker only on its quiet path (`else if !snooze::is_set(…)`), i.e. an
-    ordinary focus dock; an explicit toggle/activate still opens one.
-
-Connection discovery lives in ONE place, `db-pane` (`--print` = the argv, `--summary` = one human
-line): `DATABASE_URL`/`DB_URL` from `.env.local` → `.env` → environment, then Laravel
-`DB_CONNECTION`+`DB_*`, then a local SQLite file, then **the machine's `db.ini`**, then
-harlequin's own picker.
-
-`db.ini` (`HS_DB_INI`, else `$root/db.ini` / `$root/.db.ini` / `$root/../liexin_config/db.ini` /
-`/data/www/liexin_config/db.ini`) is a flat INI of `[section]` + `host`/`user`/`passwd`/`db` — 62
-databases on this machine. Passing all of them to harlequin is not an option (one live MySQL
-connection per conn string), so an INTERACTIVE pane gets an **fzf picker**: row 1 is the project's
-own detected connection, the rest are INI sections; Enter opens, Esc keeps the project's one.
-`HS_DB_SECTION` skips the picker, `HS_DB_PICK=0` disables it, `--list` prints the sections, and
-every non-interactive mode (`--print`/`--list`/`--summary`, or no TTY) skips the picker so nothing
-can block. Two parser traps, both real: **only a LEADING `#` is a comment** — these passwords
-contain `#` (`liexin#zsyM`), and `sed 's/#.*//'` breaks every one — and a section repeated later in
-the file keeps its later values (the file has nine such duplicates). Verified against the real
-file: `--list` → 62 sections, `hlq pick` → `-a mysql --host … --password ichuntcms#zsyM`, and a
-live `hsql … -c 'select 1'` reached 192.168.1.238. **Adapters take
-different arguments**: `harlequin_mysql` REFUSES a DSN ("Cannot provide a DSN to the MySQL
-adapter") and only accepts `--host/--port/--database/--user/--password`, clickhouse and postgres
-take a URL as the conn string, sqlite takes a path (`sqlite:///abs/x.db` must keep its leading
-slash — slicing the generic URL form there silently yields a relative path). Percent-escaped
-passwords are not decoded; split them into `DB_*` variables instead.
-
-harlequin's own quit key is `ctrl+q` (`harlequin/keys_app.py` requires it), which herdr intercepts
-for the file-search popup, so the documented way to close the tab is herdr's `close_pane` binding.
-
-**"Double-click a table to see its data" does not exist in harlequin** (checked 2.16.2, user asked):
-`components/data_catalog/tree.py` `on_click` → chain==2 → `NodeSubmitted` → `insert_node_into_editor`,
-i.e. it types the table's name into the editor. There is no generate-select action anywhere in
-`HARLEQUIN_ACTIONS`, and a keymap binds one key to one existing action (no chaining), so this cannot
-be configured. The catalog DOES own a right-click menu (`InteractiveCatalogItem.INTERACTIONS`, which
-adapters may extend — the default is "Insert Name at Cursor"), but herdr takes right-click in the pane;
-`ctrl+enter` (`data_catalog.insert_name`) is the same thing without the mouse. What we do instead:
-`db-pane` passes `--limit 100` (harlequin's row cap, adjustable in the UI; `HS_DB_LIMIT=-1` = no
-limit, `0` = zero rows), so `select * from <table>` is enough once the `select * from ` prefix is in
-the buffer.
 
 ## dotfiles/ (the IDE layer)
 

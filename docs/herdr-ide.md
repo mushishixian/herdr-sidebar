@@ -75,11 +75,11 @@ afterwards. See *Syncing a machine with the repo* below.
 
 **Python tools come from `uv`, pinned.** `dotfiles/packages.lock` is the only place a Python
 version lives; `docs/install-herdr-ide.sh` (or `dotfiles/install.sh`) runs `uv tool install` for each
-entry, so nothing touches the system Python and no virtualenv exists. Today it pins the database
-client — `harlequin==2.16.2` with the `mysql` extra, plus its ClickHouse adapter as a `--with`
-requirement — which lands `harlequin` and `hsql` in `~/.local/bin`. `verify.sh` asserts both the
-version and the adapter (`uv tool list --show-extras --show-with`), so a machine can no longer drift
-to "harlequin is installed but cannot open ClickHouse".
+entry, so nothing touches the system Python and no virtualenv exists. `uv-with` lines add a
+requirement that provides no executables of its own (an adapter/plugin for another tool) to that
+tool's environment; `verify.sh` asserts the version, its extras and every `--with` requirement from
+`uv tool list --show-extras --show-with`. **No Python tool is pinned right now** — the file exists so
+the next one has a home instead of a version in a script.
 
 **Windows host.** The workbench lives in WSL, so on Windows the entry point is
 `docs/install-herdr-ide.ps1` (run it from the checkout, PowerShell 5.1 or 7). It provisions only
@@ -167,7 +167,6 @@ moves the copy aside.
 | `ctrl+alt+k` | Git: push (background, progress toasts) |
 | `ctrl+shift+a` | Git: stage all + OpenCommit message into Source Control, then commit |
 | `ctrl+alt+shift+f` | Git: force reset + clean (`scripts/force-reset.sh`, extra y/N prompt) |
-| `ctrl+alt+d` | Database GUI: harlequin in a keep-alive `db` tab, connected from the project's `.env` |
 | `alt+w`, `ctrl+alt+h` | lazygit (whole UI / the log panel) as popups |
 | `ctrl+alt+v` | File viewer pane (`herdr-file-viewer`; `e` opens the file in Fresh) |
 | `ctrl+b alt+g` | lazygit popup |
@@ -521,108 +520,6 @@ Two things that surprise people:
 - `bin/herdr-rpc METHOD JSON` is a tiny Python client for socket methods the
   CLI does not wrap (`pane.focus` by id, `pane.send_input`).
 
-### Database GUI: the `db` tab (`dotfiles-ide` action `db`)
-
-`ctrl+alt+d` opens a terminal database client in a tab of its own, and every later press
-**returns to that same tab** with its connection, panels and open tabs still alive.
-`bin/herdr-db` is the launcher, `bin/db-pane` is the pane process.
-
-Two clients, `HS_DB_CLIENT` picks (default **lazysql**):
-
-- **lazysql** — table browser with real cell editing: `c` change cell, `o` insert row,
-  `O` duplicate, `d` delete, **`Ctrl+S` commits the pending changes**, `R` refresh, `V` choose
-  columns (remembered per table), `y` copy a cell, `Y` copy rows as SQL/JSON/CSV,
-  `v`+space mark a row range, `#` exact count, `Ctrl+E` SQL editor, `Ctrl+P` global search,
-  `q` quit. Its own connection list shows every database from the INI.
-- **harlequin** (`HS_DB_CLIENT=harlequin`) — read/query focused: syntax highlighting, export,
-  nicer result formatting; its grid is **read-only** (double-clicking a table only types its
-  name into the editor), so it is the wrong tool for changing rows.
-
-`db-pane` also handles `duckdb` (which lazysql cannot open) by starting harlequin instead.
-
-It is a TAB and not herdr's `popup` placement, and that is a hard constraint, not a
-preference: herdr allows **exactly one popup per session** (`ui_busy: a popup pane is
-already open`), an unfocused popup is not even in `pane list`, and `plugin.pane.open`
-**never reuses** an entrypoint (a second call opens a second tab). A popup kept alive for
-the database would therefore be invisible most of the time and would block `ctrl+q`,
-`ctrl+alt+f` and `ctrl+alt+q` while it lived. A tab keeps the process running and
-`plugin pane focus` switches back instantly.
-
-The connection comes from the project (the caller pane's `foreground_cwd`, first hit wins):
-
-1. `DATABASE_URL` / `DB_URL` in `.env.local`, then `.env`, then the environment —
-   `sqlite:`, `mysql://`, `postgresql://`, `clickhouse://`, `duckdb:`
-2. Laravel-style `DB_CONNECTION` + `DB_HOST`/`DB_PORT`/`DB_DATABASE`/`DB_USERNAME`/`DB_PASSWORD`
-3. the project's own SQLite file (`database/database.sqlite`, any `*.sqlite`/`*.sqlite3`/`*.db`
-   two levels down, skipping `node_modules`/`vendor`/`.git`/`target`)
-4. **the machine's `db.ini`** (`[section]` with `host`/`user`/`passwd`/`db` — this box keeps 62
-   databases in `/data/www/liexin_config/db.ini`). Found next to the project
-   (`$root/db.ini`, `$root/.db.ini`, `$root/../liexin_config/db.ini`) or at that absolute path;
-   `HS_DB_INI` points at another file
-5. nothing → harlequin opens its own connection picker
-
-**lazysql reads the INI itself.** `db-pane` generates a config in this plugin's state dir
-(`${XDG_STATE_HOME:-~/.local/state}/herdr/plugins/dotfiles-ide/lazysql/config.toml`, `0600`)
-holding one `[[database]]` per section, and passes it with `-config`, so lazysql's own
-`~/.config/lazysql/config.toml` is never touched. That file is rebuilt only when `db.ini` changes
-(its sha256 is stamped), so a theme/keymap edited inside lazysql survives until then. With no
-connection detected the client opens **its own connection list** — 62 databases, no picker of
-ours. harlequin cannot do that, so `HS_DB_CLIENT=harlequin` falls back to an **fzf picker**
-(row 1 is the project's detected connection). Knobs either way: `HS_DB_SECTION=<section>` opens
-that one outright, `HS_DB_PICK=0` disables the picker, `HS_DB_READONLY=1` adds lazysql's
-`-read-only`, `HS_DB_LIMIT=<n>` is harlequin's row cap, and `db-pane --list` prints
-`section<TAB>database<TAB>host<TAB>user`. Non-interactive callers (`--print`, `--list`,
-`--summary`, anything without a TTY) never block on a picker.
-
-Two URL traps, both hit live: passwords go into a URL **percent-encoded** (they contain `#`,
-which would start a fragment and truncate the password), and SQLite must be passed as
-`file:/abs/x.db` — `sqlite3:///abs/x.db` is parsed as host+path and fails with "unable to open
-database file: out of memory".
-
-Two INI details worth knowing: only a **leading** `#` is a comment — the passwords in that file
-contain `#` (`liexin#zsyM`), and stripping to end-of-line would silently break every one — and a
-section that appears twice keeps the later values. Section passwords reach harlequin as
-`--password`, i.e. briefly visible in `ps` on a shared machine (same exposure as a `DB_PASSWORD`
-in `.env`; nothing is written to disk).
-
-Adapters need different arguments — MySQL **refuses a DSN** (`Cannot provide a DSN to the
-MySQL adapter`) and wants `--host/--port/--database/--user/--password`, while clickhouse and
-postgres take a URL and SQLite takes a path. `db-pane --print` shows the exact argv, which is
-the quickest way to debug a project: `HS_DB_ROOT=. bin/db-pane --print`.
-
-**Getting from a table to its rows.** harlequin has no "double-click a table → show data": a
-double-click in the Data Catalog (or `ctrl+enter`, the action bound to `data_catalog.insert_name`)
-only **inserts the table's name at the editor cursor** and focuses the editor — there is no
-"generate SELECT" action in harlequin at all, and a keymap can only bind one key to one existing
-action, so it cannot be configured into a macro. Its `Interaction` extension point fills the
-catalog's right-click menu, which herdr owns in this tab anyway (and whose only default entry is
-the same "Insert Name at Cursor"). So the recipe is two keystrokes:
-
-1. keep `select * from ` in the editor (the buffer survives, the tab is keep-alive);
-2. `f6` → pick the table → `ctrl+enter` (inserts the name) → `ctrl+enter` again runs it.
-
-`db-pane` passes `--limit 100` so a plain `select * from big_table` returns 100 rows without
-typing `LIMIT`; that is harlequin's row cap (adjustable in its UI), not a SQL clause.
-`HS_DB_LIMIT=-1` means no limit (`0` asks for zero rows).
-
-Two herdr quirks the launcher works around: `plugin.pane.open` never reuses an entrypoint, so
-it looks for a live `Database`-labelled pane in the workspace first; and the sidebar's
-`tab.created` hook docks an explorer into every new tab, which in a full-width GUI tab would
-be a 32-column strip — the launcher writes the sidebar's own per-tab snooze marker and closes
-the copy that already docked (best effort).
-
-Mouse works inside the pane (Textual captures it, so clicking a tab, a cell or a button is
-harlequin's), but **right-click stays herdr's** — deliberately: harlequin has no context menu of
-its own (no `MouseButton.RIGHT` handler anywhere in it; its only `on_click` hooks just dismiss
-the help/debug/text modals), so herdr's pane menu (split / copy / close) is strictly more useful
-there. Right-click routing is per pane (`herdr pane input <pane> --right-click pane`, what
-`lib.sh` does for Fresh); ours is left at herdr's default. With no
-`[ui] right_click_passthrough_modifier` in config.toml, even Ctrl+right-click stays with herdr.
-
-harlequin quits on `ctrl+q`, which herdr intercepts for the file-search popup, so close the
-tab with herdr's own `close_pane` binding (`ctrl+b x` / `ctrl+alt+shift+d`) when you want the
-process gone.
-
 ### Previews cover the Fresh pane
 
 With the IDE layout, a sidebar preview opens **inside the Fresh pane** instead of
@@ -893,17 +790,18 @@ Two things break that loop, both worth knowing:
   `--apply` writes your version into the repo (git is the backup) and restores the link — then
   commit. `adopt.sh --list` shows every managed path as `linked` / `COPY` / `missing`.
 - **Machine-only settings belong nowhere near a managed file.** `~/.zshrc.local` (sourced by the
-  managed rc), `~/.config/harlequin/`, `~/.local/state/…`, `.env` files: not managed, never in git.
+  managed rc), a tool's own config dir under `~/.config` (its wizard/settings UI rewrites it),
+  `~/.local/state/…`, `.env` files: not managed, never in git.
 
 ## Gotchas (verified)
 
-- **A harlequin database adapter is not a tool.** `uv tool install harlequin-clickhouse` fails with
-  "No executables are provided by package" — an adapter is a plugin *inside* the client's
-  environment, so it has to be a `--with` requirement of the client:
-  `uv tool install 'harlequin[mysql]==2.16.2' --with 'harlequin-clickhouse==0.1.1'`. A `--with`
-  requirement is only visible in `uv tool list --show-with`, which is why `install.sh` uses
+- **An adapter/plugin package is not a tool.** `uv tool install <adapter>` fails with "No
+  executables are provided by package" — such a package is a plugin *inside* another tool's
+  environment, so it has to be a `--with` requirement of that tool:
+  `uv tool install 'client[extra]==X' --with 'adapter==Y'`. A `--with` requirement is only visible in
+  `uv tool list --show-with`, which is why `install.sh` uses
   `uv tool list --show-extras --show-with` as its "already pinned, leave it alone" test and why
-  `verify.sh` checks the adapter separately from the version. Verified live (uv 0.12.8).
+  `verify.sh` checks requirements separately from the version. Verified live (uv 0.12.8).
 
 - **`~/.zshrc` is replaced like every other config, so machine-only bits go to `~/.zshrc.local`.**
   A machine whose own rc predates this IDE loses its aliases and `PATH`s from `~/.zshrc` (they are in

@@ -146,17 +146,6 @@ type = "plugin_action"
 command = "herdr-sidebar.symbol-popup"
 description = "跳转符号 · 全项目定义模糊搜索 → Fresh 定位到行"
 
-# ── 数据库 GUI：harlequin 常驻标签页 ──
-# 一个键切过去：这个 workspace 已经有 Database 标签就聚焦它（连接、结果、
-# 打开的查询都还在），没有就按项目 .env 新建（DATABASE_URL / DB_CONNECTION /
-# 本地 sqlite 文件）。不是 herdr 的 popup：popup 全会话只能有一个、失焦后连
-# pane list 都看不到，常驻会把 ctrl+q / ctrl+alt+f 一起堵死。
-[[keys.command]]
-key = "ctrl+alt+d"
-type = "plugin_action"
-command = "dotfiles-ide.db"
-description = "数据库 GUI · harlequin 常驻标签页（Ctrl+Alt+D）"
-
 # ---- 原 Zed: alt-w → task "Lazygit" ----
 # alt+w 归 Herdr（它比 pane 里的程序先拿到键），Fresh 的"找引用"改走 alt+shift+w。
 [[keys.command]]
