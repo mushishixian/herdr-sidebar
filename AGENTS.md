@@ -2148,10 +2148,17 @@ still to do — it is a GitHub-release binary, not a `uv` tool).
 `<our plugin state dir>/lazysql/config.toml` (`0600`, rebuilt only when db.ini's sha256 changes, so
 theme/keymap edits inside lazysql survive) with one `[[database]]` per section and passes
 `-config`, so `~/.config/lazysql/` is never touched. harlequin keeps the fzf picker instead.
-Two traps, both live: passwords must be **percent-encoded** for the URL (they contain `#` =
-fragment start → truncated password, looks like an auth failure), and SQLite must go as
-`file:/abs/x.db` (`sqlite3:///abs/x.db` → "unable to open database file: out of memory"). duckdb
-is harlequin-only, so `db-pane` switches client for it. Verified live on herdr 0.9.5 while choosing the placement — these are hard constraints:
+Three traps, all live: every generated entry needs `URL = "mysql://…"` — **the field list
+(Provider/Hostname/Port/DBName/Username/Password) is NOT enough**, because
+`app/config.go parseConfigURL` builds a URL from those fields for **MSSQL only**; without one the
+connection list renders and prints a red **"invalid database scheme"** (dburl) while nothing
+connects (user-reported). Passwords must be **percent-encoded** for the URL (they contain `#` =
+fragment start → truncated password, looks like an auth failure). SQLite goes as `file:/abs/x.db`
+(`sqlite3:///abs/x.db` → "unable to open database file: out of memory"). duckdb is harlequin-only,
+so `db-pane` switches client for it. The config stamp mixes a **generator revision** with db.ini's
+hash (`r2:<sha>`), so a change to the emitted format invalidates configs written by an older build;
+and lazysql's connection list is keyboard-first — a single click only moves the selection, `⏎`/`c`
+connects, and `q` asks Yes/No before quitting (`ConfirmOnQuit` defaults true). Verified live on herdr 0.9.5 while choosing the placement — these are hard constraints:
 
 - **A popup cannot be kept alive.** herdr allows exactly ONE popup per session
   (`plugin.pane.open` answers `ui_busy: a popup pane is already open`), an unfocused popup is

@@ -307,8 +307,11 @@ ensure_lazysql_config() {
   mkdir -p "$dir" 2>/dev/null
   chmod 700 "$dir" 2>/dev/null
   [ ${#INI_ORDER[@]} -gt 0 ] || return 0
-  want=$(sha256sum "$ini" 2>/dev/null | cut -d' ' -f1)
-  [ -n "$want" ] || return 0
+  # The stamp mixes a GENERATOR REVISION with db.ini's hash: a change to the
+  # format below must invalidate configs written by an older db-pane, or a fixed
+  # bug (the missing `URL`, for instance) would never reach an existing machine.
+  want="r2:$(sha256sum "$ini" 2>/dev/null | cut -d' ' -f1)"
+  [ -n "${want#r2:}" ] || return 0
   if [ -f "$cfg" ] && [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$want" ]; then
     printf '%s\n' "$cfg"
     return 0
@@ -321,14 +324,17 @@ ensure_lazysql_config() {
       # TOML basic strings: escape backslashes and quotes.
       name=${section//\\/\\\\}
       name=${name//\"/\\\"}
+      # `URL` is REQUIRED, even though the struct also has
+      # Provider/Hostname/Port/DBName/Username/Password: lazysql only builds a
+      # URL from those fields for MSSQL (`app.reset.parseConfigURL`), so every
+      # mysql entry without one shows the list and a red
+      # "invalid database scheme" (user-reported, from dburl).
       printf '[[database]]\n'
       printf 'Name = "%s"\n' "$name"
       printf 'Provider = "mysql"\n'
-      printf 'Hostname = "%s"\n' "${INI_HOST[$section]:-127.0.0.1}"
-      printf 'Port = "3306"\n'
-      printf 'DBName = "%s"\n' "${INI_DB[$section]:-}"
-      printf 'Username = "%s"\n' "${INI_USER[$section]:-}"
-      printf 'Password = "%s"\n\n' "${INI_PASS[$section]:-}"
+      printf 'URL = "mysql://%s:%s@%s:3306/%s"\n\n' \
+        "$(uri "${INI_USER[$section]:-}")" "$(uri "${INI_PASS[$section]:-}")" \
+        "${INI_HOST[$section]:-127.0.0.1}" "${INI_DB[$section]:-}"
     done
   } >"$cfg" 2>/dev/null
   chmod 600 "$cfg" 2>/dev/null
