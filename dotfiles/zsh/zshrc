@@ -61,11 +61,12 @@ case ":$PATH:" in
 esac
 
 # ── Local overrides, then plugins (syntax highlighting must be last) ──
-# The installer ADOPTS a machine's pre-existing ~/.zshrc here rather than
-# replacing it, so this line is what keeps that machine's aliases, PATHs and
-# prompt alive — keep it. It stays ABOVE the plugin sources because
-# zsh-syntax-highlighting must be sourced last; a personal rc that sources its
-# own copy would break that ordering (drop it from the personal file instead).
+# This file IS ~/.zshrc on every machine (the installer replaces it, keeping the
+# old one in ~/.dotfiles-backup). Anything that cannot be identical everywhere —
+# SDK paths, work aliases, a different prompt — belongs in ~/.zshrc.local, which
+# is machine-local and never managed by the repo. Keep this source line ABOVE the
+# plugin sources: zsh-syntax-highlighting must be sourced last, so an overlay
+# that sources its own copy breaks the ordering (drop it there, not here).
 [ -f ~/.zshrc.local ] && source ~/.zshrc.local
 [ -f /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ] &&
   source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh

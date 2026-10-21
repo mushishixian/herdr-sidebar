@@ -22,7 +22,7 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 | A herdr action or plugin entry point | The manifest that owns it (`plugins/herdr-sidebar/herdr-plugin.toml` or `dotfiles/herdr-plugins/ide/herdr-plugin.toml`); for a sidebar action with a keybinding, the flag mapping in `announce_flag` in `plugins/herdr-sidebar/src/shortcut_tip.rs` so its toast shows the key; a `plan PLUGIN`/`plan TOOL` line so `verify.sh` asserts it |
 | A Fresh key binding (`dotfiles/config/fresh/config.json`) | The Fresh key table in `docs/herdr-ide.md` (*Keys → Fresh*); the `fresh config show` grep list in `docs/install-herdr-ide.sh` |
 | A Fresh plugin (`dotfiles/config/fresh/plugins/*.ts`) | The *Fresh plugins* section of `docs/herdr-ide.md`; a `plan` line in `dotfiles/install.sh` if it should be checked (`verify.sh` then asserts it); the plugin link loop in `dotfiles/install.sh` picks new `*.ts` files up automatically, but a rerun is still needed |
-| `~/.zshrc` (the managed rc, or the adoption of a machine's own one) | `dotfiles/zsh/zshrc` + `link_zshrc` in `install.sh`; the *Install* note and the adoption gotcha in `docs/herdr-ide.md`. Keep the `~/.zshrc.local` source line above the plugin sources |
+| `~/.zshrc` (managed whole-file, like every other config) | `dotfiles/zsh/zshrc`; the *Install* note and the `~/.zshrc.local` gotcha in `docs/herdr-ide.md`. Keep the `~/.zshrc.local` source line above the plugin sources |
 | A script the user runs by name from PATH (`dotfiles/herdr-plugins/ide/bin/*`) | The `for script in …` link list in `dotfiles/install.sh`. Scripts that only herdr runs (manifest `command = ["./bin/…"]`) need no link |
 | An apt, npm or cargo dependency | `dotfiles/packages.txt` (apt) or the installer step (npm/cargo) in `dotfiles/install.sh` or `docs/install-herdr-ide.sh`; the *Install* section of `docs/herdr-ide.md`; a `plan TOOL` line in `install.sh`, which `verify.sh` asserts |
 | A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; a `plan TOOL` line in `install.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
@@ -54,12 +54,12 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   machine can no longer report a successful install.
 - `verify.sh` is read-only and safe to run any time (`--quiet` = problems only, `--plan` = the
   checklist). Use it instead of hand-checking after a pull.
-- **A dotfile that predates the IDE is adopted, not replaced.** `~/.zshrc` is the one today:
-  `link_zshrc` moves an existing personal rc to `~/.zshrc.local` (sourced by `dotfiles/zsh/zshrc`
-  above the highlight plugins) and links ours; an existing `~/.zshrc.local` wins and the personal rc
-  goes to the backup dir instead of merging two unknown files; `--no-zshrc` skips the step. Whole-file
-  `link`s are for configs this layer OWNS (herdr, Fresh, lazygit, ripgrep, bat); `~/.gitconfig` only
-  ever gets an `include.path` added.
+- **Every managed config is a whole-file symlink, `~/.zshrc` included** — the point is one identical
+  environment per machine, so an existing file is backed up (`.dotfiles-backup/<ts>/`) and replaced.
+  The one sanctioned escape hatch is `~/.zshrc.local`, which the managed rc sources above the
+  highlight plugins and the installer never touches: SDK paths, work aliases and a different prompt
+  live there. `--no-zshrc` leaves `~/.zshrc` alone entirely. `~/.gitconfig` is the only config that
+  gets an additive edit (`include.path`).
 
 ## Verify before you finish
 
@@ -97,11 +97,12 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 - Fresh's settings UI replaces the symlinked `~/.config/fresh/config.json` with a plain copy, and later
   dotfiles edits then do nothing. Merge the copy into `dotfiles/config/fresh/config.json`, then rerun the
   installer to re-link. Edit settings in the dotfiles file, not in the UI.
-- **`~/.zshrc` must never be swapped out by a plain `link`.** A machine's own rc moved into
-  `~/.dotfiles-backup/` is never sourced again, so its aliases, `PATH`s (oh-my-zsh, Go, Android, …) and
-  prompt silently disappear. `link_zshrc` adopts it as `~/.zshrc.local` and only then links; the overlay
-  is sourced ABOVE the highlight plugins because zsh-syntax-highlighting has to be last, so a personal
-  rc that sources its own highlighting copy breaks that order (drop it there, not here).
+- **Replacing `~/.zshrc` is deliberate: one environment everywhere.** A machine's own rc (oh-my-zsh,
+  Go/Android `PATH`s, work aliases) must therefore MOVE its machine-specific lines into
+  `~/.zshrc.local` before the first install, or they end up unsourced in
+  `~/.dotfiles-backup/<ts>/.zshrc`. The overlay is sourced ABOVE the highlight plugins because
+  zsh-syntax-highlighting has to be last, so a `.zshrc.local` that sources its own highlighting copy
+  breaks that order (drop it there, not here). `--no-zshrc` skips the replacement.
 - `HERDR_PLUGIN_STATE_DIR` names the CALLING plugin's state dir in actions and hooks. A script that reads
   another plugin's state must compute that path itself.
 - Popups (`popup` placement) belong to no tab. A process started from a popup has no usable `HERDR_TAB_ID`
