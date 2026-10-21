@@ -662,7 +662,29 @@ impl Git {
     /// the views react within a few hundred ms to a popup (another process) or a
     /// `git switch` typed in a terminal.
     pub fn head_signature(&self) -> Option<String> {
-        std::fs::read_to_string(self.git_dir()?.join("HEAD")).ok()
+        let dir = self.git_dir()?;
+        let head = std::fs::read_to_string(dir.join("HEAD")).ok()?;
+        let head = head.trim().to_string();
+        let Some(refname) = head.strip_prefix("ref: ") else {
+            // Detached: HEAD itself holds the commit.
+            return Some(head);
+        };
+        let tip = std::fs::read_to_string(dir.join(refname))
+            .ok()
+            .map(|text| text.trim().to_string())
+            .or_else(|| packed_ref_tip(&dir.join("packed-refs"), refname));
+        // A merge that stopped on conflicts does NOT move the branch, so the
+        // ref alone would make it (and its abort) invisible to the views.
+        let merge = std::fs::read_to_string(dir.join("MERGE_HEAD"))
+            .ok()
+            .map(|text| text.trim().to_string());
+        Some(format!(
+            "{head} {}{}",
+            tip.unwrap_or_default(),
+            merge
+                .map(|head| format!(" merge:{head}"))
+                .unwrap_or_default()
+        ))
     }
 
     /// The repository's git directory. In a worktree or a submodule `.git` is a
@@ -825,6 +847,18 @@ fn run_in(dir: &Path, args: &[&str]) -> Result<String, String> {
     command_result(out.status, out.stdout, out.stderr)
 }
 
+/// The tip named by `refname` in a `packed-refs` file. Loose refs win over
+/// packed ones, so this is only the fallback; `^<commit>` peel lines and the
+/// `# pack-refs with: …` header never match, because both lack a `<hash> <ref>`
+/// pair.
+fn packed_ref_tip(path: &Path, refname: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines().find_map(|line| {
+        let (hash, name) = line.split_once(' ')?;
+        (name.trim() == refname).then(|| hash.trim().to_string())
+    })
+}
+
 fn parse_branch_choices(out: &str) -> Vec<Branch> {
     let mut branches: Vec<Branch> = out
         .lines()
@@ -847,7 +881,21 @@ fn parse_branch_choices(out: &str) -> Vec<Branch> {
     if let Some(current) = branches.iter().position(|branch| branch.current) {
         branches.rotate_left(current);
     }
-    branches
+    // Locals before remotes: `--sort=-committerdate` interleaves them, and a
+    // remote is almost never the intended merge/checkout target. Stable, so
+    // recency still orders each group — and the first row (the default pick in
+    // the popups) is the current branch or the most recent LOCAL one.
+    let mut locals = Vec::with_capacity(branches.len());
+    let mut remotes = Vec::new();
+    for branch in branches {
+        if branch.remote {
+            remotes.push(branch);
+        } else {
+            locals.push(branch);
+        }
+    }
+    locals.extend(remotes);
+    locals
 }
 
 /// Background status reads must never refresh the index while another pane or
@@ -1402,6 +1450,8 @@ mod tests {
             " \0origin/main\0refs/remotes/origin/main\0\n",
             " \0origin/HEAD\0refs/remotes/origin/HEAD\0refs/remotes/origin/main\n",
         ));
+        // Locals first (current branch leads), remotes last — even though git
+        // listed the remote before feature/x.
         assert_eq!(
             choices,
             [
@@ -1411,17 +1461,57 @@ mod tests {
                     remote: false,
                 },
                 Branch {
-                    name: "origin/main".into(),
-                    current: false,
-                    remote: true,
-                },
-                Branch {
                     name: "feature/x".into(),
                     current: false,
                     remote: false,
                 },
+                Branch {
+                    name: "origin/main".into(),
+                    current: false,
+                    remote: true,
+                },
             ]
         );
+    }
+
+    #[test]
+    fn head_signature_moves_with_a_commit() {
+        let git = repo_with_head("head-signature-commit");
+        let before = git.head_signature().expect("HEAD readable");
+        run_in(&git.root, &["-c", "user.name=t", "-c", "user.email=t@t.dev", "commit",
+            "--allow-empty", "-q", "-m", "next"]).unwrap();
+        let after = git.head_signature().expect("HEAD readable");
+        assert_ne!(after, before, "a commit moves the branch tip");
+        assert!(after.starts_with(&before[..before.find(' ').unwrap()])); // same HEAD ref line
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    #[test]
+    fn head_signature_sees_a_paused_merge_and_its_abort() {
+        let git = repo_with_head("head-signature-merge");
+        let before = git.head_signature().expect("HEAD readable");
+        // A conflicted merge writes MERGE_HEAD and does NOT move the branch,
+        // so without this the `!` rows would wait for the 2 s poll.
+        std::fs::write(git.root.join(".git/MERGE_HEAD"), "0123456789abcdef\n").unwrap();
+        let during = git.head_signature().expect("HEAD readable");
+        assert_ne!(during, before);
+        assert!(during.contains("0123456789abcdef"), "{during}");
+        std::fs::remove_file(git.root.join(".git/MERGE_HEAD")).unwrap();
+        assert_eq!(git.head_signature().expect("HEAD readable"), before);
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    #[test]
+    fn head_signature_reads_a_packed_ref() {
+        let git = repo_with_head("head-signature-packed");
+        let before = git.head_signature().expect("HEAD readable");
+        run_in(&git.root, &["pack-refs", "--all"]).unwrap();
+        // Whatever git kept loose, drop it: the tip must come from packed-refs.
+        let head = std::fs::read_to_string(git.root.join(".git/HEAD")).unwrap();
+        let refname = head.trim().strip_prefix("ref: ").unwrap();
+        let _ = std::fs::remove_file(git.root.join(".git").join(refname));
+        assert_eq!(git.head_signature().expect("HEAD readable"), before);
+        let _ = std::fs::remove_dir_all(&git.root);
     }
 
     #[test]
@@ -1733,6 +1823,32 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    /// The merge/switch popups open on row 0, so a remote must never be there
+    /// while a local branch exists (user-requested: locals first).
+    #[test]
+    fn branch_choices_put_every_local_branch_before_a_remote() {
+        let git = repo_with_head("branch-choices-locals-first");
+        // A remote-tracking ref that is NEWER than the local branches, which is
+        // what made git's committerdate sort put it on top.
+        run_in(
+            &git.root,
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        )
+        .unwrap();
+        git.create_branch("a-local").unwrap();
+        let choices = git.branch_choices().unwrap();
+        let first_remote = choices.iter().position(|b| b.remote);
+        let last_local = choices.iter().rposition(|b| !b.remote);
+        match (first_remote, last_local) {
+            (Some(remote), Some(local)) => assert!(local < remote, "{choices:?}"),
+            (Some(_), None) => panic!("locals vanished: {choices:?}"),
+            _ => {}
+        }
+        assert!(choices.iter().any(|b| b.name == "origin/main" && b.remote));
+        assert!(choices.iter().any(|b| b.name == "a-local" && !b.remote));
+        let _ = std::fs::remove_dir_all(&git.root);
     }
 
     #[test]

@@ -1300,15 +1300,26 @@ and asks separately before `-D` (#78). Keep `--` before branch names in both pat
   uses the same `Git::create_branch`, so the two cannot drift. **Merge merges on the first
   ⏎** (the old second-Enter "Merge X into Y?" screen is gone, user-requested); the result /
   conflict message screen stays, and conflicts still offer `a` for `merge --abort`.
-- **A moved branch is detected by reading the git dir's `HEAD`, never by polling git.** The
-  branch popups are separate processes, so they cannot tell the sidebar; `Git::head_signature`
-  (one small file, and it resolves a worktree's `.git` FILE too) is compared by both views:
-  `scm_app::App::poll_branch` on the SCM loop, `explorer_app::App::poll_branch` from its tick.
-  A change refreshes at once — the SCM loop waits `BRANCH_POLL` (300 ms) instead of
-  `REFRESH_EVERY` (1.5 s), and the Explorer's 500 ms idle poll drops to `BRANCH_POLL` while a
+- **A moved branch is detected by reading the git dir, never by polling git.** The branch
+  popups are separate processes, so they cannot tell the sidebar; `Git::head_signature` is a
+  string the views compare, built from three small file reads (and it resolves a worktree's
+  `.git` FILE too): `HEAD` (checkout / create / rename), the branch ref's tip — the loose
+  `refs/heads/<name>` file, falling back to `packed-refs` — and `MERGE_HEAD` while a merge is
+  paused on conflicts. That last part matters: a conflicted merge does NOT move the branch, so
+  without it the `!` rows waited for the 2 s focused poll. Both views compare it —
+  `scm_app::App::poll_branch` on the SCM loop, `explorer_app::App::poll_branch` from its tick —
+  and `poll_branch` is NOT focus-gated, so an unfocused sidebar still reacts. That is what makes
+  the merge popup's result (ahead/behind counters, push prompt, `!` rows) appear within ~300 ms
+  instead of whenever the pane is next focused; the SCM loop waits `BRANCH_POLL` (300 ms) instead
+  of `REFRESH_EVERY` (1.5 s), and the Explorer's 500 ms idle poll drops to `BRANCH_POLL` while a
   decoration refresh is on its worker (`is_refreshing_decorations`). Measured live: SCM header
   ~65 ms, Explorer footer ~0.5 s (both were 2-3 s). Never put a `git` process on that fast
   path: it runs several times a second per repo.
+- **Branch lists are locals-first.** `parse_branch_choices` rotates the current branch to the
+  front and then stably partitions locals before remotes, so a popup's default selection (row 0)
+  is the current branch or the most recently used LOCAL one; remotes stay at the bottom, still in
+  recency order. Git's own `--sort=-committerdate` interleaves the two, which is why this is done
+  in the parser and not in the popup.
 Preview Space/`b` page down/up (#73); Shift+Space is indistinguishable in legacy
 terminal keyboard mode and must not be used as the sole page-up gesture.
 
