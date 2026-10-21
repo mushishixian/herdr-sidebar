@@ -2098,6 +2098,8 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   So a new managed artifact needs a `plan` line and nothing else — never a second manifest, never a
   check in `verify.sh` that duplicates one. `docs/install-herdr-ide.sh` ends with this gate and now
   exits non-zero on a half-configured machine (`--dry-run` there forwards to the plan and stops).
+  Python tools are pinned in `dotfiles/packages.lock` (`uv`) and installed with `uv tool` — adapters
+  are `uv-with` requirements, since an adapter provides no executables of its own.
   On Windows the HOST is set up by `docs/install-herdr-ide.ps1` (distro check, winget Windows
   Terminal + Nerd Font, a `herdr.cmd` launcher, and unbinding `Ctrl+Shift+A`/`Ctrl+Tab` in Windows
   Terminal's JSONC `settings.json`), which then runs the same WSL installer: the environment itself

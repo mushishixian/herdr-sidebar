@@ -73,6 +73,14 @@ docs/install-herdr-ide.sh            # --help for options (--no-lsp, --no-packag
 then ends with `dotfiles/verify.sh`, which fails the run if the machine does not match the repo
 afterwards. See *Syncing a machine with the repo* below.
 
+**Python tools come from `uv`, pinned.** `dotfiles/packages.lock` is the only place a Python
+version lives; `docs/install-herdr-ide.sh` (or `dotfiles/install.sh`) runs `uv tool install` for each
+entry, so nothing touches the system Python and no virtualenv exists. Today it pins the database
+client — `harlequin==2.16.2` with the `mysql` extra, plus its ClickHouse adapter as a `--with`
+requirement — which lands `harlequin` and `hsql` in `~/.local/bin`. `verify.sh` asserts both the
+version and the adapter (`uv tool list --show-extras --show-with`), so a machine can no longer drift
+to "harlequin is installed but cannot open ClickHouse".
+
 **Windows host.** The workbench lives in WSL, so on Windows the entry point is
 `docs/install-herdr-ide.ps1` (run it from the checkout, PowerShell 5.1 or 7). It provisions only
 the HOST — checks for a WSL distro, `winget`-installs Windows Terminal and the Nerd Font, writes
@@ -746,6 +754,9 @@ dotfiles/install.sh --dry-run   # the plan: links, tools, plugins, integrations 
 dotfiles/verify.sh              # is THIS machine really what the repo describes? exit 1 if not
 ```
 
+`dotfiles/packages.lock` pins the Python side (see *Install*); everything else follows the distro's
+own release, so only versions where a skew would bite belong in it.
+
 `verify.sh` is read-only and builds its checklist from the `PLAN` lines that
 `install.sh --dry-run` prints, so there is no second manifest to keep in sync: adding a
 link, tool, plugin, integration or generated file to `install.sh` is what makes it
@@ -761,6 +772,14 @@ so an install cannot report success on a half-configured machine.
 the checklist it checks against.
 
 ## Gotchas (verified)
+
+- **A harlequin database adapter is not a tool.** `uv tool install harlequin-clickhouse` fails with
+  "No executables are provided by package" — an adapter is a plugin *inside* the client's
+  environment, so it has to be a `--with` requirement of the client:
+  `uv tool install 'harlequin[mysql]==2.16.2' --with 'harlequin-clickhouse==0.1.1'`. A `--with`
+  requirement is only visible in `uv tool list --show-with`, which is why `install.sh` uses
+  `uv tool list --show-extras --show-with` as its "already pinned, leave it alone" test and why
+  `verify.sh` checks the adapter separately from the version. Verified live (uv 0.12.8).
 
 - **`~/.zshrc` is replaced like every other config, so machine-only bits go to `~/.zshrc.local`.**
   A machine whose own rc predates this IDE loses its aliases and `PATH`s from `~/.zshrc` (they are in

@@ -12,6 +12,9 @@
 #   ./install.sh --dry-run     print the plan and change nothing; dotfiles/verify.sh
 #                              builds its checklist from those PLAN lines
 #   ./install.sh --no-zshrc    leave ~/.zshrc and ~/.zshrc.local completely alone
+#                              (also: dotfiles/packages.lock pins the uv tools —
+#                              today the harlequin DB client — and is installed
+#                              into ~/.local/bin through `uv tool`)
 #                              (otherwise ~/.zshrc is replaced like any other
 #                              managed config; ~/.zshrc.local is never touched)
 #
@@ -81,6 +84,72 @@ link() {
   fi
   ln -s "$src" "$dest"
   info "linked $dest"
+}
+
+# uv_tools — install the Python tools pinned in dotfiles/packages.lock.
+#
+# `uv tool install` needs no virtualenv and brings its own interpreter, so this
+# is the whole Python story for the workbench (the DB client and its ClickHouse
+# adapter today). packages.lock is the only source of versions, and it also
+# carries the `--with` requirements: an adapter such as harlequin-clickhouse
+# provides NO executables, so installing it as its own tool fails — it has to go
+# into the client's environment. A machine whose tool already reports the pinned
+# version, extras and adapters is left alone.
+uv_tools() {
+  local lock=$DOTFILES/packages.lock kind name version extras spec list line have
+  local withs=() args=() w match
+  if [ ! -f "$lock" ]; then
+    info "no dotfiles/packages.lock — nothing pinned"
+    return 0
+  fi
+  # One listing carries everything the skip test needs (version, extras, --with).
+  list=$(uv tool list --show-extras --show-with 2>/dev/null || true)
+  while IFS=$'\t' read -r kind name version extras; do
+    [ "$kind" = uv ] || continue
+    if [ -z "$name" ] || [ -z "$version" ]; then continue; fi
+    spec=$name
+    if [ -n "${extras:-}" ]; then spec="$name[$extras]"; fi
+    spec="$spec==$version"
+    withs=()
+    while IFS=$'\t' read -r kind name2 want2 _; do
+      if [ "$kind" = uv-with ] && [ "$name2" = "$name" ] && [ -n "$want2" ]; then
+        withs+=("$want2")
+      fi
+    done < <(grep -v '^[[:space:]]*#' "$lock" | grep -v '^[[:space:]]*$')
+    plan UVTOOL "$name" "$version"
+    for w in ${withs[@]+"${withs[@]}"}; do plan UVWITH "$name" "$w"; done
+
+    line=$(printf '%s\n' "$list" | awk -v n="$name" 'index($0, n" v") == 1 { print; exit }')
+    have=$(printf '%s\n' "$line" | awk '{ sub(/^v/, "", $2); print $2 }')
+    match=1
+    [ "$have" = "$version" ] || match=0
+    if [ -n "${extras:-}" ] && ! printf '%s\n' "$line" | grep -qF "[extras: $extras]"; then
+      match=0
+    fi
+    for w in ${withs[@]+"${withs[@]}"}; do
+      printf '%s\n' "$line" | grep -qF "$w" || match=0
+    done
+    if [ "$match" = 1 ]; then
+      info "uv: $name $version (pinned)"
+      continue
+    fi
+
+    args=(tool install --force "$spec")
+    for w in ${withs[@]+"${withs[@]}"}; do args+=(--with "$w"); done
+    if dry; then
+      would "uv ${args[*]}"
+      continue
+    fi
+    if ! command -v uv >/dev/null 2>&1; then
+      info "uv is missing — skipped $name (install uv, then rerun)"
+      continue
+    fi
+    if uv "${args[@]}" >/dev/null 2>&1; then
+      info "uv: $name $version installed"
+    else
+      info "uv ${args[*]} failed — run it by hand to see why"
+    fi
+  done < <(grep -v '^[[:space:]]*#' "$lock" | grep -v '^[[:space:]]*$')
 }
 
 
@@ -202,6 +271,20 @@ fi
 for tool in herdr fresh zsh git jq rg fd bat eza fzf zoxide delta lazygit starship node python3; do
   plan TOOL "$tool"
 done
+
+# ── 2b. Python tools (uv) ──────────────────────────────────────────────
+step "python tools (uv)"
+if ! command -v uv >/dev/null; then
+  if dry; then would "install uv (astral.sh/uv/install.sh)"; else
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+  fi
+else
+  info "uv $(uv --version | awk '{print $2}') present"
+fi
+if [ -f "$DOTFILES/packages.lock" ]; then
+  plan TOOL uv
+  uv_tools
+fi
 
 # ── 3. Config files ────────────────────────────────────────────────────
 step "config files"

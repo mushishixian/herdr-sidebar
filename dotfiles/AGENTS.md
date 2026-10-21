@@ -24,6 +24,7 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 | A Fresh plugin (`dotfiles/config/fresh/plugins/*.ts`) | The *Fresh plugins* section of `docs/herdr-ide.md`; a `plan` line in `dotfiles/install.sh` if it should be checked (`verify.sh` then asserts it); the plugin link loop in `dotfiles/install.sh` picks new `*.ts` files up automatically, but a rerun is still needed |
 | `~/.zshrc` (managed whole-file, like every other config) | `dotfiles/zsh/zshrc`; the *Install* note and the `~/.zshrc.local` gotcha in `docs/herdr-ide.md`. Keep the `~/.zshrc.local` source line above the plugin sources |
 | A script the user runs by name from PATH (`dotfiles/herdr-plugins/ide/bin/*`) | The `for script in …` link list in `dotfiles/install.sh`. Scripts that only herdr runs (manifest `command = ["./bin/…"]`) need no link |
+| A Python tool (or a harlequin adapter) | `dotfiles/packages.lock` (`uv` / `uv-with` lines) — never a version in a script; the *Install* note and the adapter gotcha in `docs/herdr-ide.md` |
 | An apt, npm or cargo dependency | `dotfiles/packages.txt` (apt) or the installer step (npm/cargo) in `dotfiles/install.sh` or `docs/install-herdr-ide.sh`; the *Install* section of `docs/herdr-ide.md`; a `plan TOOL` line in `install.sh`, which `verify.sh` asserts |
 | A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; a `plan TOOL` line in `install.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
 | A sidebar setting default | `dotfiles/herdr-sidebar/state.json`, and the *Sidebar defaults* paragraph in `docs/herdr-ide.md` (*herdr-sidebar fork*) |
@@ -38,6 +39,10 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 `dotfiles/install.sh` is the ONE installer, and it is **declarative about what it manages**:
 
 - `--dry-run` changes nothing (no link, no package, no plugin registration, no server reload).
+- `dotfiles/packages.lock` is the only place a PYTHON version lives: `uv <name> <version> [extras]`
+  installs a tool, `uv-with <name> <package==version>` is a `--with` requirement of that tool (an
+  adapter such as `harlequin-clickhouse` provides no executables, so it CANNOT be its own tool).
+  Both print `PLAN UVTOOL` / `PLAN UVWITH`, and `verify.sh` asserts the version plus every adapter.
 - Every artifact it is responsible for is announced with `plan KIND fields…`, printed as
   `PLAN<TAB>KIND<TAB>…`: `LINK dest src`, `GENERATED path`, `STATE path`, `EDITOR-COMMAND value`,
   `TOOL cmd`, `PLUGIN id path`, `INTEGRATION agent`, `GIT-INCLUDE path` (and `UVTOOL` when uv
@@ -102,6 +107,12 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 - Fresh's settings UI replaces the symlinked `~/.config/fresh/config.json` with a plain copy, and later
   dotfiles edits then do nothing. Merge the copy into `dotfiles/config/fresh/config.json`, then rerun the
   installer to re-link. Edit settings in the dotfiles file, not in the UI.
+- **`uv tool install <adapter>` fails: an adapter has no executables.** `harlequin-clickhouse` is a
+  plugin for harlequin, so it must be `--with 'harlequin-clickhouse==…'` on the harlequin install;
+  installing it alone errors with "No executables are provided by package". Its presence is only
+  visible through `uv tool list --show-with`, so the skip test reads
+  `uv tool list --show-extras --show-with` (version, extras and adapters in one listing) and
+  `verify.sh` checks the adapter as its own artifact. Verified live on uv 0.12.8.
 - **Windows Terminal's `settings.json` is JSONC, and PowerShell 5.1's `ConvertFrom-Json` rejects
   every bit of it** (`//` and `/* */` comments, trailing commas). `docs/install-herdr-ide.ps1` strips
   them with a string-aware scanner before parsing (a `//` inside a URL must survive), removes the

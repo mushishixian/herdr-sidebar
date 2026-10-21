@@ -1,0 +1,25 @@
+# dotfiles/packages.lock — the versions every machine converges to.
+#
+# Imported by dotfiles/install.sh; asserted by dotfiles/verify.sh.
+#
+# Format: tab-separated, one entry per line, `#` starts a comment. Anything not
+# listed here is NOT pinned (apt packages come from the distro's release, and
+# herdr/Fresh/rustup update themselves), so add a line only when a version skew
+# between machines would actually bite.
+#
+#   uv       <name> <version> [extras]   uv tool install '<name>[<extras>]==<version>'
+#   uv-with  <name> <package==version>   ... --with '<package==version>'
+#
+# `uv-with` exists because a harlequin ADAPTER provides no executables: installing
+# `harlequin-clickhouse` as its own tool fails with "No executables are provided by
+# package". Adapters belong in the client's environment, i.e. `--with`.
+#
+# The Python side is deliberately all `uv tool`: no virtualenv, no system Python,
+# no pip. uv downloads its own interpreter, so a machine needs nothing but uv.
+# harlequin keeps its own settings in ~/.config/harlequin (machine-local, never
+# symlinked: its config wizard rewrites that file in place). Connections are NOT
+# stored in the repo — the launcher passes the project's DATABASE_URL, so no
+# host, database name or password ends up in git.
+#
+uv	harlequin	2.16.2	mysql
+uv-with	harlequin	harlequin-clickhouse==0.1.1

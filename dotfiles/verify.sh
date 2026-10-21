@@ -89,6 +89,28 @@ while IFS=$'\t' read -r _ kind dest src; do
         bad "$dest exists but dotfiles/zsh/zshrc never sources it"
       fi
       ;;
+    UVTOOL)
+      # dest = tool name, src = the version pinned in dotfiles/packages.lock.
+      have=$(command -v uv >/dev/null 2>&1 && uv tool list 2>/dev/null |
+        awk -v n="$dest" '$1 == n { sub(/^v/, "", $2); print $2; exit }')
+      if [ "$have" = "$src" ]; then
+        pass "uv tool $dest $src"
+      elif [ -z "$have" ]; then
+        bad "uv tool $dest is not installed (packages.lock pins $src; run: uv tool install '$dest==$src')"
+      else
+        bad "uv tool $dest is $have but packages.lock pins $src (rerun install.sh)"
+      fi
+      ;;
+    UVWITH)
+      # dest = tool, src = a `--with` requirement pinned in packages.lock.
+      line=$(command -v uv >/dev/null 2>&1 && uv tool list --show-with 2>/dev/null |
+        awk -v n="$dest" 'index($0, n" v") == 1 { print; exit }')
+      if [ -n "$line" ] && printf '%s\n' "$line" | grep -qF "$src"; then
+        pass "uv tool $dest carries $src"
+      else
+        bad "uv tool $dest is missing $src (rerun install.sh)"
+      fi
+      ;;
     GENERATED)
       if [ -s "$dest" ]; then pass "$dest"; else bad "$dest missing or empty (rerun install.sh)"; fi
       ;;
