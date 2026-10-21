@@ -558,6 +558,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | 01dea4e | **Line-history popup** | Entrypoint `git-line-history` (`--git-popup history`), range from `HERDR_SIDEBAR_HISTORY_FILE` / `HERDR_SIDEBAR_HISTORY_LINES`; opened by the Fresh plugin below. |
 | 60dd2a3 | **File-search popup** | Action `file-search` (`--file-popup-open`) → popup `--file-popup`: fuzzy file list (skips `.git`, honours `.gitignore`), opens the pick in the caller's tab. |
 | ea18341 | **Git pull / push (+ first AI commit), shortcut toasts** | `src/git_action.rs`, `src/shortcut_tip.rs`; actions `git-pull`, `git-push`, `git-commit-ai` (`--git-pull/--git-push/--git-commit`). Pull/push take a per-repo OS file lock; results are herdr toasts (`notification.show`); toasts carry the bound key, and only for plugin actions (`HERDR_PLUGIN_ACTION_ID`). Git runs with `GIT_TERMINAL_PROMPT=0` and null stdin so a credential prompt fails instead of hanging. |
+| *uncommitted* | **AI commit no longer steals focus** | `ctrl+shift+a` used to leave you in the Source Control pane (activating a view focuses its pane, and docking a new one always does). `git_action::request_ai_commit` now snapshots the focused pane and `restore_focus` puts it back — only when the activation actually took it *and* the new focus is one of our own panes (`focus_to_restore`, pure + unit-tested), so a user who switched panes meanwhile is never overridden. The request is a file and `take_ai_request` has no focus gate, so the unfocused sidebar still stages, generates and commits. |
 | 2a64708 | **AI commit through Source Control** | `src/ai_commit.rs`: `ctrl+shift+a` writes a per-tab request; that tab's Source Control sidebar stages everything, gets the OpenCommit message (prepare-commit-msg hook mode), fills Message, and commits through the ✓ Commit path. |
 | aedfbd6 | **Popup → editor caller context; AI-commit button animation** | Popups belong to no tab, so the inline editor is started with the CALLER pane's `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`. The ✓ Commit button shows a braille spinner with "AI generating…" / "Committing…" and a sweeping highlight band while an AI commit runs, and blocks a second commit. |
 | 2c02d3e | **Search popup + line-aware open** | `src/search_popup.rs`; the engine moved to lib `src/content_search.rs` (shared with the sidebar Search view); preview highlighted with `syntax::highlight_lines`; `actions::open_in_editor_inline_at` (`{line}` placeholder, or `file:line` for `fresh` / `fresh-open`). |
@@ -586,7 +587,9 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 
 **AI commit** (`ctrl+shift+a`): the action does not commit. It writes a per-tab
 request (`src/ai_commit.rs`, under the sidebar's private runtime dir) for the focused
-pane's repo and activates that tab's Source Control view. The Source Control sidebar
+pane's repo and activates that tab's Source Control view — **without moving your focus**: the pane
+that had it gets it back right after the activation (unless you switched panes in the meantime), so
+the AI commit runs while you keep typing in the editor or the agent pane. The Source Control sidebar
 then stages everything (`stage_under`, nested-repo safe), asks OpenCommit for a message
 and puts it in the Message box, then commits through the same path as the ✓ Commit
 button about 0.9 s later. Nothing staged → toast "Nothing to commit".
