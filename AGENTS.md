@@ -2182,6 +2182,17 @@ passwords are not decoded; split them into `DB_*` variables instead.
 harlequin's own quit key is `ctrl+q` (`harlequin/keys_app.py` requires it), which herdr intercepts
 for the file-search popup, so the documented way to close the tab is herdr's `close_pane` binding.
 
+**"Double-click a table to see its data" does not exist in harlequin** (checked 2.16.2, user asked):
+`components/data_catalog/tree.py` `on_click` → chain==2 → `NodeSubmitted` → `insert_node_into_editor`,
+i.e. it types the table's name into the editor. There is no generate-select action anywhere in
+`HARLEQUIN_ACTIONS`, and a keymap binds one key to one existing action (no chaining), so this cannot
+be configured. The catalog DOES own a right-click menu (`InteractiveCatalogItem.INTERACTIONS`, which
+adapters may extend — the default is "Insert Name at Cursor"), but herdr takes right-click in the pane;
+`ctrl+enter` (`data_catalog.insert_name`) is the same thing without the mouse. What we do instead:
+`db-pane` passes `--limit 100` (harlequin's row cap, adjustable in the UI; `HS_DB_LIMIT=-1` = no
+limit, `0` = zero rows), so `select * from <table>` is enough once the `select * from ` prefix is in
+the buffer.
+
 ## dotfiles/ (the IDE layer)
 
 - Agent instructions and the "when you change X, update Y" checklist for this layer: `dotfiles/AGENTS.md`.

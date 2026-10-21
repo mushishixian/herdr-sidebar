@@ -568,6 +568,21 @@ MySQL adapter`) and wants `--host/--port/--database/--user/--password`, while cl
 postgres take a URL and SQLite takes a path. `db-pane --print` shows the exact argv, which is
 the quickest way to debug a project: `HS_DB_ROOT=. bin/db-pane --print`.
 
+**Getting from a table to its rows.** harlequin has no "double-click a table → show data": a
+double-click in the Data Catalog (or `ctrl+enter`, the action bound to `data_catalog.insert_name`)
+only **inserts the table's name at the editor cursor** and focuses the editor — there is no
+"generate SELECT" action in harlequin at all, and a keymap can only bind one key to one existing
+action, so it cannot be configured into a macro. Its `Interaction` extension point fills the
+catalog's right-click menu, which herdr owns in this tab anyway (and whose only default entry is
+the same "Insert Name at Cursor"). So the recipe is two keystrokes:
+
+1. keep `select * from ` in the editor (the buffer survives, the tab is keep-alive);
+2. `f6` → pick the table → `ctrl+enter` (inserts the name) → `ctrl+enter` again runs it.
+
+`db-pane` passes `--limit 100` so a plain `select * from big_table` returns 100 rows without
+typing `LIMIT`; that is harlequin's row cap (adjustable in its UI), not a SQL clause.
+`HS_DB_LIMIT=-1` means no limit (`0` asks for zero rows).
+
 Two herdr quirks the launcher works around: `plugin.pane.open` never reuses an entrypoint, so
 it looks for a live `Database`-labelled pane in the workspace first; and the sidebar's
 `tab.created` hook docks an explorer into every new tab, which in a full-width GUI tab would

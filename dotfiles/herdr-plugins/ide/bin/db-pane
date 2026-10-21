@@ -331,4 +331,8 @@ case ${1:-} in
     ;;
 esac
 
-exec harlequin ${ARGS[@]+"${ARGS[@]}"}
+# A default row cap, so a plain `select * from <table>` shows data instead of
+# "loading 4 million rows" — harlequin's limit control is the row COUNT, not a
+# SQL LIMIT clause, and it stays adjustable in the UI. HS_DB_LIMIT=-1 is
+# harlequin's "no limit" (0 means zero rows).
+exec harlequin --limit "${HS_DB_LIMIT:-100}" ${ARGS[@]+"${ARGS[@]}"}
