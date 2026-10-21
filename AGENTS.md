@@ -2128,8 +2128,30 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
 
 ### Database GUI (the `db` tab, `ctrl+alt+d`)
 
-`dotfiles/herdr-plugins/ide/bin/{herdr-db,db-pane}` run **harlequin** in a keep-alive TAB of its
-own. Verified live on herdr 0.9.5 while choosing the placement — these are hard constraints:
+`dotfiles/herdr-plugins/ide/bin/{herdr-db,db-pane}` run a terminal DB client in a keep-alive TAB
+of its own. **Client default is lazysql** (`HS_DB_CLIENT=harlequin` switches back): harlequin's
+result grid is a `textual_fastdatatable.DataTable` with no edit actions at all — it cannot change
+rows, which is what the user wanted (user-reported "没有实时表格修改"). lazysql 0.7.0 does: `c`
+change cell, `o`/`O` insert/duplicate, `d` delete, `Ctrl+S` commits pending changes, `V` column
+visibility per table, `Y` copy rows as SQL/JSON/CSV, `#` exact count, `Ctrl+E` SQL editor. Its
+default keymap is vim-style single keys and the ONLY overlap with our herdr config is `ctrl+q`,
+which lazysql does not use (it quits on plain `q`). No plugin system exists (0 occurrences of
+"plugin"; drivers are a Go interface), but the config is a real extension surface: `-config <file>`
+(TOML: `[[database]]`, `[keymap]` per group, `[theme]`, `[application]`, `hidden_columns`), a
+project-level `.lazysql.toml` found from CWD up to the git root, per-connection `Commands`
+(`WaitForPort`/`SaveOutputTo` = SSH tunnels and fetched passwords), and `SQL_EDITOR`/`EDITOR`.
+Installed from the pinned release: `lazysql_Linux_x86_64.tar.gz` v0.7.0,
+sha256 `ebc3edeb848c7e557f88177cf6b2ca7e492ef158e2aa1dce18eb137d1d0726fc` (installer pinning is
+still to do — it is a GitHub-release binary, not a `uv` tool).
+
+**lazysql gets the database INI as its own connection list**: `db-pane` generates
+`<our plugin state dir>/lazysql/config.toml` (`0600`, rebuilt only when db.ini's sha256 changes, so
+theme/keymap edits inside lazysql survive) with one `[[database]]` per section and passes
+`-config`, so `~/.config/lazysql/` is never touched. harlequin keeps the fzf picker instead.
+Two traps, both live: passwords must be **percent-encoded** for the URL (they contain `#` =
+fragment start → truncated password, looks like an auth failure), and SQLite must go as
+`file:/abs/x.db` (`sqlite3:///abs/x.db` → "unable to open database file: out of memory"). duckdb
+is harlequin-only, so `db-pane` switches client for it. Verified live on herdr 0.9.5 while choosing the placement — these are hard constraints:
 
 - **A popup cannot be kept alive.** herdr allows exactly ONE popup per session
   (`plugin.pane.open` answers `ui_busy: a popup pane is already open`), an unfocused popup is

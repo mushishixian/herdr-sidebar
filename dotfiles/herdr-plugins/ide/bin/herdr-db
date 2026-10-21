@@ -76,8 +76,17 @@ if [ -n "$existing" ]; then
   exit 0
 fi
 
-command -v harlequin >/dev/null 2>&1 ||
-  die "harlequin is not installed (run docs/install-herdr-ide.sh, or: uv tool install harlequin)"
+client=${HS_DB_CLIENT:-lazysql}
+case $client in
+  harlequin)
+    command -v harlequin >/dev/null 2>&1 ||
+      die "harlequin is not installed (uv tool install harlequin, or docs/install-herdr-ide.sh)"
+    ;;
+  *)
+    command -v lazysql >/dev/null 2>&1 ||
+      die "lazysql is not installed (see docs/herdr-ide.md 'Database GUI' for the pinned release)"
+    ;;
+esac
 
 # What it will connect to, so the toast can say it (and an empty answer is honest).
 summary=$(HS_DB_ROOT=$root "$bin/db-pane" --summary 2>/dev/null) || summary=''

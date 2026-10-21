@@ -523,9 +523,22 @@ Two things that surprise people:
 
 ### Database GUI: the `db` tab (`dotfiles-ide` action `db`)
 
-`ctrl+alt+d` opens **harlequin** — a Textual database IDE — in a tab of its own, and
-every later press **returns to that same tab** with its connection, result pane and open
-query tabs still alive. `bin/herdr-db` is the launcher, `bin/db-pane` is the pane process.
+`ctrl+alt+d` opens a terminal database client in a tab of its own, and every later press
+**returns to that same tab** with its connection, panels and open tabs still alive.
+`bin/herdr-db` is the launcher, `bin/db-pane` is the pane process.
+
+Two clients, `HS_DB_CLIENT` picks (default **lazysql**):
+
+- **lazysql** — table browser with real cell editing: `c` change cell, `o` insert row,
+  `O` duplicate, `d` delete, **`Ctrl+S` commits the pending changes**, `R` refresh, `V` choose
+  columns (remembered per table), `y` copy a cell, `Y` copy rows as SQL/JSON/CSV,
+  `v`+space mark a row range, `#` exact count, `Ctrl+E` SQL editor, `Ctrl+P` global search,
+  `q` quit. Its own connection list shows every database from the INI.
+- **harlequin** (`HS_DB_CLIENT=harlequin`) — read/query focused: syntax highlighting, export,
+  nicer result formatting; its grid is **read-only** (double-clicking a table only types its
+  name into the editor), so it is the wrong tool for changing rows.
+
+`db-pane` also handles `duckdb` (which lazysql cannot open) by starting harlequin instead.
 
 It is a TAB and not herdr's `popup` placement, and that is a hard constraint, not a
 preference: herdr allows **exactly one popup per session** (`ui_busy: a popup pane is
@@ -548,14 +561,23 @@ The connection comes from the project (the caller pane's `foreground_cwd`, first
    `HS_DB_INI` points at another file
 5. nothing → harlequin opens its own connection picker
 
-When a `db.ini` is around, the pane opens with an **fzf picker**: row 1 is the connection
-detection already found for this project, the rest are the INI's sections (`section  db@host`).
-Enter opens the highlighted one in harlequin, Esc keeps the project's own connection. The picker
-is the only interactive step and it happens once per tab — afterwards `ctrl+alt+d` just returns to
-the live session. Knobs: `HS_DB_SECTION=<section>` skips the picker and opens that one outright,
-`HS_DB_PICK=0` skips it and uses plain detection, and `db-pane --list` prints
-`section<TAB>database<TAB>host<TAB>user` (handy for `grep cms`). Non-interactive callers
-(`--print`, `--list`, `--summary`, anything without a TTY) never see the picker.
+**lazysql reads the INI itself.** `db-pane` generates a config in this plugin's state dir
+(`${XDG_STATE_HOME:-~/.local/state}/herdr/plugins/dotfiles-ide/lazysql/config.toml`, `0600`)
+holding one `[[database]]` per section, and passes it with `-config`, so lazysql's own
+`~/.config/lazysql/config.toml` is never touched. That file is rebuilt only when `db.ini` changes
+(its sha256 is stamped), so a theme/keymap edited inside lazysql survives until then. With no
+connection detected the client opens **its own connection list** — 62 databases, no picker of
+ours. harlequin cannot do that, so `HS_DB_CLIENT=harlequin` falls back to an **fzf picker**
+(row 1 is the project's detected connection). Knobs either way: `HS_DB_SECTION=<section>` opens
+that one outright, `HS_DB_PICK=0` disables the picker, `HS_DB_READONLY=1` adds lazysql's
+`-read-only`, `HS_DB_LIMIT=<n>` is harlequin's row cap, and `db-pane --list` prints
+`section<TAB>database<TAB>host<TAB>user`. Non-interactive callers (`--print`, `--list`,
+`--summary`, anything without a TTY) never block on a picker.
+
+Two URL traps, both hit live: passwords go into a URL **percent-encoded** (they contain `#`,
+which would start a fragment and truncate the password), and SQLite must be passed as
+`file:/abs/x.db` — `sqlite3:///abs/x.db` is parsed as host+path and fails with "unable to open
+database file: out of memory".
 
 Two INI details worth knowing: only a **leading** `#` is a comment — the passwords in that file
 contain `#` (`liexin#zsyM`), and stripping to end-of-line would silently break every one — and a

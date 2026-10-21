@@ -1,25 +1,38 @@
 #!/usr/bin/env bash
-# The "Database" pane: harlequin, the terminal DB GUI, connected from the project.
+# The "Database" pane: a terminal DB client connected from the project.
+#
+# Clients (HS_DB_CLIENT, default lazysql):
+#   lazysql   table browser with real cell editing (c = change cell, o = insert
+#             row, d = delete, Ctrl+S = commit pending changes), SQL editor,
+#             query history, column visibility per table. Its OWN connection
+#             picker lists the generated db.ini connections, so no picker of ours.
+#   harlequin read/query focused (syntax highlighting, export, glow-style results)
+#             and its results grid is READ-ONLY.
 #
 # ONE implementation of connection discovery, with three callers:
-#   db-pane            the pane process itself: exec harlequin with the found args
-#   db-pane --print    herdr-db asks what WOULD run (one arg per line)
-#   db-pane --summary  one human line ("mysql · app_db @ 127.0.0.1") for a toast
+#   db-pane            the pane process itself: exec the client
+#   db-pane --print    the exact command line (one arg per line)
+#   db-pane --summary  one human line ("mysql · app_db @ 127.0.0.1")
 #
 # Precedence, first hit wins:
 #   1. DATABASE_URL / DB_URL  (.env.local, then .env, then the real environment)
 #   2. Laravel-style DB_CONNECTION + DB_HOST/DB_PORT/DB_DATABASE/DB_USERNAME/…
 #   3. a local SQLite file (database/database.sqlite, *.sqlite, *.sqlite3, *.db)
-#   4. a database INI (`db.ini`: [section] host/user/passwd/db, 70+ databases on
-#      this machine) — HS_DB_SECTION picks one outright, otherwise a picker
-#   5. nothing -> harlequin with no arguments, i.e. its own connection picker
+#   4. HS_DB_SECTION, an explicit section of the database INI
+#   5. nothing -> lazysql's own connection list (the whole INI) / harlequin's
+#      connection picker
 #
-# Adapters differ, so the args do too: MySQL REFUSES a DSN ("Cannot provide a DSN
-# to the MySQL adapter", harlequin_mysql/adapter.py) and wants --host/--database…
-# while clickhouse and postgres take a URL and sqlite takes a path.
+# The INI is a flat `[section]` + `host`/`user`/`passwd`/`db` file (this machine:
+# 62 databases in /data/www/liexin_config/db.ini). Find order: HS_DB_INI, then
+# $root/db.ini, $root/.db.ini, $root/../liexin_config/db.ini, then that path.
 set -uo pipefail
 
 root=${HS_DB_ROOT:-$PWD}
+client=${HS_DB_CLIENT:-lazysql}
+readonly=${HS_DB_READONLY:-0}
+state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/dotfiles-ide
+
+# ── helpers ────────────────────────────────────────────────────────────────
 
 # Last KEY=VALUE in FILE, quotes stripped (a `.env` with CRLF or `export ` works).
 envfile_value() { # key file
@@ -72,7 +85,6 @@ parse_url() { # url
   case $U_SCHEME in
     sqlite | file)
       U_DB=$rest
-      [ "$U_DB" = ':memory:' ] || [ -n "$U_DB" ] || U_DB=''
       return 0
       ;;
   esac
@@ -101,94 +113,13 @@ parse_url() { # url
   U_HOST=$hp
 }
 
-ARGS=()
-SUMMARY=''
-push() { ARGS+=("$@"); }
+# Percent-encode for a URL: passwords here contain `#` (`liexin#zsyM`), and in a
+# URL that starts a fragment — sending it raw truncates the password and the
+# client reports an auth failure that looks like a server problem.
+uri() { jq -rn --arg s "$1" '$s|@uri'; }
 
-# --host/--database… for the MySQL adapter, skipping empty values.
-mysql_flags() { # host port database user password
-  [ -n "$1" ] && push --host "$1"
-  [ -n "$2" ] && push --port "$2"
-  [ -n "$3" ] && push --database "$3"
-  [ -n "$4" ] && push --user "$4"
-  [ -n "$5" ] && push --password "$5"
-  return 0
-}
+# ── the database INI ──────────────────────────────────────────────────────
 
-url=$(db_env DATABASE_URL)
-[ -n "$url" ] || url=$(db_env DB_URL)
-if [ -n "$url" ]; then
-  parse_url "$url"
-  case $U_SCHEME in
-    sqlite | file)
-      if [ -z "$U_DB" ] || [ "$U_DB" = ':memory:' ]; then
-        push -a sqlite
-        SUMMARY='sqlite · in memory'
-      else
-        push -a sqlite "$U_DB"
-        SUMMARY="sqlite · $U_DB"
-      fi
-      ;;
-    mysql | mariadb)
-      push -a mysql
-      mysql_flags "$U_HOST" "$U_PORT" "$U_DB" "$U_USER" "$U_PASS"
-      SUMMARY="mysql · ${U_DB:-?} @ ${U_HOST:-localhost}"
-      ;;
-    postgres | postgresql | pgsql)
-      push -a postgres "$url"
-      SUMMARY="postgres · ${U_DB:-?}"
-      ;;
-    clickhouse)
-      push -a clickhouse "$url"
-      SUMMARY="clickhouse · ${U_DB:-?}"
-      ;;
-    duckdb)
-      push -a duckdb "$U_DB"
-      SUMMARY="duckdb · $U_DB"
-      ;;
-    *)
-      SUMMARY="unknown scheme '$U_SCHEME' — pick a connection in harlequin"
-      ;;
-  esac
-fi
-
-if [ ${#ARGS[@]} -eq 0 ]; then
-  conn=$(db_env DB_CONNECTION)
-  host=$(db_env DB_HOST)
-  port=$(db_env DB_PORT)
-  db=$(db_env DB_DATABASE)
-  user=$(db_env DB_USERNAME)
-  pass=$(db_env DB_PASSWORD)
-  case $conn in
-    mysql | mariadb)
-      push -a mysql
-      mysql_flags "${host:-127.0.0.1}" "${port:-3306}" "$db" "$user" "$pass"
-      SUMMARY="mysql · ${db:-?} @ ${host:-127.0.0.1}"
-      ;;
-    pgsql | postgres | postgresql)
-      push -a postgres
-      push "postgresql://${user}${pass:+:$pass}@${host:-127.0.0.1}:${port:-5432}/${db}"
-      SUMMARY="postgres · ${db:-?} @ ${host:-127.0.0.1}"
-      ;;
-    clickhouse)
-      push -a clickhouse
-      push "clickhouse://${user}${pass:+:$pass}@${host:-127.0.0.1}:${port:-8123}/${db}"
-      SUMMARY="clickhouse · ${db:-?} @ ${host:-127.0.0.1}"
-      ;;
-    sqlite)
-      push -a sqlite "$db"
-      SUMMARY="sqlite · ${db:-?}"
-      ;;
-    '') ;;
-    *)
-      SUMMARY="no adapter for DB_CONNECTION=$conn — pick a connection in harlequin"
-      ;;
-  esac
-fi
-
-# The machine's database INI: [section] host/user/passwd/db, no nesting, `#`
-# comments, and the same section often appears twice (later wins).
-# HS_DB_INI overrides the search; HS_DB_SECTION picks a section without asking.
 ini=${HS_DB_INI:-}
 if [ -z "$ini" ]; then
   for candidate in "$root/db.ini" "$root/.db.ini" "$root/../liexin_config/db.ini" \
@@ -203,7 +134,6 @@ fi
 declare -A INI_HOST=() INI_USER=() INI_PASS=() INI_DB=()
 INI_ORDER=()
 if [ -n "$ini" ] && [ -f "$ini" ]; then
-  # shellcheck disable=SC1090
   while IFS='=' read -r key value; do
     case $key in
       '['*']')
@@ -230,85 +160,254 @@ if [ -n "$ini" ] && [ -f "$ini" ]; then
         esac
         ;;
     esac
-  # Only a LEADING `#` is a comment: these passwords contain `#`
-  # (`liexin#zsyM`), so stripping to end-of-line would silently break every one.
+    # Only a LEADING `#` is a comment: these passwords contain `#`
+    # (`liexin#zsyM`), so stripping to end-of-line would silently break every one.
   done < <(sed -e 's/^[[:space:]]*#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$ini" 2>/dev/null)
 fi
 
-# A chosen INI section -> the MySQL adapter's arguments.
-ini_args() { # section
-  local section=$1
-  push -a mysql
-  mysql_flags "${INI_HOST[$section]:-127.0.0.1}" '' "${INI_DB[$section]:-}" \
-    "${INI_USER[$section]:-}" "${INI_PASS[$section]:-}"
-  SUMMARY="mysql · ${INI_DB[$section]:-?} @ ${INI_HOST[$section]:-?} ($section)"
-}
+# ── connection discovery: fills C_KIND/C_* and SUMMARY ────────────────────
 
-PICK_SUMMARY=''
-[ ${#INI_ORDER[@]} -gt 0 ] && PICK_SUMMARY="${#INI_ORDER[@]} databases in $(basename "$ini")"
+C_KIND='' C_HOST='' C_PORT='' C_DB='' C_USER='' C_PASS='' C_PATH=''
+SUMMARY=''
 
-# Nothing declared yet: the project's own SQLite file beats the machine-wide
-# database list, because it is about THIS project.
-if [ ${#ARGS[@]} -eq 0 ]; then
+detect_connection() {
+  local url host port db user pass file conn
+  url=$(db_env DATABASE_URL)
+  [ -n "$url" ] || url=$(db_env DB_URL)
+  if [ -n "$url" ]; then
+    parse_url "$url"
+    case $U_SCHEME in
+      sqlite | file)
+        C_KIND=sqlite
+        C_PATH=${U_DB:-}
+        SUMMARY="sqlite · ${C_PATH:-":memory:"}"
+        ;;
+      mysql | mariadb)
+        C_KIND=mysql C_HOST=$U_HOST C_PORT=$U_PORT C_DB=$U_DB C_USER=$U_USER C_PASS=$U_PASS
+        SUMMARY="mysql · ${C_DB:-?} @ ${C_HOST:-localhost}"
+        ;;
+      postgres | postgresql | pgsql)
+        C_KIND=postgres C_HOST=$U_HOST C_PORT=$U_PORT C_DB=$U_DB C_USER=$U_USER C_PASS=$U_PASS
+        SUMMARY="postgres · ${C_DB:-?} @ ${C_HOST:-localhost}"
+        ;;
+      clickhouse)
+        C_KIND=clickhouse C_HOST=$U_HOST C_PORT=$U_PORT C_DB=$U_DB C_USER=$U_USER C_PASS=$U_PASS
+        SUMMARY="clickhouse · ${C_DB:-?} @ ${C_HOST:-localhost}"
+        ;;
+      duckdb)
+        C_KIND=duckdb C_PATH=$U_DB
+        SUMMARY="duckdb · $C_PATH"
+        ;;
+      *)
+        SUMMARY="unknown scheme '$U_SCHEME' in DATABASE_URL"
+        ;;
+    esac
+    return 0
+  fi
+
+  conn=$(db_env DB_CONNECTION)
+  host=$(db_env DB_HOST)
+  port=$(db_env DB_PORT)
+  db=$(db_env DB_DATABASE)
+  user=$(db_env DB_USERNAME)
+  pass=$(db_env DB_PASSWORD)
+  case $conn in
+    mysql | mariadb)
+      C_KIND=mysql C_HOST=${host:-127.0.0.1} C_PORT=${port:-3306} C_DB=$db C_USER=$user C_PASS=$pass
+      SUMMARY="mysql · ${db:-?} @ ${C_HOST}"
+      return 0
+      ;;
+    pgsql | postgres | postgresql)
+      C_KIND=postgres C_HOST=${host:-127.0.0.1} C_PORT=${port:-5432} C_DB=$db C_USER=$user C_PASS=$pass
+      SUMMARY="postgres · ${db:-?} @ ${C_HOST}"
+      return 0
+      ;;
+    clickhouse)
+      C_KIND=clickhouse C_HOST=${host:-127.0.0.1} C_PORT=${port:-8123} C_DB=$db C_USER=$user C_PASS=$pass
+      SUMMARY="clickhouse · ${db:-?} @ ${C_HOST}"
+      return 0
+      ;;
+    sqlite)
+      C_KIND=sqlite C_PATH=$db
+      SUMMARY="sqlite · ${db:-?}"
+      return 0
+      ;;
+    '') ;;
+    *)
+      SUMMARY="no adapter for DB_CONNECTION=$conn"
+      return 0
+      ;;
+  esac
+
+  # The project's own SQLite file beats the machine-wide database list.
   file=$(find "$root" -maxdepth 2 \
     \( -name node_modules -o -name vendor -o -name .git -o -name target \) -prune -o \
     -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' \) -print 2>/dev/null |
     head -n 1)
   if [ -n "$file" ]; then
-    push -a sqlite "$file"
+    C_KIND=sqlite C_PATH=$file
     SUMMARY="sqlite · ${file#"$root"/}"
+    return 0
   fi
-fi
 
-# An explicit HS_DB_SECTION wins over everything: it is the caller saying which
-# database, e.g. `herdr plugin pane open … --env HS_DB_SECTION=db_cms`.
-case ${HS_DB_SECTION:-} in
-  '') ;;
-  *)
-    if [ -n "${INI_HOST[${HS_DB_SECTION:-}]+set}" ]; then
-      ARGS=()
-      SUMMARY=''
-      ini_args "${HS_DB_SECTION:-}"
-    else
-      SUMMARY="no section [${HS_DB_SECTION:-}] in $ini"
-    fi
-    ;;
-esac
-
-# The picker. One keypress on the project's own database (its row is first, and
-# Esc keeps it), or arrow down to any of the machine-wide ones — the DB tab is a
-# deliberate "go look at a database" action, and this list is where you say
-# which. Only for an interactive pane: the --print/--list/--summary modes must
-# never block on a UI.
-if [ -z "${1:-}" ] && [ ${#INI_ORDER[@]} -gt 0 ] && [ "${HS_DB_PICK:-1}" != 0 ] &&
-  [ -t 0 ] && command -v fzf >/dev/null 2>&1; then
-  project_args=(${ARGS[@]+"${ARGS[@]}"})
-  project_summary=$SUMMARY
-  rows=()
-  [ ${#project_args[@]} -gt 0 ] &&
-    rows+=("$(printf '*project*\t%s\t' "$project_summary")")
-  for section in "${INI_ORDER[@]}"; do
-    rows+=("$(printf '%s\t%s@%s\t%s' "$section" "${INI_DB[$section]:-?}" \
-      "${INI_HOST[$section]:-?}" "${INI_USER[$section]:-?}")")
-  done
-  chosen=$(printf '%s\n' "${rows[@]}" |
-    fzf --height=100% --reverse --prompt='database> ' \
-      --header="$(basename "$ini") — enter: open, esc: cancel" \
-      --delimiter='\t' --with-nth='1,2' --nth='1,2' |
-    cut -f1) || chosen=''
-  case $chosen in
-    '' | '*project*')
-      # Esc or the project's own row: whatever detection already found.
-      ARGS=(${project_args[@]+"${project_args[@]}"})
-      SUMMARY=$project_summary
-      ;;
+  # An explicitly chosen INI section.
+  case ${HS_DB_SECTION:-} in
+    '') return 0 ;;
     *)
-      ARGS=()
-      SUMMARY=''
-      ini_args "$chosen"
+      if [ -n "${INI_HOST[${HS_DB_SECTION:-}]+set}" ]; then
+        C_KIND=mysql
+        C_HOST=${INI_HOST[${HS_DB_SECTION:-}]:-127.0.0.1}
+        C_DB=${INI_DB[${HS_DB_SECTION:-}]:-}
+        C_USER=${INI_USER[${HS_DB_SECTION:-}]:-}
+        C_PASS=${INI_PASS[${HS_DB_SECTION:-}]:-}
+        SUMMARY="mysql · ${C_DB:-?} @ ${C_HOST} (${HS_DB_SECTION:-})"
+      else
+        SUMMARY="no section [${HS_DB_SECTION:-}] in $ini"
+      fi
       ;;
   esac
-fi
+}
+
+# `user:pass@` for a URL, or empty when there is no user.
+cred() {
+  [ -n "$C_USER" ] || return 0
+  printf '%s:%s@' "$(uri "$C_USER")" "$(uri "$C_PASS")"
+}
+
+# The URL lazysql connects to (`dburl.Open` handles these schemes).
+connection_url() {
+  local host=${C_HOST:-127.0.0.1}
+  case $C_KIND in
+    mysql | postgres | postgresql | clickhouse)
+      printf '%s://%s%s%s/%s' "$C_KIND" "$(cred)" "$host" "${C_PORT:+:$C_PORT}" "$C_DB"
+      ;;
+    sqlite)
+      # dburl (what lazysql opens the URL with) only accepts a FILE path under
+      # `file:`; `sqlite3:///abs/x.db` is parsed as host+path and fails with
+      # "unable to open database file: out of memory" (verified live, 0.7.0).
+      case $C_PATH in
+        '' | ':memory:') printf 'file::memory:' ;;
+        /*) printf 'file:%s' "$C_PATH" ;;
+        *) printf 'file:%s/%s' "$root" "$C_PATH" ;;
+      esac
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+# ── lazysql's config: every INI section as a saved connection ─────────────
+#
+# Written to our OWN state dir and passed with -config, so lazysql's default
+# config (theme, keymaps) is never touched and the passwords never land in the
+# repo. Rebuilt only when db.ini itself changes, so a theme/keymap the user
+# edits in lazysql survives until then.
+ensure_lazysql_config() {
+  local dir=$state_dir/lazysql cfg=$state_dir/lazysql/config.toml stamp=$state_dir/lazysql/dbini.sha256
+  local want='' section name
+  mkdir -p "$dir" 2>/dev/null
+  chmod 700 "$dir" 2>/dev/null
+  [ ${#INI_ORDER[@]} -gt 0 ] || return 0
+  want=$(sha256sum "$ini" 2>/dev/null | cut -d' ' -f1)
+  [ -n "$want" ] || return 0
+  if [ -f "$cfg" ] && [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$want" ]; then
+    printf '%s\n' "$cfg"
+    return 0
+  fi
+  {
+    printf '# Generated by dotfiles-ide bin/db-pane from %s — do not edit.\n' "$ini"
+    printf '# Rebuilt when that file changes; lazysql saved theme/keymaps survive until then.\n\n'
+    printf '[application]\nDefaultPageSize = 300\nDisableUpdateCheck = true\n\n'
+    for section in "${INI_ORDER[@]}"; do
+      # TOML basic strings: escape backslashes and quotes.
+      name=${section//\\/\\\\}
+      name=${name//\"/\\\"}
+      printf '[[database]]\n'
+      printf 'Name = "%s"\n' "$name"
+      printf 'Provider = "mysql"\n'
+      printf 'Hostname = "%s"\n' "${INI_HOST[$section]:-127.0.0.1}"
+      printf 'Port = "3306"\n'
+      printf 'DBName = "%s"\n' "${INI_DB[$section]:-}"
+      printf 'Username = "%s"\n' "${INI_USER[$section]:-}"
+      printf 'Password = "%s"\n\n' "${INI_PASS[$section]:-}"
+    done
+  } >"$cfg" 2>/dev/null
+  chmod 600 "$cfg" 2>/dev/null
+  printf '%s\n' "$want" >"$stamp" 2>/dev/null
+  printf '%s\n' "$cfg"
+}
+
+# ── the command line ──────────────────────────────────────────────────────
+
+CMD=()
+build_command() {
+  local url cfg
+  case $client in
+    harlequin) ;;
+    *)
+      client=lazysql
+      ;;
+  esac
+
+  # duckdb exists only in harlequin; lazysql cannot open it, so the pane would
+  # otherwise sit on its connection list while the project asked for a duckdb file.
+  if [ "$client" = lazysql ] && [ "$C_KIND" = duckdb ]; then
+    printf 'db-pane: lazysql has no duckdb driver, using harlequin\n' >&2
+    client=harlequin
+  fi
+
+  if [ "$client" = harlequin ]; then
+    CMD=(harlequin --limit "${HS_DB_LIMIT:-100}")
+    case $C_KIND in
+      mysql)
+        CMD+=(-a mysql)
+        [ -n "$C_HOST" ] && CMD+=(--host "$C_HOST")
+        [ -n "$C_PORT" ] && CMD+=(--port "$C_PORT")
+        [ -n "$C_DB" ] && CMD+=(--database "$C_DB")
+        [ -n "$C_USER" ] && CMD+=(--user "$C_USER")
+        [ -n "$C_PASS" ] && CMD+=(--password "$C_PASS")
+        ;;
+      postgres) CMD+=(-a postgres "$(connection_url)") ;;
+      clickhouse) CMD+=(-a clickhouse "$(connection_url)") ;;
+      sqlite) CMD+=(-a sqlite ${C_PATH:+"$C_PATH"}) ;;
+      duckdb) CMD+=(-a duckdb ${C_PATH:+"$C_PATH"}) ;;
+    esac
+    # No connection anywhere: an interactive pane can still pick one of the
+    # INI's databases (harlequin has no connection list of its own).
+    if [ -z "$C_KIND" ] && [ ${#INI_ORDER[@]} -gt 0 ] && [ -z "${1:-}" ] &&
+      [ "${HS_DB_PICK:-1}" != 0 ] && [ -t 0 ] && command -v fzf >/dev/null 2>&1; then
+      local rows=() chosen
+      for section in "${INI_ORDER[@]}"; do
+        rows+=("$(printf '%s\t%s@%s\t%s' "$section" "${INI_DB[$section]:-?}" \
+          "${INI_HOST[$section]:-?}" "${INI_USER[$section]:-?}")")
+      done
+      chosen=$(printf '%s\n' "${rows[@]}" |
+        fzf --height=100% --reverse --prompt='database> ' \
+          --header="$(basename "$ini") — enter: open, esc: cancel" \
+          --delimiter='\t' --with-nth='1,2' --nth='1,2' |
+        cut -f1) || chosen=''
+      case $chosen in
+        '') ;;
+        *)
+          CMD+=(-a mysql --host "${INI_HOST[$chosen]:-127.0.0.1}" \
+            --database "${INI_DB[$chosen]:-}" --user "${INI_USER[$chosen]:-}" \
+            --password "${INI_PASS[$chosen]:-}")
+          SUMMARY="mysql · ${INI_DB[$chosen]:-?} @ ${INI_HOST[$chosen]:-?} ($chosen)"
+          ;;
+      esac
+    fi
+    return 0
+  fi
+
+  # lazysql: its own connection list covers "no connection detected", so only an
+  # explicit target is passed on the command line.
+  cfg=$(ensure_lazysql_config)
+  CMD=(lazysql -config "${cfg:-$state_dir/lazysql/config.toml}" -no-telemetry)
+  [ "$readonly" = 1 ] && CMD+=(-read-only)
+  url=$(connection_url)
+  [ -n "$C_KIND" ] && [ -n "$url" ] && CMD+=("$url")
+}
+
+detect_connection
 
 case ${1:-} in
   --list)
@@ -319,20 +418,22 @@ case ${1:-} in
     exit 0
     ;;
   --print)
-    for arg in ${ARGS[@]+"${ARGS[@]}"}; do printf '%s\n' "$arg"; done
+    build_command --print
+    for arg in ${CMD[@]+"${CMD[@]}"}; do printf '%s\n' "$arg"; done
     exit 0
     ;;
   --summary)
-    # A picker is a real answer: the toast should say what it will show, not
-    # "no connection found".
+    if [ -z "$SUMMARY" ] && [ ${#INI_ORDER[@]} -gt 0 ]; then
+      SUMMARY="${#INI_ORDER[@]} databases in $(basename "$ini")"
+    fi
     [ -n "$SUMMARY" ] && printf '%s\n' "$SUMMARY"
-    [ -n "$SUMMARY" ] || [ -z "$PICK_SUMMARY" ] || printf 'pick from %s\n' "$PICK_SUMMARY"
     exit 0
     ;;
 esac
 
-# A default row cap, so a plain `select * from <table>` shows data instead of
-# "loading 4 million rows" — harlequin's limit control is the row COUNT, not a
-# SQL LIMIT clause, and it stays adjustable in the UI. HS_DB_LIMIT=-1 is
-# harlequin's "no limit" (0 means zero rows).
-exec harlequin --limit "${HS_DB_LIMIT:-100}" ${ARGS[@]+"${ARGS[@]}"}
+build_command
+[ -n "${CMD[0]:-}" ] || {
+  printf 'db-pane: nothing to run (client=%s)\n' "$client" >&2
+  exit 1
+}
+exec "${CMD[@]}"
