@@ -562,24 +562,27 @@ impl Git {
                 "branch",
                 "-a",
                 "--sort=-committerdate",
-                "--format=%(HEAD)%00%(refname:short)",
+                "--format=%(HEAD)%00%(refname:short)%00%(committerdate:unix)",
             ],
         )?;
         // Rebuild the `"* name"` / `"  name"` lines the drawer parses, in
-        // creation order (see `ref_created_at`).
-        let mut entries: Vec<(String, String)> = out
+        // creation order (see `ref_created_at` and `sort_stamp`).
+        let mut entries: Vec<(String, String, i64)> = out
             .lines()
             .filter_map(|line| {
-                let (head, name) = line.split_once('\0')?;
-                Some((head.trim().to_string(), name.trim().to_string()))
+                let mut fields = line.split('\0');
+                let head = fields.next()?.trim().to_string();
+                let name = fields.next()?.trim().to_string();
+                let commit = fields.next().unwrap_or("").trim().parse().unwrap_or(i64::MIN);
+                Some((head, name, commit))
             })
-            .filter(|(_, name)| !name.is_empty())
+            .filter(|(_, name, _)| !name.is_empty())
             .collect();
         let created = ref_created_at(&self.root);
-        entries.sort_by_key(|(_, name)| Reverse(created.get(name).copied().unwrap_or(i64::MIN)));
+        entries.sort_by_key(|(_, name, commit)| Reverse(sort_stamp(&created, name, *commit)));
         Ok(entries
             .into_iter()
-            .map(|(head, name)| {
+            .map(|(head, name, _)| {
                 format!("{} {name}", if head == "*" { "*" } else { " " })
             })
             .collect())
@@ -594,20 +597,23 @@ impl Git {
             &[
                 "for-each-ref",
                 "--sort=-committerdate",
-                "--format=%(HEAD)%00%(refname:short)%00%(refname)%00%(symref)",
+                "--format=%(HEAD)%00%(refname:short)%00%(refname)%00%(symref)%00%(committerdate:unix)",
                 "refs/heads",
                 "refs/remotes",
             ],
         )?;
         // Newest-CREATED first: git's committerdate sort puts a branch made from
         // an old commit near the bottom, which is not the order anybody picks
-        // from (user-requested). `parse_branch_choices` then rotates the current
-        // branch to the front and keeps locals before remotes, stably.
+        // from (user-requested). `parse_branch_choices` then keeps locals before
+        // remotes, stably — it does NOT hoist the current branch, because that
+        // pushed the branch you just created off row 0.
         let created = ref_created_at(&self.root);
         let mut rows: Vec<&str> = out.lines().collect();
         rows.sort_by_key(|line| {
-            let name = line.split('\0').nth(1).unwrap_or("").trim();
-            Reverse(created.get(name).copied().unwrap_or(i64::MIN))
+            let mut fields = line.split('\0');
+            let name = fields.nth(1).unwrap_or("").trim();
+            let commit = fields.next().and_then(|c| c.trim().parse::<i64>().ok());
+            Reverse(sort_stamp(&created, name, commit.unwrap_or(i64::MIN)))
         });
         Ok(parse_branch_choices(&rows.join("\n")))
     }
@@ -913,7 +919,7 @@ fn packed_ref_tip(path: &Path, refname: &str) -> Option<String> {
 }
 
 fn parse_branch_choices(out: &str) -> Vec<Branch> {
-    let mut branches: Vec<Branch> = out
+    let branches: Vec<Branch> = out
         .lines()
         .filter_map(|line| {
             let mut fields = line.split('\0');
@@ -931,13 +937,16 @@ fn parse_branch_choices(out: &str) -> Vec<Branch> {
             })
         })
         .collect();
-    if let Some(current) = branches.iter().position(|branch| branch.current) {
-        branches.rotate_left(current);
-    }
+    // The current branch is NOT hoisted to row 0. It used to be, and that is
+    // what made "newest first" look broken: the branch you had just created sat
+    // second whenever an older branch happened to be checked out (user-reported,
+    // reproduced in a repo where `main` was older than `feat/themes-i18n`). Row 0
+    // is the newest local branch, which is the one people pick; switching to the
+    // current branch is a no-op anyway and Merge filters it out.
+    //
     // Locals before remotes: `--sort=-committerdate` interleaves them, and a
-    // remote is almost never the intended merge/checkout target. Stable, so
-    // recency still orders each group — and the first row (the default pick in
-    // the popups) is the current branch or the most recent LOCAL one.
+    // remote is almost never the intended merge/checkout target. The partition
+    // is stable, so both groups keep the creation order.
     let mut locals = Vec::with_capacity(branches.len());
     let mut remotes = Vec::new();
     for branch in branches {
@@ -1120,6 +1129,17 @@ fn terminate_child(child: &mut Child, job: Option<&ChildJob>) -> bool {
         let _ = child.kill();
         false
     }
+}
+
+/// What a branch list sorts on, newest first: the ref's creation stamp when git
+/// has a reflog for it, else the tip commit's committer date.
+///
+/// The fallback matters: a local branch with no reflog (cloned from a remote,
+/// reflog expired, made by an older tool) used to sort LAST — below branches that
+/// were demonstrably created before it. A commit date is not a creation date, but
+/// it keeps such a branch in the right neighbourhood instead of at the bottom.
+fn sort_stamp(created: &std::collections::HashMap<String, i64>, name: &str, commit: i64) -> i64 {
+    created.get(name).copied().unwrap_or(commit)
 }
 
 /// Creation time (unix seconds) of every ref git keeps a reflog for.
@@ -1542,26 +1562,29 @@ mod tests {
     }
 
     #[test]
-    fn branch_choices_put_current_first_and_drop_symbolic_remote_head() {
+    fn branch_choices_keep_listing_order_and_drop_symbolic_remote_head() {
+        // The input is already in creation order (newest first). The current
+        // branch is NOT hoisted: doing that pushed a freshly created branch off
+        // row 0 whenever an older branch was checked out (user-reported).
         let choices = parse_branch_choices(concat!(
             " \0feature/x\0refs/heads/feature/x\0\n",
             "*\0main\0refs/heads/main\0\n",
             " \0origin/main\0refs/remotes/origin/main\0\n",
             " \0origin/HEAD\0refs/remotes/origin/HEAD\0refs/remotes/origin/main\n",
         ));
-        // Locals first (current branch leads), remotes last — even though git
-        // listed the remote before feature/x.
+        // Locals first in the order given, remotes last, the symbolic remote
+        // HEAD alias dropped — even though git listed the remote before feature/x.
         assert_eq!(
             choices,
             [
                 Branch {
-                    name: "main".into(),
-                    current: true,
+                    name: "feature/x".into(),
+                    current: false,
                     remote: false,
                 },
                 Branch {
-                    name: "feature/x".into(),
-                    current: false,
+                    name: "main".into(),
+                    current: true,
                     remote: false,
                 },
                 Branch {
@@ -1869,6 +1892,37 @@ mod tests {
             position("gamma") < position("beta") && position("beta") < position("alpha"),
             "drawer order: {drawer:?}"
         );
+    }
+
+    #[test]
+    fn a_branch_without_a_reflog_sorts_by_its_commit_date_not_last() {
+        // A clone-made branch has no reflog here; before the fallback it sorted
+        // below every branch that did have one, however old.
+        let git = repo_with_head("branch-no-reflog-order");
+        for name in ["logged-old", "logged-new"] {
+            let out = git_command(
+                &git.root,
+                &["branch", name, "HEAD"],
+            )
+            .output()
+            .unwrap();
+            assert!(out.status.success());
+        }
+        // `logged-new` gets the newest reflog stamp; `unlogged` is a plain ref
+        // (no reflog line) whose commit is HEAD, i.e. newer than both.
+        let out = git_command(
+            &git.root,
+            &["update-ref", "--no-deref", "refs/heads/unlogged", "HEAD"],
+        )
+        .output()
+        .unwrap();
+        assert!(out.status.success());
+        std::fs::remove_file(git.root.join(".git/logs/refs/heads/unlogged")).ok();
+        let created = ref_created_at(&git.root);
+        assert!(!created.contains_key("unlogged"), "no reflog for it");
+        let commit = 5_000_000_000; // far newer than any real reflog stamp here
+        assert_eq!(sort_stamp(&created, "unlogged", commit), commit);
+        assert!(sort_stamp(&created, "logged-new", commit) < commit);
     }
 
     #[test]

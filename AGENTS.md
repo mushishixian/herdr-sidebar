@@ -1357,15 +1357,19 @@ and asks separately before `-D` (#78). Keep `--` before branch names in both pat
   decoration refresh is on its worker (`is_refreshing_decorations`). Measured live: SCM header
   ~65 ms, Explorer footer ~0.5 s (both were 2-3 s). Never put a `git` process on that fast
   path: it runs several times a second per repo.
-- **Branch lists are locals-first and newest-CREATED first.** `parse_branch_choices` rotates the
-  current branch to the front and then stably partitions locals before remotes, so a popup's
-  default selection (row 0) is the current branch or the newest LOCAL one; remotes stay at the
-  bottom, in the same creation order. Git's own `--sort=-committerdate` interleaves the two, which
-  is why this is done in the parser and not in the popup.
+- **Branch lists are locals-first and newest-CREATED first, and the CURRENT branch is not hoisted.**
+  `parse_branch_choices` only stably partitions locals before remotes; row 0 is the newest LOCAL
+  branch. It used to rotate the current branch to the front, and that is exactly what made
+  "newest first" look broken: with `main` checked out, a branch created five minutes ago sat second
+  (user-reported; reproduced in a repo whose `main` was older than `feat/themes-i18n`). Switching to
+  the current branch is a no-op and Merge filters it out anyway. Git's own `--sort=-committerdate`
+  interleaves locals and remotes, which is why the partition is done in the parser.
   Ordering *within* each group comes from `ref_created_at`: **git stores no branch creation date**,
   so it reads every reflog once (`git reflog show --all --date=unix --format=%gd`) and takes each
-  ref's OLDEST entry, i.e. the first time git wrote anything for it. Refs without a reflog are
-  absent and sort last; equal stamps keep the incoming `--sort=-committerdate` order (stable sort).
+  ref's OLDEST entry, i.e. the first time git wrote anything for it. A ref with **no reflog** (cloned
+  from a remote, expired reflog, made by an older tool) falls back to its tip commit's committer date
+  via `sort_stamp` — it used to sort dead last, below branches that were demonstrably older. Equal
+  stamps keep the incoming `--sort=-committerdate` order (stable sort).
   Newest-created first is what people actually pick from — a branch created from an old commit used
   to sit at the bottom (user-requested). `Git::branches()` (the drawer) and `Git::branch_choices()`
   (the popups) both apply it, so the two lists agree; the test creates three branches with
