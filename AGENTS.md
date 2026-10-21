@@ -2098,6 +2098,10 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   So a new managed artifact needs a `plan` line and nothing else — never a second manifest, never a
   check in `verify.sh` that duplicates one. `docs/install-herdr-ide.sh` ends with this gate and now
   exits non-zero on a half-configured machine (`--dry-run` there forwards to the plan and stops).
+  On Windows the HOST is set up by `docs/install-herdr-ide.ps1` (distro check, winget Windows
+  Terminal + Nerd Font, a `herdr.cmd` launcher, and unbinding `Ctrl+Shift+A`/`Ctrl+Tab` in Windows
+  Terminal's JSONC `settings.json`), which then runs the same WSL installer: the environment itself
+  never moves out of Ubuntu.
 - Installs are symlinks into `~/.config` and `~/.local/bin`, so edits apply live. Rerunning the installer re-points links left at an old checkout, including the `dotfiles-ide` registration and `editor-command.txt`.
 - Keep the herdr plugin id `dotfiles-ide`: its state dir and key bindings use it.
 - Fresh's settings UI replaces the symlinked `config.json` with a plain copy. Merge the copy into `dotfiles/config/fresh/config.json`, then rerun the installer to re-link.

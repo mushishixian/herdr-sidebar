@@ -73,6 +73,17 @@ docs/install-herdr-ide.sh            # --help for options (--no-lsp, --no-packag
 then ends with `dotfiles/verify.sh`, which fails the run if the machine does not match the repo
 afterwards. See *Syncing a machine with the repo* below.
 
+**Windows host.** The workbench lives in WSL, so on Windows the entry point is
+`docs/install-herdr-ide.ps1` (run it from the checkout, PowerShell 5.1 or 7). It provisions only
+the HOST — checks for a WSL distro, `winget`-installs Windows Terminal and the Nerd Font, writes
+`%LOCALAPPDATA%\Programs\herdr-ide\herdr.cmd`, and unbinds the two Windows Terminal chords that
+never reach herdr (`Ctrl+Shift+A` select-all, `Ctrl+Tab` next-tab) — then runs
+`docs/install-herdr-ide.sh` inside the distro. `-DryRun` prints every action and touches nothing;
+`-NoTerminalSettings` leaves its `settings.json` alone; `-RepoPath '~/code/herdr-sidebar'` names
+the checkout when it lives only inside WSL. It is NOT a native-Windows port: apt, the symlinks and
+the bash keymap scripts stay in Ubuntu. The `settings.json` edit backs the file up first
+(`settings.json.herdr-ide.bak-<ts>`) and rewrites it as plain JSON, so any comments in it are lost.
+
 **One machine, one shell setup.** Every managed config is a whole-file symlink, `~/.zshrc`
 included: a machine's existing rc is backed up to `~/.dotfiles-backup/<ts>/` and replaced, so all
 machines behave identically. Anything that cannot be identical everywhere — SDK paths, work-only

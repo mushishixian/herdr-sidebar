@@ -54,6 +54,11 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   machine can no longer report a successful install.
 - `verify.sh` is read-only and safe to run any time (`--quiet` = problems only, `--plan` = the
   checklist). Use it instead of hand-checking after a pull.
+- **Windows has a HOST bootstrap, not a second installer.** `docs/install-herdr-ide.ps1` only does
+  what WSL cannot do for itself (distro check, `winget` Windows Terminal + Nerd Font, the
+  `herdr.cmd` launcher, unbinding the two Windows Terminal chords) and then runs
+  `docs/install-herdr-ide.sh` inside the distro. Never duplicate package/config logic there: the
+  environment is the WSL one, and `verify.sh` is what proves it.
 - **Every managed config is a whole-file symlink, `~/.zshrc` included** — the point is one identical
   environment per machine, so an existing file is backed up (`.dotfiles-backup/<ts>/`) and replaced.
   The one sanctioned escape hatch is `~/.zshrc.local`, which the managed rc sources above the
@@ -97,6 +102,12 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 - Fresh's settings UI replaces the symlinked `~/.config/fresh/config.json` with a plain copy, and later
   dotfiles edits then do nothing. Merge the copy into `dotfiles/config/fresh/config.json`, then rerun the
   installer to re-link. Edit settings in the dotfiles file, not in the UI.
+- **Windows Terminal's `settings.json` is JSONC, and PowerShell 5.1's `ConvertFrom-Json` rejects
+  every bit of it** (`//` and `/* */` comments, trailing commas). `docs/install-herdr-ide.ps1` strips
+  them with a string-aware scanner before parsing (a `//` inside a URL must survive), removes the
+  `Ctrl+Shift+A` / `Ctrl+Tab` keybinding objects, and writes the file back with
+  `[IO.File]::WriteAllText(..., UTF8Encoding($false))`. The rewrite is plain JSON, so the file's
+  comments are gone — hence the timestamped backup next to it, and `-NoTerminalSettings` to skip.
 - **Replacing `~/.zshrc` is deliberate: one environment everywhere.** A machine's own rc (oh-my-zsh,
   Go/Android `PATH`s, work aliases) must therefore MOVE its machine-specific lines into
   `~/.zshrc.local` before the first install, or they end up unsourced in
