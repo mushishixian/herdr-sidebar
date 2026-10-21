@@ -77,11 +77,14 @@ fn sync_is_primary(status: &Status) -> bool {
         && status.ahead + status.behind > 0
 }
 
-/// A conflicted (`!`) entry is resolved in the editor, not in the diff viewer.
-/// The diff would only say "this file conflicts"; Fresh's inline merge resolver
-/// (Alt+C / Alt+I / Alt+M, Alt+D next) is what actually resolves it.
+/// The default action on a changed file (click, `o`, the hover `↗`) hands the
+/// FILE to the editor — that is what "go to the change" means when you are about
+/// to work on it, and for a conflicted (`!`) entry Fresh's inline merge resolver
+/// (Alt+C / Alt+I / Alt+M, Alt+D next) is the only thing that can resolve it.
+/// A DELETED entry has no file left on disk, so it keeps its read-only diff, and
+/// the menu's "Open Diff" / "Open Diff Preview" still mean the diff.
 fn opens_in_editor(entry: &FileEntry) -> bool {
-    entry.letter == '!'
+    entry.letter != 'D'
 }
 
 fn sync_label_for_status(status: &Status, syncing: bool) -> Option<String> {
@@ -977,7 +980,7 @@ impl FileHoverAction {
 
     fn footer_hint(self) -> &'static str {
         match self {
-            Self::Open => "↗ Open Changes",
+            Self::Open => "↗ Open in Editor",
             Self::Discard => "↶ Discard Changes",
             Self::Stage => "+ Stage Changes",
             Self::Unstage => "− Unstage Changes",
@@ -4311,9 +4314,14 @@ impl App {
     /// preview (changed files and drawer refs). `None` for non-preview rows.
     fn doc_key_for_row(&self, index: usize) -> Option<String> {
         match self.rows.get(index)? {
+            // A file row opens in the editor, so there is no preview document to
+            // pin a double click to; the deleted entries below still diff.
             Row::Staged(r, i) => {
                 let repo = self.repos.get(*r)?;
                 let entry = repo.status.staged.get(*i)?;
+                if opens_in_editor(entry) {
+                    return None;
+                }
                 Some(herdr_sidebar::viewer::doc_key_for_diff(
                     repo.git.root(),
                     &entry.path,
@@ -4323,6 +4331,9 @@ impl App {
             Row::Unstaged(r, i) => {
                 let repo = self.repos.get(*r)?;
                 let entry = repo.status.unstaged.get(*i)?;
+                if opens_in_editor(entry) {
+                    return None;
+                }
                 let kind = if entry.letter == 'U' {
                     "untracked"
                 } else {
@@ -6985,7 +6996,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn conflicted_entries_open_in_the_editor_and_the_rest_as_diffs() {
+    fn every_existing_file_opens_in_the_editor_and_a_deletion_keeps_its_diff() {
         let conflicted = FileEntry {
             path: "src/merge.rs".into(),
             orig: None,
@@ -7001,9 +7012,15 @@ mod tests {
             orig: None,
             letter: 'U',
         };
+        let deleted = FileEntry {
+            path: "src/gone.rs".into(),
+            orig: None,
+            letter: 'D',
+        };
         assert!(opens_in_editor(&conflicted));
-        assert!(!opens_in_editor(&modified));
-        assert!(!opens_in_editor(&untracked));
+        assert!(opens_in_editor(&modified), "a changed file goes to the editor");
+        assert!(opens_in_editor(&untracked));
+        assert!(!opens_in_editor(&deleted), "nothing to open: keep the diff");
     }
 
     #[test]
@@ -7161,7 +7178,7 @@ mod tests {
 
     #[test]
     fn file_hover_actions_describe_their_footer_tooltips() {
-        assert_eq!(FileHoverAction::Open.footer_hint(), "↗ Open Changes");
+        assert_eq!(FileHoverAction::Open.footer_hint(), "↗ Open in Editor");
         assert_eq!(FileHoverAction::Discard.footer_hint(), "↶ Discard Changes");
         assert_eq!(FileHoverAction::Stage.footer_hint(), "+ Stage Changes");
         assert_eq!(FileHoverAction::Unstage.footer_hint(), "− Unstage Changes");

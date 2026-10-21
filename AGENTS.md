@@ -1050,7 +1050,7 @@ HACKING.md — budget time for that before promising a patched build.
   still RENDERS media when something routes there — no editor configured, the diff viewer, or the
   explicit "Open Diff Preview" — so the two paths do not conflict.
 - **SCM diffs and git shows are READ-ONLY viewing, so they always use the built-in preview.**
-  `open_diff` (staged / unstaged / untracked rows, click / Enter / hover-open / `o`) calls
+  `open_diff` (the menu's Open Diff / Open Diff Preview, deleted rows, `Enter` on a drawer ref) calls
   `open_diff_viewer`, and drawer refs (commits, stashes, branches) follow the same path: one
   inline preview pane, replaced in place by the next thing you view. They used to be routed to
   the custom editor when one was configured, which handed "look at this diff" to Fresh, where
@@ -1162,14 +1162,15 @@ HACKING.md — budget time for that before promising a patched build.
   have VARIABLE HEIGHT — mouse hit-testing walks `Row::height()`, and j/k skip the widget
   rows (`Row::selectable()`). The ✧ suggest / S sync keys act on the ACTIVE repo — the one
   the selection is in (named in the panel header).
-- **A changed row's default action is the DIFF, so the menu carries "Open File in Editor".**
-  `o`, a click and the hover `↗` on a staged/unstaged row all go through `open_entry` → the read-only
-  diff (`open_diff_viewer`); only a conflicted (`!`) row opens in the editor. The SCM file menu
-  therefore has `MenuAction::OpenInEditor` ("Open File in Editor"), which calls
-  `file_popup::open_file_in_workspace` exactly like the conflict path and is skipped for a deleted
-  entry (verified live: it spawns the Fresh pane). A row that owns no action — a section header, a
-  repository header, the commit box — no longer swallows `o`/`m`: `section_row_hint` flashes which
-  key to press, because silence made a working key look broken (user-reported).
+- **A changed row opens the FILE in the editor; only a deletion keeps its diff.** `o`, a click and
+  the hover `↗` ("↗ Open in Editor") go through `open_entry` → `opens_in_editor` (everything except
+  `D`) → `file_popup::open_file_in_workspace`, the same path a tree click uses, so a conflicted (`!`)
+  row still lands in Fresh's resolver and a modified one lands on the file. A deleted entry has
+  nothing on disk and keeps `open_diff`; the menu's `Open Diff` / `Open Diff Preview` always mean the
+  diff, and drawer refs (commits/stashes/branches) are unaffected. `doc_key_for_row` returns `None`
+  for a file row now, because a click no longer opens a diff document to pin.
+  A row that owns no action — a section header, a repository header, the commit box — used to
+  swallow `o`/`m` silently, which reads as a broken key: `section_row_hint` flashes what to do.
 - **Git drawers** (title-case names, incl. Worktrees): drawer lines carry parsed
   refs (`DrawerRef` — commit hash / stash index / branch / remote / tag / worktree path,
   see `parse_drawer_ref`). Click or ⏎ shows the ref
@@ -1474,7 +1475,7 @@ It replaced the original pane-ID-keyed park/restore implementation; the optional
 
 ### Diff preview
 
-- Clicking a changed file in Source Control (or `o`, or the context menu's Open Diff)
+- A changed file's DIFF (the context menu's Open Diff / Open Diff Preview, and any deleted row)
   shows its colored `git diff` in a preview tab, the same way the explorer opens
   files — except a conflicted (`!`) row, which a click or `o` opens in the editor so
   Fresh's inline merge resolver (Alt+C / Alt+I / Alt+M) can resolve it; the diff is
