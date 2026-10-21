@@ -10,7 +10,9 @@
 #   1. DATABASE_URL / DB_URL  (.env.local, then .env, then the real environment)
 #   2. Laravel-style DB_CONNECTION + DB_HOST/DB_PORT/DB_DATABASE/DB_USERNAME/…
 #   3. a local SQLite file (database/database.sqlite, *.sqlite, *.sqlite3, *.db)
-#   4. nothing -> harlequin with no arguments, i.e. its own connection picker
+#   4. a database INI (`db.ini`: [section] host/user/passwd/db, 70+ databases on
+#      this machine) — HS_DB_SECTION picks one outright, otherwise a picker
+#   5. nothing -> harlequin with no arguments, i.e. its own connection picker
 #
 # Adapters differ, so the args do too: MySQL REFUSES a DSN ("Cannot provide a DSN
 # to the MySQL adapter", harlequin_mysql/adapter.py) and wants --host/--database…
@@ -184,7 +186,69 @@ if [ ${#ARGS[@]} -eq 0 ]; then
   esac
 fi
 
-# Nothing declared: use the project's own SQLite file if there is one.
+# The machine's database INI: [section] host/user/passwd/db, no nesting, `#`
+# comments, and the same section often appears twice (later wins).
+# HS_DB_INI overrides the search; HS_DB_SECTION picks a section without asking.
+ini=${HS_DB_INI:-}
+if [ -z "$ini" ]; then
+  for candidate in "$root/db.ini" "$root/.db.ini" "$root/../liexin_config/db.ini" \
+    /data/www/liexin_config/db.ini; do
+    if [ -f "$candidate" ]; then
+      ini=$candidate
+      break
+    fi
+  done
+fi
+
+declare -A INI_HOST=() INI_USER=() INI_PASS=() INI_DB=()
+INI_ORDER=()
+if [ -n "$ini" ] && [ -f "$ini" ]; then
+  # shellcheck disable=SC1090
+  while IFS='=' read -r key value; do
+    case $key in
+      '['*']')
+        section=${key#[}
+        section=${section%]}
+        section=${section// /}
+        case $section in
+          '' | '['*']') section='' ;; # anything odd is not a section
+        esac
+        if [ -n "$section" ] && [ -z "${INI_HOST[$section]+set}" ]; then
+          INI_ORDER+=("$section")
+        fi
+        ;;
+      host | user | passwd | password | db | database)
+        [ -n "$section" ] || continue
+        value=${value%$'\r'}
+        value=${value#\"}
+        value=${value%\"}
+        case $key in
+          host) INI_HOST[$section]=$value ;;
+          user) INI_USER[$section]=$value ;;
+          passwd | password) INI_PASS[$section]=$value ;;
+          db | database) INI_DB[$section]=$value ;;
+        esac
+        ;;
+    esac
+  # Only a LEADING `#` is a comment: these passwords contain `#`
+  # (`liexin#zsyM`), so stripping to end-of-line would silently break every one.
+  done < <(sed -e 's/^[[:space:]]*#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$ini" 2>/dev/null)
+fi
+
+# A chosen INI section -> the MySQL adapter's arguments.
+ini_args() { # section
+  local section=$1
+  push -a mysql
+  mysql_flags "${INI_HOST[$section]:-127.0.0.1}" '' "${INI_DB[$section]:-}" \
+    "${INI_USER[$section]:-}" "${INI_PASS[$section]:-}"
+  SUMMARY="mysql · ${INI_DB[$section]:-?} @ ${INI_HOST[$section]:-?} ($section)"
+}
+
+PICK_SUMMARY=''
+[ ${#INI_ORDER[@]} -gt 0 ] && PICK_SUMMARY="${#INI_ORDER[@]} databases in $(basename "$ini")"
+
+# Nothing declared yet: the project's own SQLite file beats the machine-wide
+# database list, because it is about THIS project.
 if [ ${#ARGS[@]} -eq 0 ]; then
   file=$(find "$root" -maxdepth 2 \
     \( -name node_modules -o -name vendor -o -name .git -o -name target \) -prune -o \
@@ -196,13 +260,73 @@ if [ ${#ARGS[@]} -eq 0 ]; then
   fi
 fi
 
+# An explicit HS_DB_SECTION wins over everything: it is the caller saying which
+# database, e.g. `herdr plugin pane open … --env HS_DB_SECTION=db_cms`.
+case ${HS_DB_SECTION:-} in
+  '') ;;
+  *)
+    if [ -n "${INI_HOST[${HS_DB_SECTION:-}]+set}" ]; then
+      ARGS=()
+      SUMMARY=''
+      ini_args "${HS_DB_SECTION:-}"
+    else
+      SUMMARY="no section [${HS_DB_SECTION:-}] in $ini"
+    fi
+    ;;
+esac
+
+# The picker. One keypress on the project's own database (its row is first, and
+# Esc keeps it), or arrow down to any of the machine-wide ones — the DB tab is a
+# deliberate "go look at a database" action, and this list is where you say
+# which. Only for an interactive pane: the --print/--list/--summary modes must
+# never block on a UI.
+if [ -z "${1:-}" ] && [ ${#INI_ORDER[@]} -gt 0 ] && [ "${HS_DB_PICK:-1}" != 0 ] &&
+  [ -t 0 ] && command -v fzf >/dev/null 2>&1; then
+  project_args=(${ARGS[@]+"${ARGS[@]}"})
+  project_summary=$SUMMARY
+  rows=()
+  [ ${#project_args[@]} -gt 0 ] &&
+    rows+=("$(printf '*project*\t%s\t' "$project_summary")")
+  for section in "${INI_ORDER[@]}"; do
+    rows+=("$(printf '%s\t%s@%s\t%s' "$section" "${INI_DB[$section]:-?}" \
+      "${INI_HOST[$section]:-?}" "${INI_USER[$section]:-?}")")
+  done
+  chosen=$(printf '%s\n' "${rows[@]}" |
+    fzf --height=100% --reverse --prompt='database> ' \
+      --header="$(basename "$ini") — enter: open, esc: cancel" \
+      --delimiter='\t' --with-nth='1,2' --nth='1,2' |
+    cut -f1) || chosen=''
+  case $chosen in
+    '' | '*project*')
+      # Esc or the project's own row: whatever detection already found.
+      ARGS=(${project_args[@]+"${project_args[@]}"})
+      SUMMARY=$project_summary
+      ;;
+    *)
+      ARGS=()
+      SUMMARY=''
+      ini_args "$chosen"
+      ;;
+  esac
+fi
+
 case ${1:-} in
+  --list)
+    for section in "${INI_ORDER[@]}"; do
+      printf '%s\t%s\t%s\t%s\n' "$section" "${INI_DB[$section]:-}" \
+        "${INI_HOST[$section]:-}" "${INI_USER[$section]:-}"
+    done
+    exit 0
+    ;;
   --print)
     for arg in ${ARGS[@]+"${ARGS[@]}"}; do printf '%s\n' "$arg"; done
     exit 0
     ;;
   --summary)
+    # A picker is a real answer: the toast should say what it will show, not
+    # "no connection found".
     [ -n "$SUMMARY" ] && printf '%s\n' "$SUMMARY"
+    [ -n "$SUMMARY" ] || [ -z "$PICK_SUMMARY" ] || printf 'pick from %s\n' "$PICK_SUMMARY"
     exit 0
     ;;
 esac

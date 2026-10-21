@@ -2158,7 +2158,21 @@ own. Verified live on herdr 0.9.5 while choosing the placement — these are har
 
 Connection discovery lives in ONE place, `db-pane` (`--print` = the argv, `--summary` = one human
 line): `DATABASE_URL`/`DB_URL` from `.env.local` → `.env` → environment, then Laravel
-`DB_CONNECTION`+`DB_*`, then a local SQLite file, then harlequin's own picker. **Adapters take
+`DB_CONNECTION`+`DB_*`, then a local SQLite file, then **the machine's `db.ini`**, then
+harlequin's own picker.
+
+`db.ini` (`HS_DB_INI`, else `$root/db.ini` / `$root/.db.ini` / `$root/../liexin_config/db.ini` /
+`/data/www/liexin_config/db.ini`) is a flat INI of `[section]` + `host`/`user`/`passwd`/`db` — 62
+databases on this machine. Passing all of them to harlequin is not an option (one live MySQL
+connection per conn string), so an INTERACTIVE pane gets an **fzf picker**: row 1 is the project's
+own detected connection, the rest are INI sections; Enter opens, Esc keeps the project's one.
+`HS_DB_SECTION` skips the picker, `HS_DB_PICK=0` disables it, `--list` prints the sections, and
+every non-interactive mode (`--print`/`--list`/`--summary`, or no TTY) skips the picker so nothing
+can block. Two parser traps, both real: **only a LEADING `#` is a comment** — these passwords
+contain `#` (`liexin#zsyM`), and `sed 's/#.*//'` breaks every one — and a section repeated later in
+the file keeps its later values (the file has nine such duplicates). Verified against the real
+file: `--list` → 62 sections, `hlq pick` → `-a mysql --host … --password ichuntcms#zsyM`, and a
+live `hsql … -c 'select 1'` reached 192.168.1.238. **Adapters take
 different arguments**: `harlequin_mysql` REFUSES a DSN ("Cannot provide a DSN to the MySQL
 adapter") and only accepts `--host/--port/--database/--user/--password`, clickhouse and postgres
 take a URL as the conn string, sqlite takes a path (`sqlite:///abs/x.db` must keep its leading

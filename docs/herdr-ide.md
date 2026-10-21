@@ -542,7 +542,26 @@ The connection comes from the project (the caller pane's `foreground_cwd`, first
 2. Laravel-style `DB_CONNECTION` + `DB_HOST`/`DB_PORT`/`DB_DATABASE`/`DB_USERNAME`/`DB_PASSWORD`
 3. the project's own SQLite file (`database/database.sqlite`, any `*.sqlite`/`*.sqlite3`/`*.db`
    two levels down, skipping `node_modules`/`vendor`/`.git`/`target`)
-4. nothing → harlequin opens its own connection picker
+4. **the machine's `db.ini`** (`[section]` with `host`/`user`/`passwd`/`db` — this box keeps 62
+   databases in `/data/www/liexin_config/db.ini`). Found next to the project
+   (`$root/db.ini`, `$root/.db.ini`, `$root/../liexin_config/db.ini`) or at that absolute path;
+   `HS_DB_INI` points at another file
+5. nothing → harlequin opens its own connection picker
+
+When a `db.ini` is around, the pane opens with an **fzf picker**: row 1 is the connection
+detection already found for this project, the rest are the INI's sections (`section  db@host`).
+Enter opens the highlighted one in harlequin, Esc keeps the project's own connection. The picker
+is the only interactive step and it happens once per tab — afterwards `ctrl+alt+d` just returns to
+the live session. Knobs: `HS_DB_SECTION=<section>` skips the picker and opens that one outright,
+`HS_DB_PICK=0` skips it and uses plain detection, and `db-pane --list` prints
+`section<TAB>database<TAB>host<TAB>user` (handy for `grep cms`). Non-interactive callers
+(`--print`, `--list`, `--summary`, anything without a TTY) never see the picker.
+
+Two INI details worth knowing: only a **leading** `#` is a comment — the passwords in that file
+contain `#` (`liexin#zsyM`), and stripping to end-of-line would silently break every one — and a
+section that appears twice keeps the later values. Section passwords reach harlequin as
+`--password`, i.e. briefly visible in `ps` on a shared machine (same exposure as a `DB_PASSWORD`
+in `.env`; nothing is written to disk).
 
 Adapters need different arguments — MySQL **refuses a DSN** (`Cannot provide a DSN to the
 MySQL adapter`) and wants `--host/--port/--database/--user/--password`, while clickhouse and
