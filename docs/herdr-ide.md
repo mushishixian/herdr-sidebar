@@ -167,6 +167,7 @@ moves the copy aside.
 | `ctrl+alt+k` | Git: push (background, progress toasts) |
 | `ctrl+shift+a` | Git: stage all + OpenCommit message into Source Control, then commit |
 | `ctrl+alt+shift+f` | Git: force reset + clean (`scripts/force-reset.sh`, extra y/N prompt) |
+| `ctrl+alt+d` | Database GUI: harlequin in a keep-alive `db` tab, connected from the project's `.env` |
 | `alt+w`, `ctrl+alt+h` | lazygit (whole UI / the log panel) as popups |
 | `ctrl+alt+v` | File viewer pane (`herdr-file-viewer`; `e` opens the file in Fresh) |
 | `ctrl+b alt+g` | lazygit popup |
@@ -519,6 +520,44 @@ Two things that surprise people:
   `pane.send_input`, which uses bracketed paste so newlines don't submit.
 - `bin/herdr-rpc METHOD JSON` is a tiny Python client for socket methods the
   CLI does not wrap (`pane.focus` by id, `pane.send_input`).
+
+### Database GUI: the `db` tab (`dotfiles-ide` action `db`)
+
+`ctrl+alt+d` opens **harlequin** — a Textual database IDE — in a tab of its own, and
+every later press **returns to that same tab** with its connection, result pane and open
+query tabs still alive. `bin/herdr-db` is the launcher, `bin/db-pane` is the pane process.
+
+It is a TAB and not herdr's `popup` placement, and that is a hard constraint, not a
+preference: herdr allows **exactly one popup per session** (`ui_busy: a popup pane is
+already open`), an unfocused popup is not even in `pane list`, and `plugin.pane.open`
+**never reuses** an entrypoint (a second call opens a second tab). A popup kept alive for
+the database would therefore be invisible most of the time and would block `ctrl+q`,
+`ctrl+alt+f` and `ctrl+alt+q` while it lived. A tab keeps the process running and
+`plugin pane focus` switches back instantly.
+
+The connection comes from the project (the caller pane's `foreground_cwd`, first hit wins):
+
+1. `DATABASE_URL` / `DB_URL` in `.env.local`, then `.env`, then the environment —
+   `sqlite:`, `mysql://`, `postgresql://`, `clickhouse://`, `duckdb:`
+2. Laravel-style `DB_CONNECTION` + `DB_HOST`/`DB_PORT`/`DB_DATABASE`/`DB_USERNAME`/`DB_PASSWORD`
+3. the project's own SQLite file (`database/database.sqlite`, any `*.sqlite`/`*.sqlite3`/`*.db`
+   two levels down, skipping `node_modules`/`vendor`/`.git`/`target`)
+4. nothing → harlequin opens its own connection picker
+
+Adapters need different arguments — MySQL **refuses a DSN** (`Cannot provide a DSN to the
+MySQL adapter`) and wants `--host/--port/--database/--user/--password`, while clickhouse and
+postgres take a URL and SQLite takes a path. `db-pane --print` shows the exact argv, which is
+the quickest way to debug a project: `HS_DB_ROOT=. bin/db-pane --print`.
+
+Two herdr quirks the launcher works around: `plugin.pane.open` never reuses an entrypoint, so
+it looks for a live `Database`-labelled pane in the workspace first; and the sidebar's
+`tab.created` hook docks an explorer into every new tab, which in a full-width GUI tab would
+be a 32-column strip — the launcher writes the sidebar's own per-tab snooze marker and closes
+the copy that already docked (best effort).
+
+harlequin quits on `ctrl+q`, which herdr intercepts for the file-search popup, so close the
+tab with herdr's own `close_pane` binding (`ctrl+b x` / `ctrl+alt+shift+d`) when you want the
+process gone.
 
 ### Previews cover the Fresh pane
 

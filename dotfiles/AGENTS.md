@@ -137,6 +137,12 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 - Popups (`popup` placement) belong to no tab. A process started from a popup has no usable `HERDR_TAB_ID`
   or `HERDR_WORKSPACE_ID`, so pass the caller pane's ids explicitly (`HERDR_PANE_ID`, `HERDR_TAB_ID`,
   `HERDR_WORKSPACE_ID`).
+- **There is ONE popup per session, and it is invisible when unfocused.** `plugin.pane.open` answers
+  `ui_busy: a popup pane is already open`, an unfocused popup does not appear in `pane list` at all, and
+  `plugin.pane.open` never reuses an entrypoint (a second call opens a new tab). So nothing that must
+  stay alive and be "switched back to" can be a popup; use `--placement tab` and return with
+  `herdr plugin pane focus <pane_id>`. `bin/herdr-db` (the Database tab, `ctrl+alt+d`) does exactly that —
+  see the root AGENTS.md "Database GUI" section.
 - `pane report-metadata` MERGES tokens. Sending `{}` does nothing, and only an explicit null value removes
   a token. Token values must be strings.
 - `Ctrl+Alt+H` arrives as Alt+Backspace in terminals without the kitty protocol, so replace is on Ctrl+Alt+E.

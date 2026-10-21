@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# The "Database" pane: harlequin, the terminal DB GUI, connected from the project.
+#
+# ONE implementation of connection discovery, with three callers:
+#   db-pane            the pane process itself: exec harlequin with the found args
+#   db-pane --print    herdr-db asks what WOULD run (one arg per line)
+#   db-pane --summary  one human line ("mysql · app_db @ 127.0.0.1") for a toast
+#
+# Precedence, first hit wins:
+#   1. DATABASE_URL / DB_URL  (.env.local, then .env, then the real environment)
+#   2. Laravel-style DB_CONNECTION + DB_HOST/DB_PORT/DB_DATABASE/DB_USERNAME/…
+#   3. a local SQLite file (database/database.sqlite, *.sqlite, *.sqlite3, *.db)
+#   4. nothing -> harlequin with no arguments, i.e. its own connection picker
+#
+# Adapters differ, so the args do too: MySQL REFUSES a DSN ("Cannot provide a DSN
+# to the MySQL adapter", harlequin_mysql/adapter.py) and wants --host/--database…
+# while clickhouse and postgres take a URL and sqlite takes a path.
+set -uo pipefail
+
+root=${HS_DB_ROOT:-$PWD}
+
+# Last KEY=VALUE in FILE, quotes stripped (a `.env` with CRLF or `export ` works).
+envfile_value() { # key file
+  local key=$1 file=$2 raw
+  [ -f "$file" ] || return 1
+  raw=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$file" 2>/dev/null | tail -n 1) || return 1
+  [ -n "$raw" ] || return 1
+  raw=${raw#*=}
+  raw=${raw%$'\r'}
+  case $raw in
+    \"*\") raw=${raw#\"}; raw=${raw%\"} ;;
+    \'*\') raw=${raw#\'}; raw=${raw%\'} ;;
+  esac
+  printf '%s\n' "$raw"
+}
+
+# A connection setting: .env.local overrides .env, which overrides the environment.
+db_env() { # key
+  local key=$1 v
+  for file in "$root/.env.local" "$root/.env"; do
+    v=$(envfile_value "$key" "$file") || v=''
+    if [ -n "$v" ]; then
+      printf '%s\n' "$v"
+      return 0
+    fi
+  done
+  printf '%s\n' "${!key:-}"
+}
+
+# URL -> U_SCHEME U_USER U_PASS U_HOST U_PORT U_DB. Percent-escapes are left
+# alone: a password that needs them should be split into DB_* variables instead.
+parse_url() { # url
+  local url=$1 rest creds hostpart hp
+  U_SCHEME='' U_USER='' U_PASS='' U_HOST='' U_PORT='' U_DB=''
+  case $url in
+    *://*)
+      U_SCHEME=${url%%://*}
+      rest=${url#*://}
+      ;;
+    sqlite:*)
+      U_SCHEME=sqlite
+      rest=${url#sqlite:}
+      rest=${rest#//}
+      ;;
+    *) return 0 ;;
+  esac
+  U_SCHEME=${U_SCHEME%%+*} # mysql+pymysql -> mysql
+  # A SQLite "URL" is just a path, so it must not be sliced at its slashes:
+  # `sqlite:///abs/x.db` -> `/abs/x.db`, not `abs/x.db`.
+  case $U_SCHEME in
+    sqlite | file)
+      U_DB=$rest
+      [ "$U_DB" = ':memory:' ] || [ -n "$U_DB" ] || U_DB=''
+      return 0
+      ;;
+  esac
+  creds='' hostpart=$rest
+  case $rest in
+    *@*)
+      creds=${rest%@*}
+      hostpart=${rest##*@}
+      ;;
+  esac
+  if [ -n "$creds" ]; then
+    U_USER=${creds%%:*}
+    case $creds in *:*) U_PASS=${creds#*:} ;; esac
+  fi
+  hostpart=${hostpart%%\?*}
+  hostpart=${hostpart%%#*}
+  U_DB=${hostpart#*/}
+  [ "$U_DB" = "$hostpart" ] && U_DB=''
+  hp=${hostpart%%/*}
+  case $hp in
+    *:*)
+      U_PORT=${hp##*:}
+      hp=${hp%:*}
+      ;;
+  esac
+  U_HOST=$hp
+}
+
+ARGS=()
+SUMMARY=''
+push() { ARGS+=("$@"); }
+
+# --host/--database… for the MySQL adapter, skipping empty values.
+mysql_flags() { # host port database user password
+  [ -n "$1" ] && push --host "$1"
+  [ -n "$2" ] && push --port "$2"
+  [ -n "$3" ] && push --database "$3"
+  [ -n "$4" ] && push --user "$4"
+  [ -n "$5" ] && push --password "$5"
+  return 0
+}
+
+url=$(db_env DATABASE_URL)
+[ -n "$url" ] || url=$(db_env DB_URL)
+if [ -n "$url" ]; then
+  parse_url "$url"
+  case $U_SCHEME in
+    sqlite | file)
+      if [ -z "$U_DB" ] || [ "$U_DB" = ':memory:' ]; then
+        push -a sqlite
+        SUMMARY='sqlite · in memory'
+      else
+        push -a sqlite "$U_DB"
+        SUMMARY="sqlite · $U_DB"
+      fi
+      ;;
+    mysql | mariadb)
+      push -a mysql
+      mysql_flags "$U_HOST" "$U_PORT" "$U_DB" "$U_USER" "$U_PASS"
+      SUMMARY="mysql · ${U_DB:-?} @ ${U_HOST:-localhost}"
+      ;;
+    postgres | postgresql | pgsql)
+      push -a postgres "$url"
+      SUMMARY="postgres · ${U_DB:-?}"
+      ;;
+    clickhouse)
+      push -a clickhouse "$url"
+      SUMMARY="clickhouse · ${U_DB:-?}"
+      ;;
+    duckdb)
+      push -a duckdb "$U_DB"
+      SUMMARY="duckdb · $U_DB"
+      ;;
+    *)
+      SUMMARY="unknown scheme '$U_SCHEME' — pick a connection in harlequin"
+      ;;
+  esac
+fi
+
+if [ ${#ARGS[@]} -eq 0 ]; then
+  conn=$(db_env DB_CONNECTION)
+  host=$(db_env DB_HOST)
+  port=$(db_env DB_PORT)
+  db=$(db_env DB_DATABASE)
+  user=$(db_env DB_USERNAME)
+  pass=$(db_env DB_PASSWORD)
+  case $conn in
+    mysql | mariadb)
+      push -a mysql
+      mysql_flags "${host:-127.0.0.1}" "${port:-3306}" "$db" "$user" "$pass"
+      SUMMARY="mysql · ${db:-?} @ ${host:-127.0.0.1}"
+      ;;
+    pgsql | postgres | postgresql)
+      push -a postgres
+      push "postgresql://${user}${pass:+:$pass}@${host:-127.0.0.1}:${port:-5432}/${db}"
+      SUMMARY="postgres · ${db:-?} @ ${host:-127.0.0.1}"
+      ;;
+    clickhouse)
+      push -a clickhouse
+      push "clickhouse://${user}${pass:+:$pass}@${host:-127.0.0.1}:${port:-8123}/${db}"
+      SUMMARY="clickhouse · ${db:-?} @ ${host:-127.0.0.1}"
+      ;;
+    sqlite)
+      push -a sqlite "$db"
+      SUMMARY="sqlite · ${db:-?}"
+      ;;
+    '') ;;
+    *)
+      SUMMARY="no adapter for DB_CONNECTION=$conn — pick a connection in harlequin"
+      ;;
+  esac
+fi
+
+# Nothing declared: use the project's own SQLite file if there is one.
+if [ ${#ARGS[@]} -eq 0 ]; then
+  file=$(find "$root" -maxdepth 2 \
+    \( -name node_modules -o -name vendor -o -name .git -o -name target \) -prune -o \
+    -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' \) -print 2>/dev/null |
+    head -n 1)
+  if [ -n "$file" ]; then
+    push -a sqlite "$file"
+    SUMMARY="sqlite · ${file#"$root"/}"
+  fi
+fi
+
+case ${1:-} in
+  --print)
+    for arg in ${ARGS[@]+"${ARGS[@]}"}; do printf '%s\n' "$arg"; done
+    exit 0
+    ;;
+  --summary)
+    [ -n "$SUMMARY" ] && printf '%s\n' "$SUMMARY"
+    exit 0
+    ;;
+esac
+
+exec harlequin ${ARGS[@]+"${ARGS[@]}"}

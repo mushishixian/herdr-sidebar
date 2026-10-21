@@ -2112,6 +2112,39 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   used to own that chord lives on `ctrl+alt+shift+f`.
 
 
+### Database GUI (the `db` tab, `ctrl+alt+d`)
+
+`dotfiles/herdr-plugins/ide/bin/{herdr-db,db-pane}` run **harlequin** in a keep-alive TAB of its
+own. Verified live on herdr 0.9.5 while choosing the placement — these are hard constraints:
+
+- **A popup cannot be kept alive.** herdr allows exactly ONE popup per session
+  (`plugin.pane.open` answers `ui_busy: a popup pane is already open`), an unfocused popup is
+  **absent from `pane.list`** (the still-running `--file-popup` process was invisible), and
+  `plugin.pane.open` **never reuses an entrypoint** — a second call with the same plugin/entrypoint
+  opened a THIRD tab (`wV:t2` → `wV:t3`). A DB popup that stayed open would also block `ctrl+q`,
+  `ctrl+alt+f` and `ctrl+alt+q` for as long as it lived.
+- **A tab (or split) does keep it alive**: the process survives focus changes and tab switches,
+  and `herdr plugin pane focus <pane_id>` (CLI, and the `plugin.pane.focus` socket method) switches
+  tab + workspace and focuses it in one call. So the launcher looks for a live
+  `Database`-labelled pane in the workspace first and only opens a new tab when there is none.
+- **`plugin pane open --placement tab` triggers our own `tab.created` hook**, which docks a
+  sidebar into the new tab. In a full-width GUI tab that is a 32-column strip, so `herdr-db`
+  writes the sidebar's per-tab snooze marker itself (`<plugin state dir>/snooze/<ws>_<tab>`, the
+  empty-file format `src/snooze.rs` uses for «) and then closes the copy that already docked by
+  sending it Ctrl+Q. Best effort: worst case the sidebar comes back on the next focus.
+
+Connection discovery lives in ONE place, `db-pane` (`--print` = the argv, `--summary` = one human
+line): `DATABASE_URL`/`DB_URL` from `.env.local` → `.env` → environment, then Laravel
+`DB_CONNECTION`+`DB_*`, then a local SQLite file, then harlequin's own picker. **Adapters take
+different arguments**: `harlequin_mysql` REFUSES a DSN ("Cannot provide a DSN to the MySQL
+adapter") and only accepts `--host/--port/--database/--user/--password`, clickhouse and postgres
+take a URL as the conn string, sqlite takes a path (`sqlite:///abs/x.db` must keep its leading
+slash — slicing the generic URL form there silently yields a relative path). Percent-escaped
+passwords are not decoded; split them into `DB_*` variables instead.
+
+harlequin's own quit key is `ctrl+q` (`harlequin/keys_app.py` requires it), which herdr intercepts
+for the file-search popup, so the documented way to close the tab is herdr's `close_pane` binding.
+
 ## dotfiles/ (the IDE layer)
 
 - Agent instructions and the "when you change X, update Y" checklist for this layer: `dotfiles/AGENTS.md`.
