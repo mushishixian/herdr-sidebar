@@ -567,11 +567,11 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   `ui.sidebar.spaces` offers only `rows`/`row_gap` — no `keep_empty_rows`/`min_rows` (checked
   against the v0.9.5 config reference). A Space whose project is not a git repository is
   therefore one line shorter than its neighbours and the rail reads ragged. The same 5 s
-  heartbeat reports token key `pad` = one ZERO WIDTH SPACE (U+200B: invisible, non-empty, not
-  stripped by `trim`) for every workspace with no `.git` above its panes'
-  `foreground_cwd`/`cwd`, and `null` for the rest so a git Space never gains a trailing
-  ` · ` separator. It only does anything when the row declares it:
-  `rows = [[...], ["branch", "git_status", "$pad"]]`.
+  heartbeat reports token key `pad` (`agent_tokens::PAD_VALUE`, a visible `-`) for every
+  workspace with no `.git` above its panes' `foreground_cwd`/`cwd`, and `null` for the rest so a git
+  Space never gains a trailing ` · ` separator. It only does anything when the row declares it:
+  `rows = [[...], ["branch", "git_status", "$pad"]]`. (It was a zero-width space first; the visible
+  dash reads as "no repository here", so the width trick was dropped.)
 - **The rail is display-only for plugins.** herdr renders it client-side (`src/client/shell/sidebar.rs`
   `render_workspace_rows`) and handles its mouse input itself; tokens are plain text with no click or
   hover hook, so a plugin cannot add a per-space button (a hover ✕ close was requested and declined as
