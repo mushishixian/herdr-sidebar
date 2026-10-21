@@ -895,11 +895,26 @@ enum MenuTarget {
     },
 }
 
+/// A row that owns no action of its own, with the hint `o` / `m` show for it.
+/// Section headers are keyboard stops (Enter folds them), so a user picks one up
+/// by accident and then presses a file key that used to be silent.
+fn section_row_hint(row: Row) -> Option<&'static str> {
+    match row {
+        Row::StagedHeader(_) => Some("Staged Changes is a section - pick a file (j/k) for its menu"),
+        Row::ChangesHeader(_) => Some("Changes is a section - pick a file (j/k) for its menu"),
+        Row::RepoHeader(_) => Some("a repository header has no menu - pick a file"),
+        Row::Message(_) | Row::Commit(_) => Some("that is the commit box - Enter/Tab to use it"),
+        _ => None,
+    }
+}
+
 /// Context-menu actions for file rows and drawer lines.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
     OpenDiff,
     OpenDiffPreview,
+    /// Hand the file itself to the configured editor (Fresh), not its diff.
+    OpenInEditor,
     StageOrUnstage,
     Discard,
     CopyPath,
@@ -2752,6 +2767,14 @@ impl App {
     /// drawer menus stay identical either way.
     fn open_menu_for_selection(&mut self) {
         let Some(index) = self.selected else { return };
+        // `m` and `o` used to do nothing at all with a section header selected,
+        // which reads as "the key is broken" (user-reported). Say what to do.
+        if let Some(row) = self.rows.get(index)
+            && let Some(hint) = section_row_hint(*row)
+        {
+            self.flash = Some((hint.into(), false));
+            return;
+        }
         let Some(y) = self.row_y(index) else { return };
         self.open_context_menu(2, y);
     }
@@ -2877,8 +2900,13 @@ impl App {
             MenuEntry::Action(MenuAction::OpenDiff, "Open Diff"),
             MenuEntry::Action(MenuAction::OpenDiffPreview, "Open Diff Preview"),
         ];
-        // A deleted file has nothing left on disk to hand to the shell.
+        // A deleted file has nothing left on disk to hand to the shell, and the
+        // diff already covers it — so both of these are for existing files only.
         if entry.letter != 'D' {
+            entries.push(MenuEntry::Action(
+                MenuAction::OpenInEditor,
+                "Open File in Editor",
+            ));
             entries.push(MenuEntry::Action(
                 MenuAction::OpenExternal,
                 "Open with Default App",
@@ -3946,6 +3974,21 @@ impl App {
             }
             MenuAction::OpenDiff => self.open_diff(repo, &entry, staged),
             MenuAction::OpenDiffPreview => self.open_diff_viewer(repo, &entry, staged),
+            // `o` and a click on a changed row show the diff (read-only); this is
+            // the explicit "take me to the file" that hands it to the editor.
+            MenuAction::OpenInEditor => {
+                let root = repo_root.unwrap_or_else(|| self.cwd.clone());
+                let file = root.join(&entry.path);
+                let pane_id = self.pane_ctl.as_ref().map(|c| c.pane_id.clone());
+                if let Err(error) = herdr_sidebar::file_popup::open_file_in_workspace(
+                    pane_id.as_deref(),
+                    &root,
+                    &file,
+                    None,
+                ) {
+                    self.flash = Some((error, true));
+                }
+            }
             MenuAction::Discard => self.overlay = Some(Overlay::ConfirmDiscard { repo, entry }),
             MenuAction::CopyPath | MenuAction::CopyRelativePath => {
                 let rel = entry.path.replace('/', std::path::MAIN_SEPARATOR_STR);
@@ -4472,7 +4515,11 @@ impl App {
                     self.open_entry(r, &entry, false);
                 }
             }
-            _ => {}
+            other => {
+                if let Some(hint) = section_row_hint(other) {
+                    self.flash = Some((hint.into(), false));
+                }
+            }
         }
     }
 

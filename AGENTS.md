@@ -1162,6 +1162,14 @@ HACKING.md — budget time for that before promising a patched build.
   have VARIABLE HEIGHT — mouse hit-testing walks `Row::height()`, and j/k skip the widget
   rows (`Row::selectable()`). The ✧ suggest / S sync keys act on the ACTIVE repo — the one
   the selection is in (named in the panel header).
+- **A changed row's default action is the DIFF, so the menu carries "Open File in Editor".**
+  `o`, a click and the hover `↗` on a staged/unstaged row all go through `open_entry` → the read-only
+  diff (`open_diff_viewer`); only a conflicted (`!`) row opens in the editor. The SCM file menu
+  therefore has `MenuAction::OpenInEditor` ("Open File in Editor"), which calls
+  `file_popup::open_file_in_workspace` exactly like the conflict path and is skipped for a deleted
+  entry (verified live: it spawns the Fresh pane). A row that owns no action — a section header, a
+  repository header, the commit box — no longer swallows `o`/`m`: `section_row_hint` flashes which
+  key to press, because silence made a working key look broken (user-reported).
 - **Git drawers** (title-case names, incl. Worktrees): drawer lines carry parsed
   refs (`DrawerRef` — commit hash / stash index / branch / remote / tag / worktree path,
   see `parse_drawer_ref`). Click or ⏎ shows the ref
