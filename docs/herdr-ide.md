@@ -555,6 +555,14 @@ it looks for a live `Database`-labelled pane in the workspace first; and the sid
 be a 32-column strip — the launcher writes the sidebar's own per-tab snooze marker and closes
 the copy that already docked (best effort).
 
+Mouse works inside the pane (Textual captures it, so clicking a tab, a cell or a button is
+harlequin's), but **right-click stays herdr's** — deliberately: harlequin has no context menu of
+its own (no `MouseButton.RIGHT` handler anywhere in it; its only `on_click` hooks just dismiss
+the help/debug/text modals), so herdr's pane menu (split / copy / close) is strictly more useful
+there. Right-click routing is per pane (`herdr pane input <pane> --right-click pane`, what
+`lib.sh` does for Fresh); ours is left at herdr's default. With no
+`[ui] right_click_passthrough_modifier` in config.toml, even Ctrl+right-click stays with herdr.
+
 harlequin quits on `ctrl+q`, which herdr intercepts for the file-search popup, so close the
 tab with herdr's own `close_pane` binding (`ctrl+b x` / `ctrl+alt+shift+d`) when you want the
 process gone.
