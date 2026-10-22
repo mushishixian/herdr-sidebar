@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # herdr-ide-term — VS Code's Ctrl+` for the IDE layout.
 #
-#   editor focused, terminal open   -> focus the terminal
-#   terminal focused                -> collapse it to a strip, focus the editor
-#   terminal collapsed              -> open it again and focus it
+# The middle column shows Fresh ALONE. The Terminal lives in a background tab
+# of its own (the "parked" terminal: it keeps running, with its history and cwd)
+# until you ask for it:
 #
-# Collapsing only moves the editor/terminal split, so the sidebar and the
-# agent column stay where they are (zoom would hide them too).
+#   terminal in the IDE tab, focused -> park it in its background tab, focus Fresh
+#   terminal in the IDE tab, unfocused -> focus it
+#   terminal parked                  -> move it back under Fresh and focus it
+#   no terminal anywhere             -> open a new one under Fresh and focus it
+#
+# Parking and unparking move the Terminal pane; the sidebar and the agent column
+# stay where they are (zoom would hide them too).
 # No IDE in this tab yet -> build one with herdr-ide.
 set -euo pipefail
 here=$(dirname "$(readlink -f "$0")")
 . "$here/lib.sh"
 
 OPEN_RATIO=0.7
-COLLAPSED_RATIO=0.97   # herdr clamps this so the terminal keeps 4 rows
 
 in_herdr || die "herdr-ide-term must run inside herdr"
 [ -z "${HERDR_PLUGIN_ACTION_ID:-}" ] || tip "Toggle terminal" dotfiles-ide.toggle-terminal
@@ -26,45 +30,27 @@ fi
 [ "$(tab_zoomed "$editor")" = true ] && "$HERDR" pane zoom "$editor" --off >/dev/null
 
 term=$(pane_with_label "$cur_tab" "$TERM_LABEL")
-if [ -z "$term" ]; then
-  # The terminal was closed: bring a new one back under the editor.
-  open_ratio=$(saved_editor_ratio "$editor" "$OPEN_RATIO")
-  term=$("$HERDR" pane split "$editor" --direction down --ratio "$open_ratio" \
-    | jq -r '.result.pane.pane_id // empty')
-  [ -n "$term" ] || die "pane split failed"
-  "$HERDR" pane rename "$term" "$TERM_LABEL" >/dev/null
-  focus_pane "$term"
+if [ -n "$term" ]; then
+  if [ "$cur_pane" = "$term" ]; then
+    park_terminal "$cur_tab" "$term" || die "could not park the terminal pane $term"
+    focus_pane "$editor"
+  else
+    focus_pane "$term"
+  fi
   exit 0
 fi
 
-# Path (false = first child, true = second) to the editor-over-terminal split.
-split=$("$here/herdr-rpc" layout.export "{\"pane_id\":\"$editor\"}" | jq -c --arg e "$editor" --arg t "$term" '
-  def find(p):
-    if .type == "split" then
-      if .direction == "down" and .first.pane_id == $e and .second.pane_id == $t
-      then {path: p, ratio: .ratio}
-      else (.first | find(p + [false])), (.second | find(p + [true]))
-      end
-    else empty end;
-  first(.result.layout.root | find([])) // empty')
-
-set_ratio() {
-  "$here/herdr-rpc" layout.set_split_ratio \
-    "{\"tab_id\":\"$cur_tab\",\"path\":$(jq -c .path <<<"$split"),\"ratio\":$1}" >/dev/null
-}
-
-if [ -z "$split" ]; then
-  # Panes were rearranged by hand: just move focus between the two.
-  if [ "$cur_pane" = "$term" ]; then focus_pane "$editor"; else focus_pane "$term"; fi
-elif [ "$("$HERDR" pane layout --pane "$term" | jq --arg t "$term" \
-        '.result.layout.panes[] | select(.pane_id == $t) | .rect.height')" -le "$TERM_COLLAPSED_ROWS" ]; then
-  set_ratio "$(saved_editor_ratio "$editor" "$OPEN_RATIO")"
-  focus_pane "$term"
-elif [ "$cur_pane" = "$term" ]; then
-  # Remember the size the user chose before the strip replaces it.
-  save_sizes "$cur_tab" || true
-  set_ratio "$COLLAPSED_RATIO"
-  focus_pane "$editor"
-else
-  focus_pane "$term"
+parked=$(parked_terminal "$cur_tab" "$cur_ws")
+if [ -n "$parked" ]; then
+  unpark_terminal "$cur_tab" "$editor" "$parked" || die "could not bring the terminal back under Fresh"
+  focus_pane "$parked"
+  exit 0
 fi
+
+# Neither in the tab nor parked: open a new terminal under the editor.
+open_ratio=$(saved_editor_ratio "$editor" "$OPEN_RATIO")
+term=$("$HERDR" pane split "$editor" --direction down --ratio "$open_ratio" \
+  | jq -r '.result.pane.pane_id // empty')
+[ -n "$term" ] || die "pane split failed"
+"$HERDR" pane rename "$term" "$TERM_LABEL" >/dev/null
+focus_pane "$term"

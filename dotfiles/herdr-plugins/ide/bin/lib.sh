@@ -3,7 +3,8 @@
 # The IDE layout is identified by pane labels, not ids, so it survives
 # herdr restarts:
 #   "Fresh"    – the editor pane (also carries a fresh_daemon metadata token)
-#   "Terminal" – the shell pane under the editor
+#   "Terminal" – the shell pane under the editor, or PARKED in its own background
+#                tab (see park_terminal) while the IDE tab shows Fresh alone
 #   "Agent"    – the coding agent column on the right
 #   "Sidebar"  – owned by the herdr-sidebar plugin; never touched here
 
@@ -12,6 +13,10 @@ FRESH_LABEL=Fresh
 TERM_LABEL=Terminal
 AGENT_LABEL=Agent
 TOKEN_SOURCE=dotfiles-ide
+# A parked Terminal carries this token (value: the IDE tab id it belongs to) and
+# sits alone in a tab labelled PARKED_TAB_LABEL. The sidebar reads the token.
+PARKED_TOKEN=ide-parked-for
+PARKED_TAB_LABEL=terminal
 
 # Ids of the caller. Plugin actions get HERDR_*_ID, custom keybindings get
 # HERDR_ACTIVE_*_ID, a shell inside a pane gets HERDR_*_ID.
@@ -248,6 +253,84 @@ tab_zoomed() {
 # socket method, so it goes through the tiny herdr-rpc helper.
 focus_pane() {
   "$(dirname "${BASH_SOURCE[0]}")/herdr-rpc" pane.focus "{\"pane_id\":\"$1\"}" >/dev/null
+}
+
+# ── Parked terminal (Ctrl+`) ───────────────────────────────────────────
+# The IDE tab shows Fresh alone in its middle column while its Terminal lives
+# in a background tab of its own (label PARKED_TAB_LABEL), still running with
+# its history and cwd. Ctrl+` moves it back below Fresh, and parks it again.
+#
+# Order matters: the token is stamped BEFORE the move, because the move fires
+# tab.created and the sidebar's ensure hook must not dock a sidebar into a tab
+# whose panes all carry the token. The token is removed AFTER the move back.
+# Herdr loses metadata tokens on a server restart, so a parked Terminal that
+# lost its token is found by label instead (parked_terminal's fallback).
+
+# Print the pane id of the Terminal parked for IDE tab $1 in workspace $2, or
+# nothing. First the token match; after a restart, a `Terminal` pane of that
+# workspace that sits alone in some other tab.
+parked_terminal() { # tab ws
+  "$HERDR" pane list 2>/dev/null | jq -r --arg tab "$1" --arg ws "$2" \
+    --arg tok "$PARKED_TOKEN" --arg lbl "$TERM_LABEL" '
+    .result.panes as $all
+    | first(
+        ($all[] | select((.tokens[$tok] // "") == $tab) | .pane_id),
+        ($all[] | select(.label == $lbl and .workspace_id == $ws and .tab_id != $tab) | . as $p
+          | select(([$all[] | select(.tab_id == $p.tab_id)] | length) == 1) | .pane_id)
+      ) // empty'
+}
+
+# Move Terminal $2 of IDE tab $1 into its own background tab. Returns non-zero
+# (token removed again) when herdr refuses the move.
+park_terminal() { # tab term
+  local tab=$1 term=$2 reply
+  # Remember the editor/terminal split the user chose before the Terminal leaves
+  # the tab. save_sizes skips the editor field while no Terminal is in the tab.
+  save_sizes "$tab" || true
+  "$HERDR" pane report-metadata "$term" --source "$TOKEN_SOURCE" \
+    --token "$PARKED_TOKEN=$tab" >/dev/null || return 1
+  reply=$("$HERDR" pane move "$term" --new-tab --label "$PARKED_TAB_LABEL" --no-focus 2>/dev/null) || reply=''
+  if [ -z "$reply" ] || jq -e '.error' >/dev/null 2>&1 <<<"$reply"; then
+    clear_parked_token "$term"
+    return 1
+  fi
+  return 0
+}
+
+# The Terminal pane of IDE tab $1, bringing a parked one back under editor $3
+# first when the tab has none. Prints nothing when there is no Terminal at all.
+terminal_in_tab() { # tab ws editor
+  local term parked
+  term=$(pane_with_label "$1" "$TERM_LABEL")
+  if [ -z "$term" ]; then
+    parked=$(parked_terminal "$1" "$2")
+    if [ -n "$parked" ] && unpark_terminal "$1" "$3" "$parked"; then term=$parked; fi
+  fi
+  printf '%s\n' "$term"
+}
+
+# Move parked Terminal $3 back below Fresh pane $2 in IDE tab $1, taking the
+# remembered editor share, then drop its token. The editor keeps the top
+# (ratio = the target pane's share, as with every herdr split here).
+unpark_terminal() { # tab editor term
+  local tab=$1 editor=$2 term=$3 ratio reply
+  ratio=$(saved_editor_ratio "$editor" 0.7)
+  reply=$("$HERDR" pane move "$term" --tab "$tab" --target-pane "$editor" \
+    --split down --ratio "$ratio" --focus 2>/dev/null) || reply=''
+  if [ -z "$reply" ] || jq -e '.error' >/dev/null 2>&1 <<<"$reply"; then
+    return 1
+  fi
+  clear_parked_token "$term"
+  return 0
+}
+
+# Remove the parked token from pane $1. report_metadata MERGES maps, so an
+# explicit JSON null is the only way to delete a token.
+clear_parked_token() { # pane
+  local payload
+  payload=$(jq -cn --arg p "$1" --arg s "$TOKEN_SOURCE" --arg k "$PARKED_TOKEN" \
+    '{pane_id: $p, source: $s, tokens: {($k): null}}')
+  "$(dirname "${BASH_SOURCE[0]}")/herdr-rpc" pane.report_metadata "$payload" >/dev/null || true
 }
 
 mark_fresh_pane() { # pane daemon

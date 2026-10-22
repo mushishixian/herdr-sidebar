@@ -5,14 +5,16 @@
 #   ┌─────────┬──────────────────────┬───────────┐
 #   │ Sidebar │ Fresh (project       │ Agent     │
 #   │ explorer│ daemon)              │ (claude)  │
-#   │ search  ├──────────────────────┤           │
-#   │ git     │ Terminal             │           │
+#   │ search  │                      │           │
+#   │ git     │                      │           │
 #   └─────────┴──────────────────────┴───────────┘
 #
-# The Sidebar is docked by the herdr-sidebar plugin on its own. Started from
-# an agent pane, that agent becomes the right column; started from a shell,
-# the shell becomes the Terminal and a new agent opens on the right.
-# Running it again just focuses the editor.
+# Fresh is alone in the middle column. The Terminal is built under it and then
+# PARKED in a background tab (label "terminal") until Ctrl+` brings it back
+# below Fresh (herdr-ide-term). The Sidebar is docked by the herdr-sidebar
+# plugin on its own. Started from an agent pane, that agent becomes the right
+# column; started from a shell, the shell becomes the Terminal and a new agent
+# opens on the right. Running it again just focuses the editor.
 #
 # Agent command: first line of $(herdr plugin config-dir dotfiles-ide)/agent,
 # else $IDE_AGENT, else the first INSTALLED agent (pi before claude — claude is
@@ -113,5 +115,6 @@ fi
 mark_fresh_pane "$editor" "$name"
 "$HERDR" pane run "$editor" "$(printf '%q %q' "$here/fresh-ide" "$root")" >/dev/null
 restore_sizes "$cur_tab" "$saved" || true
+park_terminal "$cur_tab" "$term" || warn "could not park the terminal"
 focus_pane "$editor"
 printf '%s\n' "$editor"

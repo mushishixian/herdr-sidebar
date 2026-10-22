@@ -442,6 +442,12 @@ pub fn run(mode: Mode) -> std::io::Result<()> {
         let context_tab = std::env::var("HERDR_TAB_ID").unwrap_or_default();
         launch::event_scope_with_tab_context(&event_json, &panes, &context_tab)
     };
+    // The IDE parks its Terminal in a `pane move --new-tab` tab. A docked
+    // sidebar there would keep that tab alive after the Terminal moves back,
+    // so quiet hooks leave parking tabs alone. Explicit toggles still dock.
+    if !explicit && launch::in_parking_tab(&panes, &scope) {
+        return Ok(());
+    }
     let tab = snooze_tab_for_scope(&panes, &scope);
     if !tab.is_empty() {
         // Budgeted, and never touches a viewer that is still present.

@@ -28,6 +28,14 @@ pub const METADATA_SOURCE: &str = "herdr-sidebar-explorer";
 /// hold unsaved in-memory state yet.
 pub const STARTING_TOKEN: &str = "herdr-sidebar-starting";
 
+/// Metadata token the IDE layer (`dotfiles/`) stamps on its Terminal pane
+/// before `pane move --new-tab` parks it in a background tab. Its value is the
+/// IDE tab id the pane belongs to. While it is set, the pane's tab is a
+/// parking tab: quiet hooks must not dock a sidebar there (the sidebar would
+/// keep the tab alive after the Terminal moves back), and the parked pane stays
+/// an eligible cwd sibling of its home tab. The IDE clears it (null) on return.
+pub const PARKED_TOKEN: &str = "ide-parked-for";
+
 const MIN_SIDEBAR_SHARE: f64 = 0.15;
 const MAX_SIDEBAR_SHARE: f64 = 0.5;
 
@@ -314,6 +322,43 @@ pub fn launch_decision_in(pane_list_json: &str, now: u64, scope: &str) -> String
     }
 }
 
+/// Whether the tab that `scope` resolves to is a parking tab: it has at least
+/// one pane and EVERY pane in it carries a non-empty [`PARKED_TOKEN`]. The tab
+/// is resolved exactly as [`launch_decision_in`] does (focused pane in scope,
+/// else first pane in scope; an empty scope is the globally focused pane).
+pub fn in_parking_tab(pane_list_json: &str, scope: &str) -> bool {
+    let Ok(msg) = serde_json::from_str::<PaneListMsg>(strip_bom(pane_list_json)) else {
+        return false;
+    };
+    let panes = &msg.result.panes;
+    let in_scope = |p: &&Pane| {
+        scope.is_empty()
+            || p.tab_id.as_deref() == Some(scope)
+            || p.workspace_id.as_deref() == Some(scope)
+    };
+    let Some(focused) = panes
+        .iter()
+        .find(|p| in_scope(p) && p.focused)
+        .or_else(|| panes.iter().find(in_scope))
+    else {
+        return false;
+    };
+    let Some(tab) = focused.tab_id.as_deref() else {
+        return false;
+    };
+    let mut in_tab = panes
+        .iter()
+        .filter(|p| p.tab_id.as_deref() == Some(tab))
+        .peekable();
+    in_tab.peek().is_some()
+        && in_tab.all(|p| {
+            p.tokens
+                .get(PARKED_TOKEN)
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| !v.is_empty())
+        })
+}
+
 /// Strict-toggle mapping (⚙ Settings): a `FOCUS` decision becomes `CLOSE`,
 /// so one toggle press opens and the next press closes, wherever focus is.
 /// Every other decision passes through untouched; kept pure so both the CLI
@@ -426,9 +471,11 @@ pub(crate) fn is_preview_label(label: &str) -> bool {
         || label.ends_with(" · editor")
 }
 
-/// Eligible panes in our tab, sorted by pane id so the fallback is stable.
-/// `foreground_cwd` is deliberately required: falling back to `cwd` would
-/// resurrect a stale spawn directory when the host has no live cwd signal.
+/// Eligible panes in our tab, plus any pane parked for our tab
+/// ([`PARKED_TOKEN`] naming it, wherever it currently lives), sorted by pane
+/// id so the fallback is stable. `foreground_cwd` is deliberately required:
+/// falling back to `cwd` would resurrect a stale spawn directory when the host
+/// has no live cwd signal.
 fn sibling_cwds(pane_list_json: &str, my_pane_id: &str) -> Vec<SiblingCwd> {
     let Ok(msg) = serde_json::from_str::<PaneListMsg>(strip_bom(pane_list_json)) else {
         return Vec::new();
@@ -440,10 +487,14 @@ fn sibling_cwds(pane_list_json: &str, my_pane_id: &str) -> Vec<SiblingCwd> {
     else {
         return Vec::new();
     };
+    let my_tab = me.tab_id.as_deref();
     let mut siblings = panes
         .iter()
         .filter(|p| {
-            p.tab_id.as_deref() == me.tab_id.as_deref()
+            let in_my_tab = p.tab_id.as_deref() == my_tab;
+            let parked_for_me = my_tab.is_some()
+                && p.tokens.get(PARKED_TOKEN).and_then(|v| v.as_str()) == my_tab;
+            (in_my_tab || parked_for_me)
                 && p.pane_id.as_deref() != Some(my_pane_id)
                 && !p.is_explorer()
                 && !p.tokens.contains_key(SC_METADATA_SOURCE)
@@ -1981,6 +2032,90 @@ mod tests {
 
     const FOCUSED: &str =
         r#"{"pane_id":"w1:p1","focused":true,"tab_id":"w1:t1","cwd":"C:\\work\\my repo"}"#;
+
+    #[test]
+    fn parking_tab_is_detected_only_when_every_pane_is_parked() {
+        let parked = |id: &str, tab: &str| {
+            format!(
+                r#"{{"pane_id":"{id}","tab_id":"{tab}","label":"Terminal","tokens":{{"ide-parked-for":"w1:t1"}}}}"#
+            )
+        };
+        // Tab scope: the whole tab is parked.
+        let all = pane_list(&format!("{},{}", parked("w1:p1", "w1:t2"), parked("w1:p2", "w1:t2")));
+        assert!(in_parking_tab(&all, "w1:t2"));
+        // Workspace scope: the focused pane decides the tab.
+        let focused = pane_list(
+            r#"{"pane_id":"w1:p1","tab_id":"w1:t2","workspace_id":"w1","focused":true,"tokens":{"ide-parked-for":"w1:t1"}},
+               {"pane_id":"w1:p9","tab_id":"w1:t3","workspace_id":"w1"}"#,
+        );
+        assert!(in_parking_tab(&focused, "w1"));
+        // A non-parked pane sharing the tab means it is a real tab.
+        let mixed = pane_list(&format!(
+            "{},{}",
+            parked("w1:p1", "w1:t2"),
+            r#"{"pane_id":"w1:p2","tab_id":"w1:t2","label":"Sidebar"}"#
+        ));
+        assert!(!in_parking_tab(&mixed, "w1:t2"));
+        // An empty token value does not count as parked.
+        let empty_value = pane_list(
+            r#"{"pane_id":"w1:p1","tab_id":"w1:t2","tokens":{"ide-parked-for":""}}"#,
+        );
+        assert!(!in_parking_tab(&empty_value, "w1:t2"));
+        // Garbage, empty lists and unknown scopes are never a parking tab.
+        for hostile in ["", "garbage", "null", r#"{"result":{"panes":[]}}"#] {
+            assert!(!in_parking_tab(hostile, ""), "{hostile}");
+        }
+        assert!(!in_parking_tab(&all, "w1:t9"));
+    }
+
+    #[test]
+    fn follower_follows_a_terminal_parked_for_our_tab() {
+        let root = Path::new("/proj/a");
+        let mut follower = CwdFollower::default();
+        let parked = |cwd: &str| {
+            pane_list(&format!(
+                r#"{{"pane_id":"w1:p0","tab_id":"w1:t1","label":"Sidebar"}},
+                   {{"pane_id":"w1:p1","tab_id":"w1:t2","label":"Terminal","foreground_cwd":"{cwd}","tokens":{{"ide-parked-for":"w1:t1"}}}}"#
+            ))
+        };
+        assert_eq!(follower.next_cwd(&parked("/proj/a"), "w1:p0", root), None);
+        assert_eq!(
+            follower
+                .next_cwd(&parked("/proj/b"), "w1:p0", root)
+                .as_deref(),
+            Some("/proj/b")
+        );
+    }
+
+    #[test]
+    fn follower_ignores_a_terminal_parked_for_another_tab() {
+        let json = pane_list(
+            r#"{"pane_id":"w1:p0","tab_id":"w1:t1","label":"Sidebar"},
+               {"pane_id":"w1:p1","tab_id":"w1:t2","label":"Terminal","foreground_cwd":"/other","tokens":{"ide-parked-for":"w1:t9"}}"#,
+        );
+        assert_eq!(
+            CwdFollower::default().next_cwd(&json, "w1:p0", Path::new("/elsewhere")),
+            None
+        );
+    }
+
+    #[test]
+    fn parking_a_terminal_does_not_re_root_our_tab() {
+        let root = Path::new("/proj/a");
+        let mut follower = CwdFollower::default();
+        let home = pane_list(
+            r#"{"pane_id":"w1:p0","tab_id":"w1:t1","label":"Sidebar"},
+               {"pane_id":"w1:p1","tab_id":"w1:t1","label":"Terminal","foreground_cwd":"/proj/a"}"#,
+        );
+        assert_eq!(follower.next_cwd(&home, "w1:p0", root), None);
+        // Same pane id and cwd, now parked in a background tab.
+        let parked = pane_list(
+            r#"{"pane_id":"w1:p0","tab_id":"w1:t1","label":"Sidebar"},
+               {"pane_id":"w1:p1","tab_id":"w1:t2","label":"Terminal","foreground_cwd":"/proj/a","tokens":{"ide-parked-for":"w1:t1"}}"#,
+        );
+        assert_eq!(follower.next_cwd(&parked, "w1:p0", root), None);
+        assert_eq!(follower.next_cwd(&parked, "w1:p0", root), None);
+    }
 
     #[test]
     fn decision_opens_when_no_explorer_in_tab() {

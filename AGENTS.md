@@ -377,6 +377,10 @@ Manifest `[[events]]` hooks (undocumented in CLI help; see herdr `src/api/schema
   `HERDR_TAB_ID` context injected by Herdr 0.9 when it matches that workspace. The workspace
   hook heals restored sidebars after a v0.9 server restart; `tab.focused` remains the
   unambiguous fallback for ordinary tab switches and older hosts.
+- Quiet hooks never dock into a parking tab: `launch::in_parking_tab` is true when every pane in
+  the scoped tab carries `ide-parked-for` (the IDE parks its Terminal with `pane move --new-tab`,
+  and a docked sidebar would keep that tab alive after the Terminal moves back). Explicit toggles
+  still dock.
 - Workspace-scoped create events have no tab-level snooze to respect. Never borrow the
   globally focused tab's marker for a different workspace; an empty/legacy scope may still
   fall back to the focused tab.
@@ -749,6 +753,9 @@ HACKING.md — budget time for that before promising a patched build.
 
 ### Following the neighbour pane's folder
 
+- A pane in another tab whose `ide-parked-for` token names our tab (the IDE's parked Terminal)
+  is an eligible sibling, so following survives parking; the same pane id keeps its cwd across
+  the move, so parking alone never re-roots.
 - A pane's `cwd` is its SPAWN directory; only `foreground_cwd` is live after a shell
   `cd` or an agent project switch. Following therefore requires `foreground_cwd` and
   deliberately has NO fallback to `cwd`: an absent live value is safer than silently

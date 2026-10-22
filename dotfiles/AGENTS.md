@@ -29,7 +29,7 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
 | An apt, npm or cargo dependency | `dotfiles/packages.txt` (apt) or the installer step (npm/cargo) in `dotfiles/install.sh` or `docs/install-herdr-ide.sh`; the *Install* section of `docs/herdr-ide.md`; a `plan TOOL` line in `install.sh`, which `verify.sh` asserts |
 | A language server | `dotfiles/install-lsp.sh` (its `servers` table and install step); the `lsp` block in `dotfiles/config/fresh/config.json`; a `plan TOOL` line in `install.sh`; the *Language servers (LSP)* table in `docs/herdr-ide.md` |
 | A sidebar setting default | `dotfiles/herdr-sidebar/state.json`, and the *Sidebar defaults* paragraph in `docs/herdr-ide.md` (*herdr-sidebar fork*) |
-| Anything the sidebar (Rust) and the dotfiles scripts share (env vars such as `HERDR_SIDEBAR_OPEN_DIFF`, `HERDR_SIDEBAR_PREVIEW_HOSTED`, `FRESH_IDE_DAEMON`, `DOTFILES_IDE_BIN`; pane tokens such as `fresh_daemon`, `hs-preview-host`; request files such as the AI-commit request, the live-diff request, `preview-host/<pane>.req` and the dock-suppression stamp `<herdr-sidebar state dir>/dock/restore.stamp` that `ide-save-sizes` reads; `editor-command.txt`; the sidebar's `state.json` read at build time for `terminal_height` and `agent_width`) | Both sides in the same change. Document the contract in the root `AGENTS.md` (Rust side) and in `docs/herdr-ide.md` |
+| Anything the sidebar (Rust) and the dotfiles scripts share (env vars such as `HERDR_SIDEBAR_OPEN_DIFF`, `HERDR_SIDEBAR_PREVIEW_HOSTED`, `FRESH_IDE_DAEMON`, `DOTFILES_IDE_BIN`; pane tokens such as `fresh_daemon`, `hs-preview-host`, `ide-parked-for` (the parked Terminal's IDE tab id); request files such as the AI-commit request, the live-diff request, `preview-host/<pane>.req` and the dock-suppression stamp `<herdr-sidebar state dir>/dock/restore.stamp` that `ide-save-sizes` reads; `editor-command.txt`; the sidebar's `state.json` read at build time for `terminal_height` and `agent_width`) | Both sides in the same change. Document the contract in the root `AGENTS.md` (Rust side) and in `docs/herdr-ide.md` |
 | The CodeBuddy hook (`config/codebuddy/hooks/herdr-agent-state.sh`, the `codebuddy_hooks` merge in `install.sh`, the hook events it installs) | The *Which space's agent is busy* section and the Troubleshooting row of `docs/herdr-ide.md`; `verify.sh`'s codebuddy block; the `codebuddy` bullet in the repo `AGENTS.md`. Keep the merge limited to entries naming that script: everything else in `~/.codebuddy/settings.json` belongs to the user |
 | Pane labels `Fresh`, `Terminal`, `Agent`, or the plugin id `dotfiles-ide` | Do not rename them: scripts, state dirs and key bindings look them up. Show new display text through a metadata title (`pane report-metadata --title`) |
 | Any user-visible behaviour | `docs/herdr-ide.md`: the feature section, *Keys* and *Troubleshooting*; the fork commit table (*herdr-sidebar fork*): its `*uncommitted*` row until the user commits, then the hash |
@@ -196,6 +196,16 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   regressed: the first file click after a restart reported `custom editor failed:
   …/fresh-open exited with exit status: 1` and the `Fresh` pane showed an empty prompt.
   `fresh-restart` deliberately still refuses tokenless panes.
+- **The parked Terminal is a contract with the sidebar, in this order.** Ctrl+` moves the Terminal
+  out of the IDE tab into a background tab labelled `terminal`. The token `ide-parked-for=<IDE tab
+  id>` (source `dotfiles-ide`) is stamped BEFORE the move: the move fires `tab.created`, and the
+  sidebar's ensure hook must see that the tab's panes all carry it, or it docks a sidebar into the
+  parking tab. The token is removed by an explicit JSON null (`report_metadata` merges maps, so
+  `{}` removes nothing) only after the Terminal is back below Fresh. Herdr drops tokens on a server
+  restart, so `lib.sh`'s `parked_terminal` falls back to a `Terminal` alone in a tab of the same
+  workspace. `pane move --new-tab` takes `--label` (the tab label); `--tab-label` is rejected there
+  (verified on herdr 0.9.x: `usage:` and exit 2). Its replies are `{"result":…}` or `{"error":…}`
+  with exit 1, which `park_terminal`/`unpark_terminal` check.
 - **The rail's agent name comes from `ide-agent-title`'s table, not from herdr.** herdr only
   auto-detects the agents it ships an integration for (`herdr integration status`) and reports
   its own id for those; every other CLI is invisible until something sets the pane's

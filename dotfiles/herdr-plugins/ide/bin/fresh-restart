@@ -90,7 +90,7 @@ poll_until() {
 # not be restarted; the other targets still run.
 restart_one() {
   local pane=$1 info label daemon tab cwd root procs shell_pid fresh_pid
-  local root_mode=0 saved term editor project
+  local root_mode=0 saved term editor project ws
 
   info=$("$HERDR" pane list | jq -c --arg p "$pane" 'first(.result.panes[] | select(.pane_id == $p)) // empty')
   if [ -z "$info" ]; then
@@ -100,6 +100,7 @@ restart_one() {
   label=$(jq -r .label <<<"$info")
   daemon=$(jq -r '.tokens.fresh_daemon // empty' <<<"$info")
   tab=$(jq -r .tab_id <<<"$info")
+  ws=$(jq -r .workspace_id <<<"$info")
   if [ "$label" != "$FRESH_LABEL" ] || [ -z "$daemon" ]; then
     warn "pane $pane is not a Fresh editor (label '$label')"
     return 1
@@ -127,8 +128,9 @@ restart_one() {
   if [ -n "$fresh_pid" ] && [ "$fresh_pid" = "$shell_pid" ]; then
     root_mode=1
     # Check before killing anything: without a Terminal there is no place
-    # to put the new editor, and the pane would close with Fresh.
-    term=$(pane_with_label "$tab" "$TERM_LABEL")
+    # to put the new editor, and the pane would close with Fresh. A parked
+    # Terminal (Ctrl+`) is brought back under this pane first.
+    term=$(terminal_in_tab "$tab" "$ws" "$pane")
     if [ -z "$term" ]; then
       warn "$project: Fresh is the root of pane $pane and tab $tab has no Terminal pane, so it was NOT restarted; press Ctrl+B I to rebuild the IDE layout"
       return 1

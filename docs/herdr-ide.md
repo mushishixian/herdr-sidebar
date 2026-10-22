@@ -10,16 +10,20 @@ plugins, configuration, and this fork of herdr-sidebar.
  Windows:  Windows Terminal (or WezTerm) + a Nerd Font, opening straight into WSL
  WSL:      zsh ─ herdr ─┬─ Sidebar   herdr-sidebar fork (this repo)
                         ├─ Fresh     editor, one daemon per project per workspace
-                        ├─ Terminal  shell under the editor
+                        ├─ Terminal  shell, parked in a background tab until Ctrl+`
                         └─ Agent     claude, pinned on the right
 
    ┌─────────┬──────────────────────┬───────────┐
    │ Sidebar │ Fresh                │ Agent     │
    │ explorer│                      │ (claude)  │
-   │ search  ├──────────────────────┤           │
-   │ git     │ Terminal             │           │
+   │ search  │                      │           │
+   │ git     │                      │           │
    └─────────┴──────────────────────┴───────────┘
 ```
+
+Fresh is alone in the middle column. The Terminal is parked in a background tab labelled
+`terminal`: it keeps running, with its history and cwd, until **Ctrl+`** brings it back under Fresh.
+Pressing Ctrl+` again on the Terminal parks it.
 
 ## Where everything lives
 
@@ -184,7 +188,7 @@ moves the copy aside.
 | Key | Does |
 |---|---|
 | `ctrl+b i` | IDE layout for the current pane's project (focuses Fresh if already built) |
-| ``ctrl+b ` `` | Toggle the terminal under Fresh (focus / collapse / reopen) |
+| ``ctrl+b ` `` | Toggle the terminal: focus it under Fresh, park it in its background tab, or bring it back (`dotfiles-ide.toggle-terminal`) |
 | `ctrl+b a`, `ctrl+alt+b`, `alt+f12` | Toggle the sidebar |
 | `ctrl+b f` | Quick Open in the sidebar |
 | `ctrl+b /` | Search in files |
@@ -503,17 +507,29 @@ Two things that surprise people:
   It also labels the pane and sets `herdr pane input --right-click pane`, so a
   plain right-click reaches Fresh (its tab and file-tree menus); right-click on
   the pane **border** still opens herdr's pane menu.
-- `bin/herdr-ide-term` (action `toggle-terminal`) moves the editor/terminal
-  split ratio instead of zooming, so the side columns never disappear.
+- `bin/herdr-ide-term` (action `toggle-terminal`, Ctrl+`) never zooms, so the side columns
+  never disappear. With a Terminal in the IDE tab it focuses that Terminal, or parks it when it
+  already has focus; with the Terminal parked it moves it back below Fresh at the remembered
+  editor share; with none at all it opens a new one. Parking is the one place a Terminal leaves
+  the middle column (see the next bullet).
+- **The Terminal parks out of the middle column.** `herdr-ide` builds the layout and then moves
+  the Terminal into a background tab labelled `terminal` (`lib.sh`'s `park_terminal`), so the
+  middle column is Fresh alone. The Terminal keeps running, with its history and cwd. The
+  contract with herdr-sidebar: the Terminal carries the metadata token `ide-parked-for=<IDE tab
+  id>` (source `dotfiles-ide`), stamped BEFORE the move, because the move fires `tab.created` and
+  the sidebar's ensure hook skips a tab whose panes all carry it; the token is removed with an
+  explicit JSON null when the Terminal comes back (`unpark_terminal`). Herdr drops metadata on a
+  server restart, so `parked_terminal` falls back to the Terminal that sits alone in a tab of the
+  same workspace. `save_sizes` never records an editor share while no Terminal is in the tab.
 - **Pane sizes are remembered per project**, shared by all of its workspace
   daemons (the daemon name without its `-sN` suffix). herdr has no hookable resize
   event, so `bin/ide-save-sizes` runs on `pane.focused` / `tab.focused` and
   records, for every tab holding a Fresh pane, the Agent-column ratio and the
   Fresh/Terminal ratio under that project's key in
-  `~/.local/state/herdr/plugins/dotfiles-ide/sizes.json` (a collapsed terminal,
-  ≤ 5 rows, is not saved). `herdr-ide` re-applies them after building a layout
-  and `herdr-ide-term` reopens the terminal at the saved ratio, via
-  `layout.set_split_ratio`. Splits are found by geometry; a split id such as
+  `~/.local/state/herdr/plugins/dotfiles-ide/sizes.json` (a parked Terminal leaves no
+  Fresh/Terminal ratio to record, so the saved one stays). `herdr-ide` re-applies them after
+  building a layout and `herdr-ide-term` brings a parked Terminal back at the saved ratio
+  (`pane move --ratio`). Splits are found by geometry; a split id such as
   `split_2_01` encodes its tree path (0 = first child). The sidebar's own
   column is left to herdr-sidebar. A sidebar re-dock no longer resets these: the
   sidebar restores a tab's split ratios around its own full-height repair, and
@@ -649,6 +665,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | *uncommitted* | **IDE layer: a label-only Fresh pane is healed in place** | A herdr server restart resumes panes as plain shells, keeping labels but dropping metadata tokens, so `herdr-ide`'s label-only check treated a dead `Fresh` pane as a working editor: it focused it, printed nothing, and `fresh-open` died with "could not start the IDE editor" (exit 1, surfaced by the sidebar as `custom editor failed: …/fresh-open exited with exit status: 1`). `lib.sh` adds `pane_fresh_daemon` and `fresh_editor_ok` (token AND live daemon); `herdr-ide` reuses a corpse pane as the editor (relabel + `fresh-ide` in place, no new splits) and prints the editor pane id on the already-built path, which is how `fresh-open` gets it. |
 | *uncommitted* | **IDE layer: jq ≥ 1.6 keyword fix** | `lib.sh`, `ide-save-sizes` and `fresh-to-agent` named a jq variable `label`, which jq 1.6+ parses as its `label` keyword (`$label` → "syntax error, unexpected label"), so EVERY pane lookup failed on Linux/WSL and a file click built no editor. Variables are `$lbl` now; `fresh-open` also reports a failed `herdr-ide` instead of exiting 3 silently. |
 | *uncommitted* | **Media opens in the preview; previews cover Fresh; Agent pane title** | `viewer::is_media_file` keeps pictures and videos out of the custom editor (Explorer click, Ctrl+Q popup; Source Control's `diff_opens_in_editor` media flag). Preview host: `fresh-ide` runs a host loop in the Fresh pane (token `hs-preview-host`); the sidebar writes `<sidebar state dir>/preview-host/<pane>.req`, the host claims it by rename, and the viewer runs there with `HERDR_SIDEBAR_PREVIEW_HOSTED=1`; `viewer::uncover_host` runs before the editor launches. Agent pane title: `ide-agent-title` + `shell/agent-title.zsh` (zsh preexec/precmd) → `pane report-metadata --title "◆ CLAUDE"`; language servers: `dotfiles/install-lsp.sh` (default in the installer) + Fresh `lsp` auto_start. |
+| *uncommitted* | **Terminal parks out of the middle column** | The IDE tab shows Fresh alone: `herdr-ide` moves the Terminal into a background tab labelled `terminal` (token `ide-parked-for=<IDE tab id>`, stamped before the move and nulled on return), and Ctrl+` (`herdr-ide-term`) brings it back under Fresh or parks it again. The Terminal keeps running; the old collapse-to-a-strip path is gone. Scripts: `bin/lib.sh` (`parked_terminal`, `park_terminal`, `unpark_terminal`), `bin/herdr-ide-term`, `bin/herdr-ide`, `bin/fresh-restart`. |
 | *uncommitted* | **Go to symbol popup** | `--symbol-popup-open` (action `symbol-popup`, `ctrl+alt+q`) opens the popup pane `--symbol-popup` (80%×70%), `src/symbol_search.rs` indexes definitions with a per-language regex table over the Quick Open walk (gitignore-aware, `.git` skipped, files ≤1 MiB, 5000-symbol cap) and `src/symbol_popup.rs` fuzzy-filters it in memory and opens the pick at its line through `file_popup::open_file_in_workspace`. Deliberately NOT an LSP client: Fresh already runs the language servers and a second rust-analyzer per project is not worth it, so the result is a name index, not `workspace/symbol`. |
 
 **AI commit** (`ctrl+shift+a`): the action does not commit. It writes a per-tab
@@ -948,6 +965,7 @@ Two things break that loop, both worth knowing:
 | Spaces rail shows no agent name for a CLI that is clearly running | Add its command word to `AGENT_OF` at the top of `dotfiles/herdr-plugins/ide/bin/ide-agent-title` (then run the agent again — the hook fires per typed command). herdr only auto-detects the agents in `herdr integration status`; everything else is named solely by this table's `--display-agent` |
 | Spaces rail shows no state for CodeBuddy (`·` instead of `◐`/`○`) | its hooks must be installed AND codebuddy restarted (it snapshots settings at startup): `jq -r '.hooks \| keys[]' ~/.codebuddy/settings.json` should list SessionStart, UserPromptSubmit, PreToolUse, Stop, PermissionRequest, Notification and SessionEnd, each pointing at `~/.codebuddy/hooks/herdr-agent-state.sh` (rerun `dotfiles/install.sh` to restore them). `herdr pane list` shows `agent: codebuddy` once a hook has reported |
 | After a herdr restart (or a reboot) the IDE is empty shells and a file click reports `fresh-open` exiting 1 | `herdr pane list` shows the `Fresh` pane with **no** `fresh_daemon` token: herdr restored it without metadata and nothing runs in it. Press `ctrl+b i` (or click a file again) — `herdr-ide` heals that pane in place, so no rebuild and no lost layout. `fresh-restart` deliberately skips tokenless panes |
+| a tab called `terminal` appeared | That is the parked Terminal (see *IDE layout*), not a leak. Ctrl+` from the IDE's Fresh pane brings it back under Fresh and the parking tab closes; Ctrl+` on the Terminal parks it again. After a herdr restart the parked tab can get a sidebar docked into it, because the restored tab has lost its `ide-parked-for` token: close that sidebar, or press Ctrl+` from the IDE tab, which finds the Terminal by its label |
 | A Fresh key does nothing | `fresh --cmd config show \| grep selection_` (config linked?), `ls -la ~/.config/fresh/plugins`, restart the daemon |
 | Fresh burns CPU while unfocused, a daemon sits at 15-25 % | `ps -eo pid,pcpu,args \| grep 'fresh-editor/fresh --server'`, then sample `/proc/<pid>/stat` twice for the live number. Two known causes: a plugin recursing into its own command (*Gotchas*), and a stray daemon with no pane attached — `fresh --cmd daemon list`, `fresh --cmd daemon kill <name>`. Baseline is ~2-3 % per editor daemon (plugins + LSP + timers). `tail -200 ~/.local/state/fresh/logs/fresh-server-<pid>.log` names the looping handler |
 | An LSP key does nothing | `alt+shift+q` / `alt+shift+w` / `alt+o` need a trusted workspace and a running server (status bar `LSP (on)`; `F12` works too). If `alt+w` opened lazygit, herdr still owns it — `herdr server reload-config`, then compare `dotfiles/config/herdr/config.toml` |
