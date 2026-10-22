@@ -1260,9 +1260,20 @@ HACKING.md — budget time for that before promising a patched build.
   y/N prompt. Hovered file rows show a `+`/`−` glyph (click zone = last 5 columns) and the
   section headers a section-wide one (last 6); a dim "ctrl+rclick for menus" hint sits on
   the « footer line whenever the footer is otherwise empty.
-- **Sync Changes** (`S` or the ⇅ button, shown only when ahead/behind ≠ 0): `pull` then `push`,
+- **Sync Changes** (`S` or the ⇅ button, shown when ahead/behind ≠ 0): `pull` then `push`,
   on a background thread polled from tick(). Ahead/behind parse
   from the porcelain `## branch...upstream [ahead N, behind M]` header.
+- **A branch with no upstream says `⟳ Publish Branch` instead of hiding the row** (issue:
+  "git 面板没有推送分支的选项吗"). `git status` reports no ahead/behind for such a branch,
+  so the Sync row used to disappear in exactly the case that needs a push, and plain
+  `git push` refuses it ("fatal: The current branch X has no upstream branch") — nothing in
+  the panel could push a branch created here. `Git::push` / the `S` path (`Git::sync`)
+  therefore PUBLISH: `--set-upstream` to `branch.<name>.remote`, else `origin`, else the
+  first remote (`Git::publish_remote`, `Git::push_plan` — the same plan the streaming
+  `--git-push` action adds to its argv, so the two cannot drift). The row goes back to
+  `⟳ Sync Changes N↑` once the branch tracks, and the busy label reads `Publishing…`.
+  Live-verified both entry points on a fresh branch: the row appeared, `S` set
+  `origin/<branch>` and created the remote branch, and `ctrl+alt+k` did the same.
 - **The ✓ Commit button offers a pull when the branch is behind.** Behind ≠ 0 AND something
   staged (so the button reads `✓ Commit · N↓` rather than Sync Changes) makes a click / ⏎ open
   `Overlay::ConfirmPullThenCommit` ("&lt;branch&gt; is N commit(s) behind its upstream. Pull

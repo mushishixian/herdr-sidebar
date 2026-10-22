@@ -90,9 +90,22 @@ fn opens_in_editor(entry: &FileEntry) -> bool {
 
 fn sync_label_for_status(status: &Status, syncing: bool) -> Option<String> {
     if syncing {
-        return Some(format!("{} Syncing…", sync_glyph(true)));
+        // A branch with no upstream is being PUBLISHED, not synced.
+        let verb = if status.has_upstream {
+            "Syncing"
+        } else {
+            "Publishing"
+        };
+        return Some(format!("{} {verb}…", sync_glyph(true)));
     }
-    if !status.has_upstream || status.ahead + status.behind == 0 {
+    if !status.has_upstream {
+        // A branch created here has no upstream, so git reports no ahead/behind
+        // and this row used to disappear — the one case that needs a push had
+        // no button at all. VS Code calls it Publish Branch; `Git::push` sets
+        // the upstream on the way out.
+        return Some(format!("{} Publish Branch", sync_glyph(false)));
+    }
+    if status.ahead + status.behind == 0 {
         return None;
     }
     let mut counts = Vec::new();
@@ -5135,10 +5148,8 @@ impl App {
         let Some(repo) = self.repos.get(index) else {
             return;
         };
-        if !repo.status.has_upstream {
-            self.flash = Some(("no upstream to sync with".into(), true));
-            return;
-        }
+        // No `has_upstream` gate here: with no upstream there is nothing to
+        // pull and `Git::sync` publishes the branch instead (VS Code's Publish).
         let git = repo.git.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -7276,6 +7287,27 @@ mod tests {
             sync_label_for_status(&status, false).as_deref(),
             Some("⟳ Sync Changes 43↑")
         );
+    }
+
+    /// A branch created here has no upstream, so git reports no ahead/behind and
+    /// the Sync row used to disappear — exactly the case that needs a push
+    /// (user-reported). It offers Publish instead; `Git::push` sets the upstream.
+    #[test]
+    fn a_branch_without_an_upstream_offers_publish() {
+        let fresh = Status::default(); // no upstream, nothing ahead/behind
+        assert_eq!(
+            sync_label_for_status(&fresh, false).as_deref(),
+            Some("⟳ Publish Branch")
+        );
+        // The busy label spins its glyph, so only the words are asserted.
+        let publishing = sync_label_for_status(&fresh, true).unwrap();
+        assert!(publishing.ends_with(" Publishing…"), "{publishing}");
+        // Tracking an upstream with nothing to send keeps the row hidden.
+        let tracked = Status {
+            has_upstream: true,
+            ..Status::default()
+        };
+        assert_eq!(sync_label_for_status(&tracked, false), None);
     }
 
     #[test]

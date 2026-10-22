@@ -175,9 +175,81 @@ impl Git {
     /// tool that quietly adds `--rebase` rewrites their history for them
     /// (user-reported).
     pub fn sync(&self) -> Result<String, String> {
+        // A branch created here has no upstream, so there is nothing to pull
+        // from and `git pull` refuses — publish it instead (see `push`).
+        if !self.has_upstream() {
+            return self.push();
+        }
         run_in(&self.root, PULL_ARGS)?;
         run_in(&self.root, &["push"])?;
         Ok("synced with remote".to_string())
+    }
+
+    /// Whether the current branch tracks an upstream (i.e. `@{u}` resolves).
+    pub fn has_upstream(&self) -> bool {
+        run_in(
+            &self.root,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .is_ok()
+    }
+
+    /// The remote a branch with no upstream should be published to: whatever
+    /// `branch.<name>.remote` names (it is normally unset before the first
+    /// push), else `origin`, else the repo's first remote.
+    fn publish_remote(&self, branch: &str) -> Result<String, String> {
+        if let Ok(name) = run_in(
+            &self.root,
+            &["config", "--get", &format!("branch.{branch}.remote")],
+        ) {
+            let name = name.trim();
+            if !name.is_empty() && name != "." {
+                return Ok(name.to_string());
+            }
+        }
+        let names = lines(run_in(&self.root, &["remote"])?)?;
+        if names.iter().any(|n| n == "origin") {
+            return Ok("origin".to_string());
+        }
+        names
+            .into_iter()
+            .next()
+            .ok_or_else(|| "no remote to push to".to_string())
+    }
+
+    /// `git push`. A branch with no upstream — created here and never pushed —
+    /// is PUBLISHED instead of refused: `--set-upstream` to the remote this
+    /// repo already uses, which is VS Code's "Publish Branch". Plain
+    /// `git push` answers "fatal: The current branch X has no upstream
+    /// branch", and nothing in the panel could get past that (user-reported).
+    pub fn push(&self) -> Result<String, String> {
+        let (extra, summary) = self.push_plan()?;
+        let mut args = vec!["push"];
+        args.extend(extra.iter().map(String::as_str));
+        run_in(&self.root, &args)?;
+        Ok(summary)
+    }
+
+    /// What a push owes beyond `push` itself, plus the summary to report: no
+    /// extra args for a branch that already tracks an upstream, `--set-upstream
+    /// <remote> <branch>` for one that has never been pushed. Shared with the
+    /// streaming `git-push` action so the two cannot disagree.
+    pub fn push_plan(&self) -> Result<(Vec<String>, String), String> {
+        if self.has_upstream() {
+            return Ok((Vec::new(), "Pushed.".to_string()));
+        }
+        let branch = self
+            .current_branch()
+            .ok_or_else(|| "detached HEAD: nothing to publish".to_string())?;
+        let remote = self.publish_remote(&branch)?;
+        Ok((
+            vec![
+                "--set-upstream".to_string(),
+                remote.clone(),
+                branch.clone(),
+            ],
+            format!("Published {branch} to {remote}."),
+        ))
     }
 
     /// The commit button's "pull first". Returns the footer summary on success.
@@ -1839,6 +1911,76 @@ mod tests {
         assert!(two.join("b.txt").is_file(), "the upstream commit landed");
         // Second pull: nothing new.
         assert_eq!(clone.pull(), Ok("Already up to date.".to_string()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A branch created here has no upstream, and plain `git push` refuses that
+    /// ("fatal: The current branch X has no upstream branch"), which left the
+    /// panel with no way to push a new branch at all (user-reported). `push`
+    /// publishes it with `--set-upstream`, and `sync` publishes instead of
+    /// running the pull that could never succeed.
+    #[test]
+    fn push_publishes_a_branch_that_has_no_upstream() {
+        let base = std::env::temp_dir().join(format!("aa-git-publish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let origin = base.join("origin.git");
+        let work = base.join("work");
+        let run = |dir: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        std::fs::create_dir_all(&origin).unwrap();
+        run(&origin, &["init", "-q", "--bare"]);
+        run(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        std::fs::create_dir_all(&work).unwrap();
+        run(&work, &["init", "-q"]);
+        run(&work, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run(&work, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        std::fs::write(work.join("a.txt"), "a\n").unwrap();
+        run(&work, &["add", "."]);
+        run(
+            &work,
+            &[
+                "-c", "user.email=t@t.dev", "-c", "user.name=t", "commit", "-q", "-m", "a",
+            ],
+        );
+        let repo = Git {
+            root: work.clone(),
+        };
+
+        // A brand-new branch: no upstream, so publish on the first push.
+        run(&work, &["switch", "-q", "-c", "feature/publish"]);
+        assert!(!repo.has_upstream());
+        assert_eq!(
+            repo.push(),
+            Ok("Published feature/publish to origin.".to_string())
+        );
+        assert!(repo.has_upstream(), "the upstream was set");
+        assert!(
+            run_in(&origin, &["branch", "--list", "feature/publish"])
+                .unwrap()
+                .contains("feature/publish"),
+            "the branch really landed on the remote"
+        );
+        // Once it tracks, the same call is an ordinary push.
+        assert_eq!(repo.push(), Ok("Pushed.".to_string()));
+
+        // Sync on another fresh branch publishes too: its pull could never work.
+        run(&work, &["switch", "-q", "-c", "feature/sync"]);
+        assert!(!repo.has_upstream());
+        assert_eq!(
+            repo.sync(),
+            Ok("Published feature/sync to origin.".to_string())
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

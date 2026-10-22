@@ -96,10 +96,26 @@ pub fn run(op: &str) -> io::Result<()> {
     }
 
     // 1. Initial notification
+    // A push to a branch that has no upstream PUBLISHES it (`--set-upstream`):
+    // plain `git push` refuses with "no upstream branch", which left a new
+    // branch unpushable from any entry point. Same plan the panel uses.
+    let push_extra = if op == "push" {
+        match git.push_plan() {
+            Ok((extra, _)) => extra,
+            Err(e) => {
+                notify(&format!("{op_label}{tip}"), &e);
+                return Ok(());
+            }
+        }
+    } else {
+        Vec::new()
+    };
     let start_msg = if op == "pull" {
         format!("Pulling {branch} from remote…")
-    } else {
+    } else if push_extra.is_empty() {
         format!("Pushing {branch} to remote…")
+    } else {
+        format!("Publishing {branch} to remote…")
     };
     notify(&format!("{op_label} [{repo_name}]{tip}"), &start_msg);
 
@@ -114,6 +130,10 @@ pub fn run(op: &str) -> io::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Publishing: `--set-upstream <remote> <branch>` (empty for a plain push).
+    for arg in &push_extra {
+        cmd.arg(arg);
+    }
 
     #[cfg(windows)]
     {
