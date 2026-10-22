@@ -1943,7 +1943,7 @@ impl App {
         let target = self
             .cwd_follower
             .borrow_mut()
-            .next_cwd(&panes, &ctl.pane_id);
+            .next_cwd(&panes, &ctl.pane_id, &self.cwd);
         let Some(target) = target else { return };
         let target = PathBuf::from(target);
         if target == self.cwd || !target.is_dir() || std::env::set_current_dir(&target).is_err() {

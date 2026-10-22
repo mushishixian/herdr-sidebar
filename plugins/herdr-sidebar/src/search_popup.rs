@@ -94,8 +94,7 @@ pub fn run() -> io::Result<()> {
     let theme = icons::IconTheme::resolve(None, state.icons);
 
     let mut app = App::new(root, caller_pane_id, theme);
-    app.replace_mode = std::env::var(REPLACE_MODE_ENV).is_ok_and(|mode| mode == REPLACE_MODE_VALUE);
-    app.replace_open = app.replace_mode;
+    app.replace_open = std::env::var(REPLACE_MODE_ENV).is_ok_and(|mode| mode == REPLACE_MODE_VALUE);
 
     crossterm::style::force_color_output(true);
     let mut terminal = ratatui::init();
@@ -598,9 +597,8 @@ struct App {
     preview_offset: usize,
     preview_recenter: bool,
     done: bool,
-    /// Replace mode (`Ctrl+Alt+E`): the Replace row and its keys exist.
-    replace_mode: bool,
-    /// The Replace row is shown. Replace mode starts with it open.
+    /// The Replace row is shown. Opened by the chevron, Tab, Shift+Tab or
+    /// Ctrl+R, or from the start by `Ctrl+Alt+E`. It gates every replace key.
     replace_open: bool,
     focus: Focus,
     replacement: String,
@@ -654,7 +652,6 @@ impl App {
             preview_offset: 0,
             preview_recenter: false,
             done: false,
-            replace_mode: false,
             replace_open: false,
             focus: Focus::Query,
             replacement: String::new(),
@@ -793,7 +790,7 @@ impl App {
     /// Typing goes to the Replacement input only while it has focus and its
     /// row is shown. Editing it never starts a search.
     fn editing_replacement(&self) -> bool {
-        self.replace_mode && self.replace_open && self.focus == Focus::Replacement
+        self.replace_open && self.focus == Focus::Replacement
     }
 
     /// The text and caret of the input that receives typing.
@@ -821,21 +818,33 @@ impl App {
         }
     }
 
+    /// Opens the collapsed Replace row and focuses its input (Tab, Shift+Tab
+    /// and Ctrl+R on a collapsed row).
+    fn reveal_replace(&mut self) {
+        self.select_all.disarm();
+        self.replace_open = true;
+        self.focus = Focus::Replacement;
+    }
+
+    /// Tab / Shift+Tab: reveal the row when collapsed, otherwise move focus
+    /// between the two inputs.
     fn toggle_focus(&mut self) {
-        if self.replace_mode && self.replace_open {
-            // The armed selection belongs to the field it was made in.
-            self.select_all.disarm();
-            self.focus = match self.focus {
-                Focus::Query => Focus::Replacement,
-                Focus::Replacement => Focus::Query,
-            };
+        if !self.replace_open {
+            self.reveal_replace();
+            return;
         }
+        // The armed selection belongs to the field it was made in.
+        self.select_all.disarm();
+        self.focus = match self.focus {
+            Focus::Query => Focus::Replacement,
+            Focus::Replacement => Focus::Query,
+        };
     }
 
     /// Replace actions need the Replace row open, a query, and no replacement
     /// already running. Otherwise they do nothing.
     fn replace_ready(&self) -> bool {
-        self.replace_mode && self.replace_open && !self.replacing && !self.query.is_empty()
+        self.replace_open && !self.replacing && !self.query.is_empty()
     }
 
     /// Whether the Replace buttons do anything right now.
@@ -949,10 +958,10 @@ impl App {
         }
     }
 
-    /// The replacement the preview should show, or `None` outside replace
-    /// mode (or while the Replace row is hidden).
+    /// The replacement the preview should show, or `None` while the Replace
+    /// row is collapsed.
     fn replacement_preview(&self) -> Option<String> {
-        (self.replace_mode && self.replace_open).then(|| self.replacement.clone())
+        self.replace_open.then(|| self.replacement.clone())
     }
 
     fn pending_prompt(&self, pending: &Pending) -> String {
@@ -1097,9 +1106,10 @@ impl App {
             // Esc first drops an armed Ctrl+A selection, then closes.
             KeyCode::Esc if self.select_all.armed() => self.select_all.disarm(),
             KeyCode::Esc => self.done = true,
-            KeyCode::Enter if alt && self.replace_mode => self.request_replace_all(),
+            // Alt+Enter does nothing while the Replace row is collapsed.
+            KeyCode::Enter if alt => self.request_replace_all(),
             KeyCode::Enter => self.activate(),
-            KeyCode::Tab | KeyCode::BackTab if self.replace_mode => self.toggle_focus(),
+            KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
             KeyCode::PageUp => self.move_selection(-page),
@@ -1120,8 +1130,13 @@ impl App {
             KeyCode::Delete => self.delete_at_cursor(),
             KeyCode::Char('a') if ctrl && !alt => self.arm_select_all(),
             KeyCode::Char('u') if ctrl && !alt => self.clear_field(),
-            KeyCode::Char('r') if ctrl && !alt && self.replace_mode => {
-                self.request_replace_selected();
+            // Ctrl+R on a collapsed row reveals it instead of replacing.
+            KeyCode::Char('r') if ctrl && !alt => {
+                if self.replace_open {
+                    self.request_replace_selected();
+                } else {
+                    self.reveal_replace();
+                }
             }
             // Alt+C / Alt+W / Alt+R are the VS Code toggles; other Alt chords
             // do nothing.
@@ -1166,11 +1181,11 @@ impl App {
                 // also leaves the field a Ctrl+A selection was made in.
                 self.pending = None;
                 self.select_all.disarm();
-                if self.replace_mode && contains(self.chevron_zone, column, row) {
+                if contains(self.chevron_zone, column, row) {
                     self.toggle_replace_row();
                     return;
                 }
-                if self.replace_mode && self.replace_open {
+                if self.replace_open {
                     if let Some(&(_, button)) = self
                         .replace_zones
                         .iter()
@@ -1187,7 +1202,7 @@ impl App {
                         return;
                     }
                 }
-                if self.replace_mode && contains(self.query_field, column, row) {
+                if contains(self.query_field, column, row) {
                     self.focus = Focus::Query;
                 }
                 if let Some(&(_, toggle)) = self
@@ -1360,10 +1375,10 @@ impl App {
     }
 
     fn footer_hint(&self) -> &'static str {
-        if self.replace_mode {
+        if self.replace_open {
             " ↑↓ move · tab field · ctrl+r replace · alt+enter all · ⏎ open · esc close"
         } else {
-            " ↑↓ move · pgup/pgdn · ⏎ open · alt+c/w/r options · esc cancel"
+            " ↑↓ move · ⏎ open · tab replace · alt+c/w/r options · esc close"
         }
     }
 
@@ -1383,7 +1398,7 @@ impl App {
         let dim = Style::default().add_modifier(Modifier::DIM);
         // The Replace row adds one line under the query; everything below it
         // moves down by that much.
-        let replace_row = self.replace_mode && self.replace_open;
+        let replace_row = self.replace_open;
         let extra = u16::from(replace_row);
         let list_y = area.y + 4 + extra;
         let list_height = area.height.saturating_sub(5 + extra);
@@ -1395,7 +1410,7 @@ impl App {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
-        let title = if self.replace_mode {
+        let title = if self.replace_open {
             " Replace in files"
         } else {
             " Search in files"
@@ -1414,29 +1429,23 @@ impl App {
             Rect::new(area.x, area.y, left_width, 1),
         );
 
-        // Row 1: query input with the three toggle chips at its right end. In
-        // replace mode a disclosure chevron sits left of it.
-        if self.replace_mode {
-            let chevron = if self.replace_open { "▾ " } else { "▸ " };
-            frame.render_widget(
-                Paragraph::new(Span::styled(chevron, accent)),
-                Rect::new(area.x, area.y + 1, 2, 1),
-            );
-            self.chevron_zone = Rect::new(area.x, area.y + 1, 2, 1);
-            self.query_field = Rect::new(area.x + 2, area.y + 1, left_width.saturating_sub(2), 1);
-            self.draw_input(
-                frame,
-                area.x + 2,
-                area.y + 1,
-                left_width.saturating_sub(2),
-                accent,
-                dim,
-            );
-        } else {
-            self.chevron_zone = Rect::default();
-            self.query_field = Rect::new(area.x, area.y + 1, left_width, 1);
-            self.draw_input(frame, area.x, area.y + 1, left_width, accent, dim);
-        }
+        // Row 1: a disclosure chevron, then the query input with the three
+        // toggle chips at its right end.
+        let chevron = if self.replace_open { "▾ " } else { "▸ " };
+        frame.render_widget(
+            Paragraph::new(Span::styled(chevron, accent)),
+            Rect::new(area.x, area.y + 1, 2, 1),
+        );
+        self.chevron_zone = Rect::new(area.x, area.y + 1, 2, 1);
+        self.query_field = Rect::new(area.x + 2, area.y + 1, left_width.saturating_sub(2), 1);
+        self.draw_input(
+            frame,
+            area.x + 2,
+            area.y + 1,
+            left_width.saturating_sub(2),
+            accent,
+            dim,
+        );
 
         // Row 2 (replace mode, when open): the Replace input and its buttons.
         if replace_row {
@@ -2107,7 +2116,6 @@ mod tests {
     #[test]
     fn a_mouse_click_drops_an_armed_selection() {
         let mut app = App::new(PathBuf::from("/r"), None, IconTheme::Emoji);
-        app.replace_mode = true;
         app.replace_open = true;
         for character in "needle".chars() {
             app.key(key(KeyCode::Char(character), KeyModifiers::NONE));
@@ -2321,7 +2329,6 @@ mod replace_tests {
     /// in place. `replacement` is the text to type into the Replace input.
     fn replace_app(root: &Path, replacement: &str) -> App {
         let mut app = App::new(root.to_path_buf(), None, IconTheme::Emoji);
-        app.replace_mode = true;
         app.replace_open = true;
         app.query = "needle".into();
         app.cursor = app.query.len();
@@ -2475,7 +2482,7 @@ mod replace_tests {
     }
 
     #[test]
-    fn tab_moves_focus_only_while_the_replace_row_is_open() {
+    fn tab_moves_focus_between_the_inputs_while_the_replace_row_is_open() {
         let root = project("focus");
         let mut app = replace_app(&root, "");
         assert_eq!(app.focus, Focus::Query);
@@ -2483,17 +2490,76 @@ mod replace_tests {
         assert_eq!(app.focus, Focus::Replacement);
         app.key(key(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(app.focus, Focus::Query);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
-        app.replace_open = false;
+    /// A default (search) popup: the Replace row is collapsed, with results.
+    fn search_app(root: &Path) -> App {
+        let mut app = App::new(root.to_path_buf(), None, IconTheme::Emoji);
+        app.query = "needle".into();
+        app.cursor = app.query.len();
+        let (hits, _) =
+            collect_content_hits(root, false, "needle", "", "", SearchOptions::default(), 20)
+                .unwrap();
+        app.set_results_for_test(hits, false);
+        app
+    }
+
+    #[test]
+    fn search_popup_offers_a_collapsed_replace_row() {
+        let root = project("collapsed");
+        let mut app = search_app(&root);
+        let text = buffer_text(&drawn(&mut app, 120, 30));
+        assert!(text.contains("Search in files"), "search title");
+        assert!(text.contains("▸"), "collapsed chevron is always drawn");
+        assert!(
+            !text.contains("Replace ›"),
+            "no Replace input when collapsed"
+        );
+
+        // The chevron zone is populated by the draw above; click it.
+        app.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.replace_open, "chevron click opens the row");
+        let text = buffer_text(&drawn(&mut app, 120, 30));
+        assert!(text.contains("Replace in files"), "replace title");
+        assert!(text.contains("▾"), "expanded chevron");
+        assert!(text.contains("Replace ›"), "Replace input row");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tab_reveals_replace_from_search() {
+        let root = project("tab-reveal");
+        let mut app = search_app(&root);
+        assert!(!app.replace_open);
         app.key(key(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.focus, Focus::Query, "Tab does nothing while collapsed");
+        assert!(app.replace_open, "Tab opens the collapsed row");
+        assert_eq!(app.focus, Focus::Replacement);
+        app.key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Query);
+        assert!(app.replace_open, "moving focus keeps the row open");
+        let _ = std::fs::remove_dir_all(root);
+    }
 
-        let mut search = App::new(root.clone(), None, IconTheme::Emoji);
-        search.key(key(KeyCode::Tab, KeyModifiers::NONE));
+    #[test]
+    fn ctrl_r_reveals_replace_before_replacing() {
+        let root = project("reveal");
+        let mut app = search_app(&root);
+        app.selected = 1; // the match row, which Ctrl+R replaces when open
+        app.key(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(app.replace_open, "Ctrl+R opens the collapsed row");
+        assert_eq!(app.focus, Focus::Replacement);
+        assert!(app.pending.is_none(), "no prompt was set");
+        assert!(!app.replacing, "no replacement started");
         assert_eq!(
-            search.focus,
-            Focus::Query,
-            "search mode has no Replace input"
+            std::fs::read_to_string(root.join("src/needle.rs")).unwrap(),
+            "use crate::prelude;\nfn needle_body() {}\n// tail\n",
+            "the file is untouched"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2575,9 +2641,8 @@ mod replace_tests {
         let mut app = replace_app(&root, "pin");
         app.replace_open = false;
         app.selected = 1;
-        app.key(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
         app.key(key(KeyCode::Enter, KeyModifiers::ALT));
-        assert!(app.pending.is_none() && !app.replacing);
+        assert!(app.pending.is_none() && !app.replacing && !app.replace_open);
 
         app.replace_open = true;
         app.query.clear();
@@ -2587,21 +2652,13 @@ mod replace_tests {
     }
 
     #[test]
-    fn search_mode_ignores_replace_keys() {
+    fn collapsed_row_alt_enter_does_nothing() {
         let root = project("search-mode");
-        let mut app = App::new(root.clone(), None, IconTheme::Emoji);
-        app.query = "needle".into();
-        app.cursor = app.query.len();
-        app.set_results_for_test(
-            collect_content_hits(&root, false, "needle", "", "", SearchOptions::default(), 20)
-                .unwrap()
-                .0,
-            false,
-        );
+        let mut app = search_app(&root);
         app.selected = 1;
-        app.key(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
         app.key(key(KeyCode::Enter, KeyModifiers::ALT));
         assert!(app.pending.is_none() && !app.replacing);
+        assert!(!app.replace_open, "Alt+Enter does not expand the row");
         assert_eq!(
             std::fs::read_to_string(root.join("src/needle.rs")).unwrap(),
             "use crate::prelude;\nfn needle_body() {}\n// tail\n"

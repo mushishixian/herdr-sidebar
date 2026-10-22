@@ -757,14 +757,23 @@ HACKING.md — budget time for that before promising a patched build.
   including for state files written before the field existed. Both views sample on the
   existing ~5s heartbeat and share one process-local `CwdFollower`, so precedence survives
   an app rebuild and unified-view switch.
-- Multi-pane precedence is deterministic: focused eligible sibling, then the previously
-  followed sibling, then lexical pane id. Candidate lists are sorted before selection;
+- The follower re-roots ONLY when an already-observed eligible sibling's `foreground_cwd`
+  CHANGES. The most recent change wins; among simultaneous changes the focused pane, then the
+  previously followed one, then the lexical pane id. Candidate lists are sorted before selection;
   `pane.list` response order is never treated as meaningful. Explorer, Source Control,
   Sidebar, and Preview panes are ineligible so plugin panes cannot chase each other.
+- Focus moves never re-root. They used to: in the IDE layout Fresh and the Agent stay at the
+  project root, so clicking into either after a Terminal `cd` snapped the sidebar back (user-reported).
+  The first sample after startup keeps a sibling already at the current root and otherwise adopts
+  the focused sibling (lowest id as fallback); a new pane only joins the baseline.
+- An agent's own tool-shell `cd` does not move its pane's `foreground_cwd` (verified live with
+  claude, which reports the agent process's own cwd), so an Agent pane is followed only when its
+  foreground process itself changes directory (e.g. the agent is relaunched elsewhere).
 - A successful typed/native folder choice is a manual override. Focus changes, response
-  reordering, and newly-created panes do not overwrite it; following resumes only when an
-  already-observed eligible pane's `foreground_cwd` changes. Turning following back on
-  resets the baseline and immediately adopts the deterministic neighbour on the next beat.
+  reordering, and newly-created panes do not overwrite it; it is released by the next observed
+  sibling change. A manual choice made before the first sample adopts nothing. Turning following
+  back on resets the baseline, and the next sample keeps a sibling already at the root or adopts
+  the focused/lowest-id neighbour.
 - Source Control pauses cwd-follow while any repository has a non-empty commit-message draft;
   rebuilding the app for another cwd would otherwise destroy that in-memory draft.
 
@@ -2095,13 +2104,16 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   opens (a header opens its first match). Esc cancels. The wheel scrolls the list view, or the
   preview when the pointer is over it.
 
-- Replace (Ctrl+Alt+E): `--replace-popup-open` (action `replace-popup`, Windows twin
-  `replace-popup-windows` through `herdr-sidebar-ensure.exe`) opens the SAME `search-popup` pane with
-  `HERDR_SIDEBAR_SEARCH_MODE=replace` in its env (`search_popup::REPLACE_MODE_ENV`, sent by
-  `file_popup::request_popup_pane_with_env`, which `request_popup_pane` also uses). The title reads
-  "Replace in files". A chevron left of the query shows or hides the Replace row, and Tab/Shift+Tab move
-  focus between the two inputs (Tab only while the row is open). Search mode (Ctrl+Alt+F) has no Replace
-  row and renders as before.
+- Replace: the search popup (Ctrl+Alt+F / Ctrl+Alt+S) always carries a chevron left of the query and a
+  collapsed Replace row, so replace works from the search popup itself (user-requested). Tab or Shift+Tab
+  on a collapsed row opens it and focuses Replace; Ctrl+R does the same instead of replacing; Alt+Enter does
+  nothing while collapsed. Once open, Tab/Shift+Tab move focus between the two inputs. The chevron click
+  closes the row again, returning focus to Query and dropping a pending prompt. Ctrl+Alt+E
+  (`--replace-popup-open`, action `replace-popup`, Windows twin `replace-popup-windows` through
+  `herdr-sidebar-ensure.exe`) is the same popup opened with the row expanded: it sets
+  `HERDR_SIDEBAR_SEARCH_MODE=replace` (`search_popup::REPLACE_MODE_ENV`, sent by
+  `file_popup::request_popup_pane_with_env`). The title reads "Replace in files" while the row is open and
+  "Search in files" otherwise. The old `replace_mode` flag is gone: `App.replace_open` is the only gate.
 - Replace matching is the engine's own: `content_search::replace_in_text` uses `compile_pattern` and
   `content_line_match_ranges`, line by line. Regex mode expands captures through `Captures::expand`
   (`$1`, `${name}`, `$$`); literal mode inserts the replacement verbatim. Line endings (`\n` / `\r\n`), a
@@ -2113,7 +2125,7 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   skipped with a reason. A file is written only when it changes, atomically: a temp file in the same
   directory, the original permissions copied, then a rename over the original. A failure leaves the
   original untouched, reports the file as skipped, and moves on.
-- Keys in replace mode: **Ctrl+R** replaces the selected item. On a match row it replaces that line's first
+- Keys with the Replace row open: **Ctrl+R** replaces the selected item. On a match row it replaces that line's first
   occurrence with no prompt (a line with several matches shows all of them struck through, so the rest
   remain until the next Ctrl+R). On a file header it asks, then replaces every occurrence in that file.
   **Alt+Enter** (and the All button) is Replace All: it always asks, then re-searches the whole project

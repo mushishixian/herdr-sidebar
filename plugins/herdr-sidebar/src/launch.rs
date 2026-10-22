@@ -11,6 +11,7 @@
 //!   side needs a swap.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::Deserialize;
 
@@ -74,9 +75,13 @@ struct SiblingCwd {
 
 /// Process-local state shared by the Explorer and Source Control views.
 ///
-/// `pane.list` order is not an API guarantee, so candidates are sorted by id.
-/// A manual folder choice suppresses focus-only changes; it is released only
-/// when an already-observed sibling actually changes its live cwd.
+/// The follower re-roots only when an already-observed sibling's live
+/// `foreground_cwd` CHANGES. Focus moves, pane-list reordering and new panes
+/// never re-root. The first sample after construction (or `reset`) keeps a
+/// sibling that already sits at the current root, and otherwise adopts the
+/// focused sibling (lowest pane id as the fallback). Among simultaneous
+/// changes the focused one wins, then the previously followed one, then the
+/// lowest pane id.
 #[derive(Default, Debug)]
 pub struct CwdFollower {
     seen: BTreeMap<String, String>,
@@ -86,8 +91,9 @@ pub struct CwdFollower {
 }
 
 impl CwdFollower {
-    /// Record a successful user-selected folder. The next samples still
-    /// refresh the baseline, but do not re-root until a known pane moves.
+    /// Record a successful user-selected folder. It only matters for the next
+    /// first sample, which then adopts nothing; it is released by the next
+    /// observed sibling change.
     pub fn mark_manual_folder(&mut self) {
         self.manual_override = true;
     }
@@ -98,46 +104,44 @@ impl CwdFollower {
     }
 
     /// Return the next live cwd to follow, if this sample changes the chosen
-    /// root according to the deterministic/manual-precedence rules above.
-    pub fn next_cwd(&mut self, pane_list_json: &str, my_pane_id: &str) -> Option<String> {
+    /// root according to the rules on [`CwdFollower`].
+    pub fn next_cwd(
+        &mut self,
+        pane_list_json: &str,
+        my_pane_id: &str,
+        current_root: &Path,
+    ) -> Option<String> {
         let siblings = sibling_cwds(pane_list_json, my_pane_id);
-        let next_seen = siblings
-            .iter()
-            .map(|s| (s.pane_id.clone(), s.cwd.clone()))
-            .collect::<BTreeMap<_, _>>();
         let changed = siblings
             .iter()
             .filter(|s| self.seen.get(&s.pane_id).is_some_and(|old| old != &s.cwd))
             .collect::<Vec<_>>();
-        let was_initialized = self.initialized;
+        let first_sample = !self.initialized;
+        let manual = std::mem::take(&mut self.manual_override);
+        self.seen = siblings
+            .iter()
+            .map(|s| (s.pane_id.clone(), s.cwd.clone()))
+            .collect();
         self.initialized = true;
 
-        if self.manual_override {
-            self.seen = next_seen;
-            if !was_initialized || changed.is_empty() {
+        if first_sample {
+            if manual {
                 return None;
             }
-            let picked = pick_sibling(&changed, self.selected.as_deref())?;
+            if let Some(at_root) = siblings.iter().find(|s| Path::new(&s.cwd) == current_root) {
+                self.selected = Some(at_root.pane_id.clone());
+                return None;
+            }
+            let all = siblings.iter().collect::<Vec<_>>();
+            let picked = pick_sibling(&all, None)?;
             self.selected = Some(picked.pane_id.clone());
-            self.manual_override = false;
             return Some(picked.cwd.clone());
         }
 
-        let prior_selected = self.selected.clone();
-        let prior_cwd = prior_selected
-            .as_ref()
-            .and_then(|id| self.seen.get(id))
-            .cloned();
-        let picked = pick_sibling(
-            &siblings.iter().collect::<Vec<_>>(),
-            self.selected.as_deref(),
-        );
-        self.seen = next_seen;
-        let picked = picked?;
+        let picked = pick_sibling(&changed, self.selected.as_deref())?;
         self.selected = Some(picked.pane_id.clone());
-        (prior_selected.as_deref() != Some(picked.pane_id.as_str())
-            || prior_cwd.as_deref() != Some(picked.cwd.as_str()))
-        .then(|| picked.cwd.clone())
+        self.manual_override = false;
+        Some(picked.cwd.clone())
     }
 }
 
@@ -1773,7 +1777,9 @@ mod tests {
                {"pane_id":"w1:p1","tab_id":"w1:t1","cwd":"/stale/spawn","foreground_cwd":"/live/project"}"#,
         );
         assert_eq!(
-            follower.next_cwd(&live, "w1:p3").as_deref(),
+            follower
+                .next_cwd(&live, "w1:p3", Path::new("/elsewhere"))
+                .as_deref(),
             Some("/live/project")
         );
 
@@ -1782,37 +1788,64 @@ mod tests {
             r#"{"pane_id":"w1:p3","tab_id":"w1:t1","label":"Sidebar"},
                {"pane_id":"w1:p1","tab_id":"w1:t1","cwd":"/stale/spawn"}"#,
         );
-        assert_eq!(follower.next_cwd(&stale_only, "w1:p3"), None);
+        assert_eq!(
+            follower.next_cwd(&stale_only, "w1:p3", Path::new("/elsewhere")),
+            None
+        );
     }
 
     #[test]
     fn cwd_follower_has_deterministic_multi_pane_precedence() {
+        let root = Path::new("/elsewhere");
         let mut follower = CwdFollower::default();
         let unordered = pane_list(
             r#"{"pane_id":"w1:p3","tab_id":"w1:t1","label":"Sidebar"},
                {"pane_id":"w1:p9","tab_id":"w1:t1","foreground_cwd":"/nine"},
                {"pane_id":"w1:p1","tab_id":"w1:t1","foreground_cwd":"/one"}"#,
         );
-        // No focused sibling: lexical pane id is the stable fallback.
+        // First sample, nothing at the root: lexical pane id is the fallback.
         assert_eq!(
-            follower.next_cwd(&unordered, "w1:p3").as_deref(),
+            follower.next_cwd(&unordered, "w1:p3", root).as_deref(),
             Some("/one")
         );
-        assert_eq!(follower.next_cwd(&unordered, "w1:p3"), None);
+        assert_eq!(follower.next_cwd(&unordered, "w1:p3", root), None);
 
+        // Focus alone moves to p9 without any cwd change: no re-root.
         let focused = pane_list(
             r#"{"pane_id":"w1:p3","tab_id":"w1:t1","label":"Sidebar"},
                {"pane_id":"w1:p9","tab_id":"w1:t1","foreground_cwd":"/nine","focused":true},
                {"pane_id":"w1:p1","tab_id":"w1:t1","foreground_cwd":"/one"}"#,
         );
+        assert_eq!(follower.next_cwd(&focused, "w1:p3", root), None);
+
+        // Both change; the focused changed pane wins over the unfocused one.
+        let both_changed = pane_list(
+            r#"{"pane_id":"w1:p3","tab_id":"w1:t1","label":"Sidebar"},
+               {"pane_id":"w1:p9","tab_id":"w1:t1","foreground_cwd":"/nine-2","focused":true},
+               {"pane_id":"w1:p1","tab_id":"w1:t1","foreground_cwd":"/one-2"}"#,
+        );
         assert_eq!(
-            follower.next_cwd(&focused, "w1:p3").as_deref(),
-            Some("/nine")
+            follower.next_cwd(&both_changed, "w1:p3", root).as_deref(),
+            Some("/nine-2")
+        );
+
+        // Both change again; now p1 is focused and wins.
+        let both_changed_again = pane_list(
+            r#"{"pane_id":"w1:p3","tab_id":"w1:t1","label":"Sidebar"},
+               {"pane_id":"w1:p9","tab_id":"w1:t1","foreground_cwd":"/nine-3"},
+               {"pane_id":"w1:p1","tab_id":"w1:t1","foreground_cwd":"/one-3","focused":true}"#,
+        );
+        assert_eq!(
+            follower
+                .next_cwd(&both_changed_again, "w1:p3", root)
+                .as_deref(),
+            Some("/one-3")
         );
     }
 
     #[test]
     fn manual_folder_wins_until_an_observed_pane_moves() {
+        let root = Path::new("/elsewhere");
         let mut follower = CwdFollower::default();
         let initial = pane_list(
             r#"{"pane_id":"w1:p3","tab_id":"w1:t1","label":"Sidebar"},
@@ -1820,7 +1853,7 @@ mod tests {
                {"pane_id":"w1:p2","tab_id":"w1:t1","foreground_cwd":"/two"}"#,
         );
         assert_eq!(
-            follower.next_cwd(&initial, "w1:p3").as_deref(),
+            follower.next_cwd(&initial, "w1:p3", root).as_deref(),
             Some("/one")
         );
         follower.mark_manual_folder();
@@ -1833,7 +1866,7 @@ mod tests {
                {"pane_id":"w1:p2","tab_id":"w1:t1","foreground_cwd":"/two","focused":true},
                {"pane_id":"w1:p1","tab_id":"w1:t1","foreground_cwd":"/one"}"#,
         );
-        assert_eq!(follower.next_cwd(&focus_only, "w1:p3"), None);
+        assert_eq!(follower.next_cwd(&focus_only, "w1:p3", root), None);
 
         let moved = pane_list(
             r#"{"pane_id":"w1:p3","tab_id":"w1:t1","label":"Sidebar"},
@@ -1841,9 +1874,15 @@ mod tests {
                {"pane_id":"w1:p2","tab_id":"w1:t1","foreground_cwd":"/two/next","focused":true}"#,
         );
         assert_eq!(
-            follower.next_cwd(&moved, "w1:p3").as_deref(),
+            follower.next_cwd(&moved, "w1:p3", root).as_deref(),
             Some("/two/next")
         );
+
+        // A manual choice made before the first sample adopts nothing.
+        let mut fresh = CwdFollower::default();
+        fresh.mark_manual_folder();
+        assert_eq!(fresh.next_cwd(&initial, "w1:p3", root), None);
+        assert_eq!(fresh.next_cwd(&focus_only, "w1:p3", root), None);
     }
 
     #[test]
@@ -1855,7 +1894,89 @@ mod tests {
                {"pane_id":"w1:p5","tab_id":"w1:t1","label":"routes.rs · editor","foreground_cwd":"/editor"},
                {"pane_id":"w1:p4","tab_id":"w1:t2","foreground_cwd":"/other"}"#,
         );
-        assert_eq!(CwdFollower::default().next_cwd(&json, "w1:p3"), None);
+        assert_eq!(
+            CwdFollower::default().next_cwd(&json, "w1:p3", Path::new("/elsewhere")),
+            None
+        );
+    }
+
+    #[test]
+    fn focus_moving_to_an_unchanged_pane_never_re_roots() {
+        // The IDE layout: Fresh and Agent stay at the project root while the
+        // Terminal is the pane the user `cd`s in.
+        let root = Path::new("/proj");
+        let mut follower = CwdFollower::default();
+        let list = |terminal: &str,
+                    terminal_focused: bool,
+                    fresh_focused: bool,
+                    agent: &str,
+                    agent_focused: bool| {
+            pane_list(&format!(
+                r#"{{"pane_id":"w1:p0","tab_id":"w1:t1","label":"Sidebar"}},
+                   {{"pane_id":"w1:p4","tab_id":"w1:t1","label":"Fresh","foreground_cwd":"/proj","focused":{fresh_focused}}},
+                   {{"pane_id":"w1:p1","tab_id":"w1:t1","label":"Terminal","foreground_cwd":"{terminal}","focused":{terminal_focused}}},
+                   {{"pane_id":"w1:p3","tab_id":"w1:t1","label":"Agent","foreground_cwd":"{agent}","focused":{agent_focused}}}"#
+            ))
+        };
+        assert_eq!(
+            follower.next_cwd(&list("/proj", false, false, "/proj", false), "w1:p0", root),
+            None
+        );
+        assert_eq!(
+            follower
+                .next_cwd(
+                    &list("/proj/sub", true, false, "/proj", false),
+                    "w1:p0",
+                    root
+                )
+                .as_deref(),
+            Some("/proj/sub")
+        );
+        assert_eq!(
+            follower.next_cwd(
+                &list("/proj/sub", false, true, "/proj", false),
+                "w1:p0",
+                root
+            ),
+            None
+        );
+        assert_eq!(
+            follower.next_cwd(
+                &list("/proj/sub", false, false, "/proj", true),
+                "w1:p0",
+                root
+            ),
+            None
+        );
+        assert_eq!(
+            follower
+                .next_cwd(
+                    &list("/proj/sub", false, false, "/other", true),
+                    "w1:p0",
+                    root
+                )
+                .as_deref(),
+            Some("/other")
+        );
+    }
+
+    #[test]
+    fn first_sample_keeps_a_sibling_already_at_the_current_root() {
+        let root = Path::new("/proj/sub");
+        let mut follower = CwdFollower::default();
+        let first = pane_list(
+            r#"{"pane_id":"w1:p0","tab_id":"w1:t1","label":"Sidebar"},
+               {"pane_id":"w1:p4","tab_id":"w1:t1","label":"Fresh","foreground_cwd":"/proj","focused":true},
+               {"pane_id":"w1:p1","tab_id":"w1:t1","label":"Terminal","foreground_cwd":"/proj/sub"}"#,
+        );
+        assert_eq!(follower.next_cwd(&first, "w1:p0", root), None);
+
+        let focus_moved = pane_list(
+            r#"{"pane_id":"w1:p0","tab_id":"w1:t1","label":"Sidebar"},
+               {"pane_id":"w1:p4","tab_id":"w1:t1","label":"Fresh","foreground_cwd":"/proj"},
+               {"pane_id":"w1:p1","tab_id":"w1:t1","label":"Terminal","foreground_cwd":"/proj/sub","focused":true}"#,
+        );
+        assert_eq!(follower.next_cwd(&focus_moved, "w1:p0", root), None);
     }
 
     const FOCUSED: &str =

@@ -1125,10 +1125,10 @@ impl App {
         let Ok(panes) = herdr_sidebar::ipc::call_text("pane.list", serde_json::json!({})) else {
             return;
         };
-        let target = self
-            .cwd_follower
-            .borrow_mut()
-            .next_cwd(&panes, &ctl.pane_id);
+        let target =
+            self.cwd_follower
+                .borrow_mut()
+                .next_cwd(&panes, &ctl.pane_id, &self.tree.root_path());
         if let Some(target) = target
             && Path::new(&target) != self.tree.root_path()
         {
