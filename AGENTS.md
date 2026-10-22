@@ -2111,16 +2111,18 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   opens (a header opens its first match). Esc cancels. The wheel scrolls the list view, or the
   preview when the pointer is over it.
 
-- Replace: the search popup (Ctrl+Alt+F / Ctrl+Alt+S) always carries a chevron left of the query and a
-  collapsed Replace row, so replace works from the search popup itself (user-requested). Tab or Shift+Tab
-  on a collapsed row opens it and focuses Replace; Ctrl+R does the same instead of replacing; Alt+Enter does
-  nothing while collapsed. Once open, Tab/Shift+Tab move focus between the two inputs. The chevron click
-  closes the row again, returning focus to Query and dropping a pending prompt. Ctrl+Alt+E
+- Replace: the search popup (Ctrl+Alt+F / Ctrl+Alt+S) always carries a chevron left of the query and the
+  Replace row, so replace works from the search popup itself (user-requested). The popup now OPENS with the
+  Replace row expanded: users could not find it behind a collapsed chevron. `run()` sets
+  `App.replace_open = true` unconditionally; `App::new` still defaults to closed (tests rely on that). The
+  chevron click still folds the row, dropping a pending prompt and returning focus to Query. A folded row is
+  re-opened by Tab or Shift+Tab (which focus Replace); Ctrl+R on a folded row opens it instead of replacing;
+  Alt+Enter does nothing while folded. Once open, Tab/Shift+Tab move focus between the two inputs. Ctrl+Alt+E
   (`--replace-popup-open`, action `replace-popup`, Windows twin `replace-popup-windows` through
-  `herdr-sidebar-ensure.exe`) is the same popup opened with the row expanded: it sets
-  `HERDR_SIDEBAR_SEARCH_MODE=replace` (`search_popup::REPLACE_MODE_ENV`, sent by
-  `file_popup::request_popup_pane_with_env`). The title reads "Replace in files" while the row is open and
-  "Search in files" otherwise. The old `replace_mode` flag is gone: `App.replace_open` is the only gate.
+  `herdr-sidebar-ensure.exe`) opens the identical popup. It still sends `HERDR_SIDEBAR_SEARCH_MODE=replace`
+  (`search_popup::REPLACE_MODE_ENV`, kept so old keymaps keep working), but `run()` no longer reads it. The
+  title reads "Replace in files" while the row is open and "Search in files" otherwise. The old `replace_mode`
+  flag is gone: `App.replace_open` is the only gate.
 - Replace matching is the engine's own: `content_search::replace_in_text` uses `compile_pattern` and
   `content_line_match_ranges`, line by line. Regex mode expands captures through `Captures::expand`
   (`$1`, `${name}`, `$$`); literal mode inserts the replacement verbatim. Line endings (`\n` / `\r\n`), a
@@ -2151,6 +2153,12 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   `ctrl+alt+e` in `dotfiles/config/herdr/config.toml`.
 - Open editor buffers (Fresh) do not get a notification. They see the change on disk as an external
   change through their own reload or conflict handling.
+- Inputs are filled boxes (`keycap_bg`/`keycap_fg`, placeholders "Search" and "Replace with…" when
+  unfocused and empty). The Replace row carries a bold `header_accent` label with the cod-replace icon
+  (`⇄` outside Material), and its buttons never use `muted_button_*`: the terminal theme's muted fill is
+  ANSI Black, invisible on a dark terminal (the user could not find the Replace entry). Disabled buttons
+  use `keycap_bg`; enabled ones `button_bg`.
+
 ### Go to symbol popup (Ctrl+Alt+Q) — heuristic, deliberately not LSP
 
 - Entry points: `--symbol-popup` (pane `[[panes]] id = "symbol-popup"`, placement

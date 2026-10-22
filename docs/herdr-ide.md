@@ -194,8 +194,8 @@ moves the copy aside.
 | `ctrl+b /` | Search in files |
 | `ctrl+b d` | Source Control view |
 | `ctrl+q` | File-search popup (fuzzy find, opens in Fresh/preview) |
-| `ctrl+alt+s`, `ctrl+alt+f` | Search in files popup (file contents, live preview; opens at the matching line; a collapsed Replace row: Tab or Ctrl+R opens it) |
-| `ctrl+alt+e` | Replace in files popup (the search popup with the Replace row already open: Ctrl+R replaces the selected item, Alt+Enter replaces all, after a y/N prompt) |
+| `ctrl+alt+s`, `ctrl+alt+f` | Search in files popup (file contents, live preview; opens at the matching line; opens with the Replace row showing; ▾ folds it) |
+| `ctrl+alt+e` | Replace in files popup (the same search popup, which opens with the Replace row showing: Ctrl+R replaces the selected item, Alt+Enter replaces all, after a y/N prompt) |
 | `ctrl+alt+q` | Go to symbol popup: fuzzy list of the project's definitions, Enter opens one at its line (heuristic index — see below) |
 | `ctrl+w` | The older fzf "jump to symbol" script (`scripts/jump-symbol.sh`, rg + PHP-focused) beside the plugin popup |
 | `ctrl+alt+c` | Git: switch branch (popup; type a new name to create) |
@@ -233,12 +233,12 @@ searches file contents: a query box with Match Case, Whole Word and Regex toggle
 (Alt+C / Alt+W / Alt+R) on the left, grouped results, and a syntax-highlighted
 preview of the selected match on the right. Enter opens the match at its line in
 Fresh. Narrow terminals drop the preview and keep the list.
-The popup has a collapsed Replace row: the chevron left of the query opens it, and so do
-Tab or Ctrl+R (which focuses the Replace input). Once it is open, Tab moves between the two
+The popup opens with the Replace row showing; the ▾ chevron left of the query folds it, and
+Tab or Ctrl+R re-opens it (Ctrl+R focuses the Replace input). Tab moves between the two
 inputs. Ctrl+R replaces the selected match (or, on a file header, every match in that file
 after a `y` confirmation); Alt+Enter replaces every match in the project after a `y`. Open
 editor buffers see the change on disk as an external change. **Ctrl+Alt+E** opens the same
-popup with the Replace row already open.
+popup (the Replace row is showing from the start, as with Ctrl+Alt+F).
 **Ctrl+Alt+Q** is "Go to symbol": one flat list of the project's definitions,
 filtered as you type, with the matched characters highlighted and the file's
 line number on the right. Enter opens the pick at that line in Fresh (or the
@@ -723,9 +723,9 @@ menu item still sends a picture to Fresh.
 
 - Entry points: `--search-popup-open` (action `search-popup`, `ctrl+alt+f`) and `--replace-popup-open`
   (action `replace-popup`, `ctrl+alt+e`). Both open the pane `--search-popup` (placement `popup`, 90%×85%,
-  `src/search_popup.rs`). The search popup always has a collapsed Replace row (chevron; Tab or Ctrl+R
-  opens it). `ctrl+alt+e` starts with the row open via `HERDR_SIDEBAR_SEARCH_MODE=replace`. Windows twins
-  go through `herdr-sidebar-ensure.exe`.
+  `src/search_popup.rs`). The popup opens with the Replace row showing (▾ folds it; Tab or Ctrl+R
+  re-opens it). `ctrl+alt+e` opens the same popup; it still sends `HERDR_SIDEBAR_SEARCH_MODE=replace`,
+  which is now ignored, so old keymaps keep working. Windows twins go through `herdr-sidebar-ensure.exe`.
 - The query runs on a worker after a 300 ms debounce; each search has a generation counter and older
   results are dropped. The engine cannot cancel, so a superseded scan runs to completion.
 - The preview window hits ±300 lines and is highlighted with `syntax::highlight_lines`, which returns one

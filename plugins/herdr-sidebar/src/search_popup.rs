@@ -57,7 +57,9 @@ const CHIPS_WIDTH: u16 = CHIP_WIDTH * 3;
 
 // ── Action side: request Herdr to spawn popup pane ──────────────────────
 
-/// Environment variable that starts the popup in replace mode.
+/// Environment variable that once started the popup in replace mode. `run()`
+/// no longer reads it: the Replace row always starts open. It is kept so old
+/// keymaps and actions that set it keep working (they open the same popup).
 pub const REPLACE_MODE_ENV: &str = "HERDR_SIDEBAR_SEARCH_MODE";
 const REPLACE_MODE_VALUE: &str = "replace";
 
@@ -66,7 +68,9 @@ pub fn open() -> io::Result<()> {
     file_popup::request_popup_pane("search-popup", "90%", "85%")
 }
 
-/// Request the same popup in replace mode ("Replace in files").
+/// Request the search popup for Ctrl+Alt+E ("Replace in files"). It is the
+/// identical popup to `open()` (the Replace row is always shown), and the env
+/// it sends is ignored by `run()`.
 pub fn open_replace() -> io::Result<()> {
     file_popup::request_popup_pane_with_env(
         "search-popup",
@@ -94,7 +98,9 @@ pub fn run() -> io::Result<()> {
     let theme = icons::IconTheme::resolve(None, state.icons);
 
     let mut app = App::new(root, caller_pane_id, theme);
-    app.replace_open = std::env::var(REPLACE_MODE_ENV).is_ok_and(|mode| mode == REPLACE_MODE_VALUE);
+    // The Replace row always starts expanded: users could not find it behind
+    // the collapsed chevron. The chevron still folds it.
+    app.replace_open = true;
 
     crossterm::style::force_color_output(true);
     let mut terminal = ratatui::init();
@@ -597,8 +603,10 @@ struct App {
     preview_offset: usize,
     preview_recenter: bool,
     done: bool,
-    /// The Replace row is shown. Opened by the chevron, Tab, Shift+Tab or
-    /// Ctrl+R, or from the start by `Ctrl+Alt+E`. It gates every replace key.
+    /// The Replace row is shown. `run()` starts it open, so it is visible from
+    /// the first frame; the chevron folds it, and Tab, Shift+Tab or Ctrl+R
+    /// re-open it. `App::new` defaults to closed (tests rely on that). It gates
+    /// every replace key.
     replace_open: bool,
     focus: Focus,
     replacement: String,
@@ -1429,27 +1437,38 @@ impl App {
             Rect::new(area.x, area.y, left_width, 1),
         );
 
-        // Row 1: a disclosure chevron, then the query input with the three
-        // toggle chips at its right end.
+        // Row 1: a disclosure chevron, then the query label and input with the
+        // three toggle chips at its right end. Both rows share one label column,
+        // so the query and Replace fields start at the same x.
+        let fit = fit_replace_row(left_width, self.replace_open);
+        let label_width = fit.label_width();
         let chevron = if self.replace_open { "▾ " } else { "▸ " };
+        let header = Style::default()
+            .fg(palette().header_accent)
+            .add_modifier(Modifier::BOLD);
         frame.render_widget(
-            Paragraph::new(Span::styled(chevron, accent)),
+            Paragraph::new(Span::styled(chevron, header)),
             Rect::new(area.x, area.y + 1, 2, 1),
         );
         self.chevron_zone = Rect::new(area.x, area.y + 1, 2, 1);
-        self.query_field = Rect::new(area.x + 2, area.y + 1, left_width.saturating_sub(2), 1);
-        self.draw_input(
+        let query_label = match fit.label {
+            LabelMode::Full => "Find      ".to_string(),
+            LabelMode::Icon => "  ".to_string(),
+            LabelMode::Hidden => String::new(),
+        };
+        self.draw_label(
             frame,
-            area.x + 2,
-            area.y + 1,
-            left_width.saturating_sub(2),
-            accent,
-            dim,
+            Rect::new(area.x + 2, area.y + 1, label_width, 1),
+            query_label,
         );
+        let query_x = area.x + 2 + label_width;
+        let query_width = left_width.saturating_sub(2 + label_width);
+        self.query_field = Rect::new(query_x, area.y + 1, query_width, 1);
+        self.draw_input(frame, query_x, area.y + 1, query_width, dim);
 
-        // Row 2 (replace mode, when open): the Replace input and its buttons.
+        // Row 2 (replace mode, when open): the Replace label, input and buttons.
         if replace_row {
-            self.draw_replace_row(frame, area.x, area.y + 2, left_width, accent);
+            self.draw_replace_row(frame, area.x, area.y + 2, left_width, fit);
         } else {
             self.replace_field = Rect::default();
             self.replace_zones.clear();
@@ -1497,33 +1516,30 @@ impl App {
         );
     }
 
-    fn draw_input(
-        &mut self,
-        frame: &mut Frame,
-        x: u16,
-        y: u16,
-        left_width: u16,
-        accent: Style,
-        dim: Style,
-    ) {
-        let prompt = " › ";
-        let chips_x = x + left_width.saturating_sub(CHIPS_WIDTH + 1);
-        let room = usize::from(left_width.saturating_sub(CHIPS_WIDTH + 2))
-            .saturating_sub(prompt.len() + 1);
+    fn draw_input(&mut self, frame: &mut Frame, x: u16, y: u16, width: u16, dim: Style) {
+        let field = field_style();
+        fill_field(frame, Rect::new(x, y, width, 1));
+        let input_width = width.saturating_sub(CHIPS_WIDTH + 1);
+        let chips_x = x + width.saturating_sub(CHIPS_WIDTH + 1);
         let caret = !self.editing_replacement();
-        let selected = self.select_all.armed() && caret;
-        frame.render_widget(
-            Paragraph::new(input_line(
-                prompt,
-                &self.query,
-                self.cursor,
-                room,
-                accent,
-                caret,
-                selected,
-            )),
-            Rect::new(x, y, left_width.saturating_sub(CHIPS_WIDTH + 1), 1),
-        );
+        let input = Rect::new(x, y, input_width, 1);
+        if self.query.is_empty() && !caret {
+            draw_placeholder(frame, input, "Search");
+        } else {
+            let selected = self.select_all.armed() && caret;
+            let room = usize::from(input_width).saturating_sub(2);
+            frame.render_widget(
+                Paragraph::new(input_line(
+                    &self.query,
+                    self.cursor,
+                    room,
+                    field,
+                    caret,
+                    selected,
+                )),
+                input,
+            );
+        }
 
         self.toggle_zones.clear();
         let chips = [
@@ -1538,7 +1554,7 @@ impl App {
                     .fg(palette().button_fg)
                     .bg(palette().button_bg)
             } else {
-                dim
+                dim.patch(field)
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(format!(" {label} "), style)),
@@ -1549,65 +1565,98 @@ impl App {
         }
     }
 
-    /// The Replace row: a labelled input, then the Replace and All buttons at
-    /// its right end.
+    /// A label cell in the bold header accent (the Find / Replace labels).
+    fn draw_label(&self, frame: &mut Frame, rect: Rect, text: String) {
+        if rect.width == 0 || text.is_empty() {
+            return;
+        }
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                text,
+                Style::default()
+                    .fg(palette().header_accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            rect,
+        );
+    }
+
+    /// The Replace row: the `⇄ Replace` label, a filled input box, then the
+    /// Replace and All buttons at its right end. Buttons are never dropped;
+    /// `fit` only trims the label and the button icons.
     fn draw_replace_row(
         &mut self,
         frame: &mut Frame,
         x: u16,
         y: u16,
         left_width: u16,
-        accent: Style,
+        fit: ReplaceFit,
     ) {
-        let prompt = "  Replace › ";
-        let prompt_cells = prompt.chars().count();
-        let replace_label = " Replace ";
-        let all_label = " All ";
-        let buttons_width = (replace_label.chars().count() + 1 + all_label.chars().count()) as u16;
-        // One cell of margin on the right, like the query's chips.
-        let buttons_x = x + left_width.saturating_sub(buttons_width + 1);
-        let field_width = buttons_x.saturating_sub(x + 1);
-        self.replace_field = Rect::new(x, y, field_width, 1);
-        let room = usize::from(field_width).saturating_sub(prompt_cells + 1);
-        let caret = self.editing_replacement();
-        let selected = self.select_all.armed() && caret;
-        frame.render_widget(
-            Paragraph::new(input_line(
-                prompt,
-                &self.replacement,
-                self.replacement_cursor,
-                room,
-                accent,
-                caret,
-                selected,
-            )),
-            Rect::new(x, y, field_width, 1),
-        );
-
-        let enabled = self.can_replace();
-        let (button_fg, button_bg) = if enabled {
-            (palette().button_fg, palette().button_bg)
-        } else {
-            (palette().muted_button_fg, palette().muted_button_bg)
+        let icon = replace_icon(self.theme);
+        let label = match fit.label {
+            LabelMode::Full => format!("{icon} Replace "),
+            LabelMode::Icon => format!("{icon} "),
+            LabelMode::Hidden => String::new(),
         };
-        let style = Style::default().fg(button_fg).bg(button_bg);
-        let replace_width = replace_label.chars().count() as u16;
-        let all_width = all_label.chars().count() as u16;
-        let all_x = buttons_x + replace_width + 1;
+        self.draw_label(frame, Rect::new(x + 2, y, fit.label_width(), 1), label);
+
+        let (replace_label, all_label) = if fit.icons {
+            (
+                format!(" {} Replace ", replace_icon(self.theme)),
+                format!(" {} All ", all_icon(self.theme)),
+            )
+        } else {
+            (" Replace ".to_string(), " All ".to_string())
+        };
+        let replace_cells = replace_label.chars().count() as u16;
+        let all_cells = all_label.chars().count() as u16;
+        // One cell of margin on the right, like the query's chips.
+        let buttons_x = x + left_width.saturating_sub(replace_cells + 1 + all_cells + 1);
+        let all_x = buttons_x + replace_cells + 1;
+        let field_x = x + 2 + fit.label_width();
+        let field_width = buttons_x.saturating_sub(field_x).saturating_sub(1);
+        let field = Rect::new(field_x, y, field_width, 1);
+        self.replace_field = field;
+        fill_field(frame, field);
+        let caret = self.editing_replacement();
+        if self.replacement.is_empty() && !caret {
+            draw_placeholder(frame, field, "Replace with…");
+        } else {
+            let selected = self.select_all.armed() && caret;
+            let room = usize::from(field_width).saturating_sub(2);
+            frame.render_widget(
+                Paragraph::new(input_line(
+                    &self.replacement,
+                    self.replacement_cursor,
+                    room,
+                    field_style(),
+                    caret,
+                    selected,
+                )),
+                field,
+            );
+        }
+
+        let style = if self.can_replace() {
+            Style::default()
+                .fg(palette().button_fg)
+                .bg(palette().button_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(palette().keycap_fg)
+                .bg(palette().keycap_bg)
+        };
+        let replace_rect = Rect::new(buttons_x, y, replace_cells, 1);
+        let all_rect = Rect::new(all_x, y, all_cells, 1);
         frame.render_widget(
             Paragraph::new(Span::styled(replace_label, style)),
-            Rect::new(buttons_x, y, replace_width, 1),
+            replace_rect,
         );
-        frame.render_widget(
-            Paragraph::new(Span::styled(all_label, style)),
-            Rect::new(all_x, y, all_width, 1),
-        );
+        frame.render_widget(Paragraph::new(Span::styled(all_label, style)), all_rect);
         self.replace_zones = vec![
-            (
-                Rect::new(buttons_x, y, replace_width, 1),
-                ReplaceButton::Selected,
-            ),
-            (Rect::new(all_x, y, all_width, 1), ReplaceButton::All),
+            (replace_rect, ReplaceButton::Selected),
+            (all_rect, ReplaceButton::All),
         ];
     }
 
@@ -1789,32 +1838,148 @@ fn header_line(group: &Group, theme: IconTheme, width: usize) -> Line<'static> {
     ])
 }
 
-/// One input line: prompt, the text around the caret, and the caret when this
-/// input has focus. Long text scrolls to keep the caret visible. `selected`
-/// draws the value as selected — an armed Ctrl+A, waiting to be typed over.
+/// The filled box behind every text input (query and Replace).
+fn field_style() -> Style {
+    Style::default()
+        .fg(palette().keycap_fg)
+        .bg(palette().keycap_bg)
+}
+
+/// Paint a field's whole rect with the input background, so an empty field is
+/// still visibly a box.
+fn fill_field(frame: &mut Frame, rect: Rect) {
+    frame.render_widget(
+        Paragraph::new(" ".repeat(usize::from(rect.width))).style(field_style()),
+        rect,
+    );
+}
+
+/// The dim hint shown in an unfocused, empty input.
+fn draw_placeholder(frame: &mut Frame, rect: Rect, text: &str) {
+    let style = field_style().add_modifier(Modifier::DIM | Modifier::ITALIC);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            truncate_to(format!(" {text}"), usize::from(rect.width)),
+            style,
+        )),
+        rect,
+    );
+}
+
+/// How the Replace row trims itself to the popup width. Both rows share the
+/// label column, so the query and Replace fields always start at one x.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LabelMode {
+    /// `Find` / `⇄ Replace`.
+    Full,
+    /// Only the icon (the query label is blank).
+    Icon,
+    /// No label at all.
+    Hidden,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReplaceFit {
+    /// Whether the buttons carry their icons.
+    icons: bool,
+    label: LabelMode,
+}
+
+impl ReplaceFit {
+    fn label_width(self) -> u16 {
+        match self.label {
+            LabelMode::Full => 10,
+            LabelMode::Icon => 2,
+            LabelMode::Hidden => 0,
+        }
+    }
+}
+
+/// Button widths: ` ⇄ Replace ` + gap + ` ⇄ All ` and the plain ` Replace ` +
+/// gap + ` All `.
+const BUTTONS_WITH_ICONS: u16 = 20;
+const BUTTONS_PLAIN: u16 = 15;
+/// The narrowest field worth showing before the label gives way.
+const FIELD_MIN: u16 = 8;
+
+/// Drop the button icons first, then the label text (keeping its icon), then
+/// the label itself, until the chevron, label, minimum field and buttons fit.
+fn fit_replace_row(width: u16, replace_open: bool) -> ReplaceFit {
+    let candidates = [
+        ReplaceFit {
+            icons: true,
+            label: LabelMode::Full,
+        },
+        ReplaceFit {
+            icons: false,
+            label: LabelMode::Full,
+        },
+        ReplaceFit {
+            icons: false,
+            label: LabelMode::Icon,
+        },
+    ];
+    for fit in candidates {
+        let buttons = match (replace_open, fit.icons) {
+            (false, _) => 0,
+            (true, true) => BUTTONS_WITH_ICONS,
+            (true, false) => BUTTONS_PLAIN,
+        };
+        // Chevron (2) + label + gap (1) + margin (1) + buttons + field minimum.
+        if width >= 2 + fit.label_width() + buttons + 2 + FIELD_MIN {
+            return fit;
+        }
+    }
+    ReplaceFit {
+        icons: false,
+        label: LabelMode::Hidden,
+    }
+}
+
+/// Nerd Font codicon cod-replace, or the plain arrows outside Material.
+fn replace_icon(theme: IconTheme) -> &'static str {
+    if matches!(theme, IconTheme::Material) {
+        "\u{eb3d}"
+    } else {
+        "⇄"
+    }
+}
+
+/// Nerd Font codicon cod-replace-all, or the plain double arrow.
+fn all_icon(theme: IconTheme) -> &'static str {
+    if matches!(theme, IconTheme::Material) {
+        "\u{eb3c}"
+    } else {
+        "⇉"
+    }
+}
+
+/// One input line: a one-cell pad, the text around the caret, and the caret
+/// when this input has focus. Long text scrolls to keep the caret visible.
+/// `base` is the field's background; `selected` draws the value as selected —
+/// an armed Ctrl+A, waiting to be typed over.
 fn input_line(
-    prompt: &str,
     text: &str,
     cursor: usize,
     room: usize,
-    accent: Style,
+    base: Style,
     caret: bool,
     selected: bool,
 ) -> Line<'static> {
     let text_style = if selected {
-        selected_text_style()
+        base.patch(selected_text_style())
     } else {
-        Style::default()
+        base
     };
     let before = input_tail(&text[..cursor], room);
     let used = before.chars().count();
     let after = truncate_to(text[cursor..].to_string(), room.saturating_sub(used));
-    let mut spans = vec![
-        Span::styled(prompt.to_string(), accent),
-        Span::styled(before, text_style),
-    ];
+    let mut spans = vec![Span::styled(" ", base), Span::styled(before, text_style)];
     if caret {
-        spans.push(Span::styled("█", accent));
+        spans.push(Span::styled(
+            "█",
+            base.patch(Style::default().fg(palette().accent)),
+        ));
     }
     spans.push(Span::styled(after, text_style));
     Line::from(spans)
@@ -2416,9 +2581,9 @@ mod replace_tests {
         let buffer = drawn(&mut app, 120, 30);
         let text = buffer_text(&buffer);
         assert!(text.contains("Replace in files"), "title");
-        assert!(text.contains("Replace ›"), "Replace input row");
-        assert!(text.contains(" Replace "), "Replace button");
-        assert!(text.contains(" All "), "All button");
+        assert!(text.contains("⇄ Replace"), "Replace label");
+        assert!(text.contains(" ⇄ Replace "), "Replace button");
+        assert!(text.contains(" ⇉ All "), "All button");
         assert!(text.contains("pin"), "replacement is drawn");
         assert!(
             buffer
@@ -2446,7 +2611,7 @@ mod replace_tests {
         let text = buffer_text(&drawn(&mut app, 120, 30));
         assert!(text.contains("▸"), "collapsed chevron");
         assert!(
-            !text.contains("Replace ›"),
+            !text.contains("⇄ Replace"),
             "no Replace input when collapsed"
         );
         let _ = std::fs::remove_dir_all(root);
@@ -2513,7 +2678,7 @@ mod replace_tests {
         assert!(text.contains("Search in files"), "search title");
         assert!(text.contains("▸"), "collapsed chevron is always drawn");
         assert!(
-            !text.contains("Replace ›"),
+            !text.contains("⇄ Replace"),
             "no Replace input when collapsed"
         );
 
@@ -2528,7 +2693,7 @@ mod replace_tests {
         let text = buffer_text(&drawn(&mut app, 120, 30));
         assert!(text.contains("Replace in files"), "replace title");
         assert!(text.contains("▾"), "expanded chevron");
-        assert!(text.contains("Replace ›"), "Replace input row");
+        assert!(text.contains("⇄ Replace"), "Replace input row");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2663,6 +2828,66 @@ mod replace_tests {
             std::fs::read_to_string(root.join("src/needle.rs")).unwrap(),
             "use crate::prelude;\nfn needle_body() {}\n// tail\n"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The `(x, y)` columns where `needle` starts on row `y`, one char per cell.
+    fn columns_of(buffer: &Buffer, y: u16, needle: &str) -> Vec<u16> {
+        let width = buffer.area.width;
+        let cells: Vec<String> = (0..width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect();
+        let want: Vec<&str> = needle.chars().map(|_| "").collect();
+        let chars: Vec<String> = needle.chars().map(|c| c.to_string()).collect();
+        let _ = want;
+        (0..width.saturating_sub(chars.len() as u16))
+            .filter(|&x| {
+                chars
+                    .iter()
+                    .enumerate()
+                    .all(|(i, c)| cells[usize::from(x) + i] == *c)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn replace_row_is_drawn_as_a_filled_box_with_visible_buttons() {
+        let root = project("box");
+        // Nothing to replace yet: an empty query leaves the buttons disabled.
+        let mut empty = App::new(root.clone(), None, IconTheme::Emoji);
+        empty.replace_open = true;
+        let buffer = drawn(&mut empty, 120, 30);
+        let row = buffer_text(&buffer);
+        let row2 = row.lines().nth(2).unwrap();
+        assert!(row2.contains("⇄ Replace"), "label: {row2}");
+        assert!(row2.contains("⇉ All"), "All button: {row2}");
+        assert!(row2.contains("Replace with…"), "placeholder: {row2}");
+        let all_x = columns_of(&buffer, 2, "All")[0];
+        assert_eq!(buffer[(all_x, 2)].bg, palette().keycap_bg, "disabled bg");
+        assert_eq!(buffer[(all_x, 2)].fg, palette().keycap_fg, "disabled fg");
+
+        // With results the buttons take the enabled button colors.
+        let root = project("box-enabled");
+        let mut app = replace_app(&root, "pin");
+        let buffer = drawn(&mut app, 120, 30);
+        let all_x = columns_of(&buffer, 2, "All")[0];
+        assert_eq!(buffer[(all_x, 2)].bg, palette().button_bg, "enabled bg");
+        assert_eq!(buffer[(all_x, 2)].fg, palette().button_fg, "enabled fg");
+        let replace_x = *columns_of(&buffer, 2, "Replace").last().unwrap();
+        assert_eq!(buffer[(replace_x, 2)].bg, palette().button_bg);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replace_row_survives_a_narrow_popup() {
+        let root = project("narrow");
+        for width in [40, 24] {
+            let mut app = replace_app(&root, "pin");
+            let buffer = drawn(&mut app, width, 20);
+            let text = buffer_text(&buffer);
+            assert!(text.contains("All"), "All button at width {width}: {text}");
+            assert!(text.contains("Replace"), "Replace button at width {width}");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }
