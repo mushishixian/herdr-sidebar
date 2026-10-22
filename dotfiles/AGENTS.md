@@ -133,6 +133,15 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   `~/.dotfiles-backup/<ts>/.zshrc`. The overlay is sourced ABOVE the highlight plugins because
   zsh-syntax-highlighting has to be last, so a `.zshrc.local` that sources its own highlighting copy
   breaks that order (drop it there, not here). `--no-zshrc` skips the replacement.
+- **The managed `~/.zshrc` sources the two plugins from `/usr/share/…`, i.e. from apt.** So an
+  overlay that moves a machine's own `plugins=(… zsh-autosuggestions zsh-syntax-highlighting)`
+  into `~/.zshrc.local` without those packages installed loses both SILENTLY (the source lines
+  are guarded by `[ -f … ]`): this box's oh-my-zsh copies were never consulted, because the
+  overlay had dropped them from `plugins=()`. Fix is `dotfiles/packages.txt`'s
+  `zsh-autosuggestions` + `zsh-syntax-highlighting` (`sudo apt-get install -y`), not a second
+  source line — and note that `install.sh --no-packages` (used to avoid apt churn) is exactly
+  how a machine ends up in that state. Verified live: after the apt install the managed rc's
+  own two lines load 0.7.0 / 0.7.1-2 and nothing double-loads.
 - `HERDR_PLUGIN_STATE_DIR` names the CALLING plugin's state dir in actions and hooks. A script that reads
   another plugin's state must compute that path itself.
 - Popups (`popup` placement) belong to no tab. A process started from a popup has no usable `HERDR_TAB_ID`
