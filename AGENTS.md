@@ -526,7 +526,10 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   Blocked(4) > Done(3, = idle-but-unseen) > Working(2) > Idle(1) > Unknown(0)
   (`src/workspace/aggregate.rs`, `src/client/shell.rs`). `herdr workspace list` exposes
   it, so a plugin can poll it. `pane report-agent --state` accepts only
-  `idle|working|blocked|unknown` — `done` exists ONLY at workspace/UI level.
+  `idle|working|blocked|unknown`: `done` is NOT reportable, but it is not
+  workspace-only either — herdr applies it itself to a pane (and workspace) that
+  finished while unfocused, so `pane.list` does return `done` (verified live: a
+  CodeBuddy pane that ran `Stop` in the background read `done`, not `idle`).
 - The rail's default first row `["state_icon", "workspace"]` IS that status. Symbols
   style: `◐` working, `×` blocked, `✓` done, `○` idle, `·` unknown (yellow/red/teal/
   green/grey); DOTS style draws `●` for working+blocked+done, differing only in colour —
@@ -586,6 +589,21 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   this way (the ref is still reported, harmlessly). Because the hook reports
   `--agent codebuddy`, the rail gets the name AND the state without the zsh agent-title hook;
   CodeBuddy snapshots settings at startup, so a new hook applies to the NEXT `codebuddy`.
+- **The rail is silent, so the sidebar toasts.** An agent that blocks on a permission prompt or
+  finishes in a space you are not looking at only changes a glyph, and herdr has no agent-state
+  notification of its own (verified against 0.9.5: `notification.show` is the only toast API and
+  nothing calls it for agents). `src/agent_notify.rs` diffs the SAME `pane.list` reply the
+  `$agents` heartbeat already fetches and shows at most one `notification.show` per beat:
+  `blocked` → title `<agent> needs input` with sound `request`; `done`, or `working`→`idle` →
+  `<agent> finished` with sound `done`. A finish can arrive as `done` (herdr marks a pane that
+  finished while unfocused — observed live on a CodeBuddy pane) or as `idle` (the same pane can
+  stay idle), so both count; `done` right after `idle` is suppressed so one finish never toasts
+  twice. The name is `display_agent` else `agent` (the rail's own rule), so `codebuddy` /
+  `codebuddy-code` panes are named by their hook and need no second table. Only the elected session reporter runs it (`session_reporter`); the first beat
+  only PRIMES (a sidebar restart must not replay every existing state as a toast); the FOCUSED
+  pane is never toasted (the prompt is in front of you); and several transitions in one beat
+  make ONE toast, blocked first. Not a hook: the sidebar has to be running, exactly like `pi`'s
+  background-agent correction above.
 - **A row with no values disappears, so `$pad` keeps the non-git branch row alive**
   (`src/agent_tokens.rs`). herdr drops a Space rail row when none of its tokens have a value
   ("a row disappears when none of its tokens have a value", `configuration.mdx`), and

@@ -214,6 +214,9 @@ pub fn report_params(
 #[derive(Debug, Default)]
 pub struct AgentTokens {
     last: Option<Instant>,
+    /// Agent-state diff that toasts "needs input" / "finished"; it rides the
+    /// same `pane.list` reply, so notifications cost no extra round trip.
+    notify: crate::agent_notify::AgentNotify,
 }
 
 impl AgentTokens {
@@ -264,6 +267,12 @@ impl AgentTokens {
             {
                 break;
             }
+        }
+        // A rail you are not looking at is not a notification: an agent that
+        // blocks or finishes in another space also gets a toast. Same reply,
+        // so this is free; at most one toast per beat.
+        if let Some(toast) = self.notify.observe(&json) {
+            toast.show();
         }
     }
 }

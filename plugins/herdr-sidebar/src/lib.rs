@@ -4,6 +4,7 @@
 //! sidecar (`herdr-sidebar-ensure`).
 
 pub mod actions;
+pub mod agent_notify;
 pub mod agent_tokens;
 pub mod ai_commit;
 pub mod ansi;
