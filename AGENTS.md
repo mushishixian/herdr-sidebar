@@ -100,9 +100,16 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   `{"data":{"choices":[…]}}` — and only in its non-streaming form, which oco uses — so it
   dies with `TypeError: Cannot read properties of undefined (reading '0')` (verified live
   2026-10-19; pi reads the same endpoint fine because it streams and unwraps). Point oco at a
-  plain OpenAI-compatible gateway instead; on this machine `happycoding`
-  (`https://happycoding.xyz/v1`, model `deepseek-v4.1-flash`) serves the same model id and
-  returns bare `choices`. Junk keys in `~/.opencommit` from an older provider
+  plain OpenAI-compatible gateway instead. This machine points it at the OFFICIAL DeepSeek API
+  (2026-10-23): `OCO_API_URL=https://api.deepseek.com/v1`, `OCO_MODEL=deepseek-flash` (pi's
+  built-in `deepseek` provider ids are `deepseek-flash` / `deepseek-v4-pro`; the catalog's
+  baseUrl is `https://api.deepseek.com`, and the OpenAI SDK needs the `/v1` suffix that pi
+  appends itself), `OCO_API_KEY` copied from pi's `auth.json` `deepseek.key`, and
+  `~/.opencommit` chmod 600 because it now holds that key. Verified end-to-end with
+  `HS_AI_COMMIT_E2E_REPO=<scratch repo> cargo test --lib -- --ignored e2e_generate`: a real
+  `feat(main.rs): …` message came back and HEAD was untouched. The `happycoding` gateway
+  (`https://happycoding.xyz/v1`, `deepseek-v4.1-flash`) also works and returns bare `choices`
+  if the official key ever needs to be spared. Junk keys in `~/.opencommit` from an older provider
   (`OCO_PROXY=undefined`, `OCO_API_CUSTOM_HEADERS=undefined`) are literal strings — delete
   them rather than leaving them to be parsed as URLs/JSON.
   **Curation (big or generated files).** oco diffs everything staged (minus its own excludes), and

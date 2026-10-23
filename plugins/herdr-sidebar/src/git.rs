@@ -641,7 +641,12 @@ impl Git {
                 let mut fields = line.split('\0');
                 let head = fields.next()?.trim().to_string();
                 let name = fields.next()?.trim().to_string();
-                let commit = fields.next().unwrap_or("").trim().parse().unwrap_or(i64::MIN);
+                let commit = fields
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .parse()
+                    .unwrap_or(i64::MIN);
                 Some((head, name, commit))
             })
             .filter(|(_, name, _)| !name.is_empty())
@@ -650,9 +655,7 @@ impl Git {
         entries.sort_by_key(|(_, name, commit)| Reverse(sort_stamp(&created, name, *commit)));
         Ok(entries
             .into_iter()
-            .map(|(head, name, _)| {
-                format!("{} {name}", if head == "*" { "*" } else { " " })
-            })
+            .map(|(head, name, _)| format!("{} {name}", if head == "*" { "*" } else { " " }))
             .collect())
     }
 
@@ -1365,7 +1368,9 @@ pub fn count_conflict_blocks(path: &Path) -> Option<usize> {
     const CONFLICT_SCAN_BYTES: u64 = 4 * 1024 * 1024;
     let file = File::open(path).ok()?;
     let mut bytes = Vec::new();
-    file.take(CONFLICT_SCAN_BYTES).read_to_end(&mut bytes).ok()?;
+    file.take(CONFLICT_SCAN_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
     Some(count_conflict_markers(&String::from_utf8_lossy(&bytes)))
 }
 
@@ -1668,8 +1673,21 @@ mod tests {
     fn head_signature_moves_with_a_commit() {
         let git = repo_with_head("head-signature-commit");
         let before = git.head_signature().expect("HEAD readable");
-        run_in(&git.root, &["-c", "user.name=t", "-c", "user.email=t@t.dev", "commit",
-            "--allow-empty", "-q", "-m", "next"]).unwrap();
+        run_in(
+            &git.root,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t.dev",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "next",
+            ],
+        )
+        .unwrap();
         let after = git.head_signature().expect("HEAD readable");
         assert_ne!(after, before, "a commit moves the branch tip");
         assert!(after.starts_with(&before[..before.find(' ').unwrap()])); // same HEAD ref line
@@ -1872,13 +1890,25 @@ mod tests {
         git(
             &one,
             &[
-                "-c", "user.email=t@t.dev", "-c", "user.name=t", "commit", "-q", "-m", "a",
+                "-c",
+                "user.email=t@t.dev",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "a",
             ],
         );
         git(&one, &["push", "-q", "-u", "origin", "HEAD"]);
         git(
             &base,
-            &["clone", "-q", origin.to_str().unwrap(), two.to_str().unwrap()],
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                two.to_str().unwrap(),
+            ],
         );
 
         // A second commit lands upstream after the clone.
@@ -1887,7 +1917,14 @@ mod tests {
         git(
             &one,
             &[
-                "-c", "user.email=t@t.dev", "-c", "user.name=t", "commit", "-q", "-m", "b",
+                "-c",
+                "user.email=t@t.dev",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "b",
             ],
         );
         git(&one, &["push", "-q"]);
@@ -1900,9 +1937,7 @@ mod tests {
         std::fs::write(two.join("c.txt"), "c\n").unwrap();
         git(&two, &["add", "c.txt"]);
 
-        let clone = Git {
-            root: two.clone(),
-        };
+        let clone = Git { root: two.clone() };
         assert_eq!(clone.pull(), Ok("Pulled.".to_string()));
         assert!(two.join("b.txt").is_file(), "the upstream commit landed");
         // Second pull: nothing new.
@@ -1949,12 +1984,17 @@ mod tests {
         run(
             &work,
             &[
-                "-c", "user.email=t@t.dev", "-c", "user.name=t", "commit", "-q", "-m", "a",
+                "-c",
+                "user.email=t@t.dev",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "a",
             ],
         );
-        let repo = Git {
-            root: work.clone(),
-        };
+        let repo = Git { root: work.clone() };
 
         // A brand-new branch: no upstream, so publish on the first push.
         run(&work, &["switch", "-q", "-c", "feature/publish"]);
@@ -2009,7 +2049,11 @@ mod tests {
             .env("GIT_COMMITTER_DATE", format!("{stamp} +0000"))
             .output()
             .unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
 
         let choices: Vec<String> = git
@@ -2041,12 +2085,9 @@ mod tests {
         // below every branch that did have one, however old.
         let git = repo_with_head("branch-no-reflog-order");
         for name in ["logged-old", "logged-new"] {
-            let out = git_command(
-                &git.root,
-                &["branch", name, "HEAD"],
-            )
-            .output()
-            .unwrap();
+            let out = git_command(&git.root, &["branch", name, "HEAD"])
+                .output()
+                .unwrap();
             assert!(out.status.success());
         }
         // `logged-new` gets the newest reflog stamp; `unlogged` is a plain ref
