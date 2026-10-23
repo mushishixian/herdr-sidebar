@@ -225,6 +225,8 @@ struct App {
     scroll: usize,
     list_area: Rect,
     error: Option<String>,
+    /// Result of the last Ctrl+C copy of the input, shown in place of the hint.
+    copy_notice: Option<(String, bool)>,
     screen: Screen,
     done: bool,
     /// Shown as a herdr notification after the popup closes.
@@ -244,6 +246,7 @@ impl App {
             scroll: 0,
             list_area: Rect::default(),
             error: None,
+            copy_notice: None,
             screen: Screen::Edit,
             done: false,
             toast: None,
@@ -316,9 +319,19 @@ impl App {
     fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
+            // Ctrl+C used to close the popup outright, so Ctrl+A (select all)
+            // followed by a copy threw the name away and cancelled the rename
+            // (user-reported). In the name screens it copies the input instead;
+            // an EMPTY input keeps the cancel meaning, where a copy would have
+            // nothing to send.
+            if ctrl_c_copies(self.op, matches!(self.screen, Screen::Edit), &self.input) {
+                self.copy_input();
+                return;
+            }
             self.done = true;
             return;
         }
+        self.copy_notice = None;
         match &self.screen {
             Screen::Message { conflicts, .. } => {
                 if *conflicts && key.code == KeyCode::Char('a') {
@@ -367,6 +380,21 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Ctrl+C in the name screens hands the input to the clipboard. The armed
+    /// Ctrl+A selection stays armed: this field's "selection" is the whole
+    /// value, so the next typed character still replaces it, like a real one.
+    fn copy_input(&mut self) {
+        let text = self.input.clone();
+        // A test run must not clobber the developer's real clipboard, so the
+        // side effect is stubbed there (same rule as git_action's notifications)
+        // and only the failure wording is exercised.
+        #[cfg(test)]
+        let result = Err(io::Error::new(io::ErrorKind::NotFound, "test"));
+        #[cfg(not(test))]
+        let result = copy_to_clipboard(&text);
+        self.copy_notice = Some(copy_notice(&text, result));
     }
 
     /// An armed Ctrl+A (`ui::SelectAll`) makes the next edit replace the whole
@@ -652,16 +680,24 @@ impl App {
         let hint = match self.op {
             Op::Switch => " ↑↓ select · ⏎ switch · esc cancel",
             Op::Merge => " ↑↓ select · ⏎ merge · esc cancel",
-            Op::Rename => " ⏎ rename · esc cancel",
-            Op::New => " ⏎ create and switch · esc cancel",
+            Op::Rename => " ⏎ rename · ctrl+a select · ctrl+c copy · esc cancel",
+            Op::New => " ⏎ create and switch · ctrl+c copy · esc cancel",
             Op::History => "",
         };
-        let footer_line = match &self.error {
-            Some(error) => Span::styled(
+        let footer_line = match (&self.copy_notice, &self.error) {
+            (Some((text, failed)), _) => Span::styled(
+                truncate_to(format!(" {text}"), width),
+                Style::default().fg(if *failed {
+                    palette().deleted
+                } else {
+                    palette().added
+                }),
+            ),
+            (None, Some(error)) => Span::styled(
                 truncate_to(format!(" {error}"), width),
                 Style::default().fg(palette().deleted),
             ),
-            None => Span::styled(hint, dim),
+            (None, None) => Span::styled(hint, dim),
         };
         frame.render_widget(Paragraph::new(footer_line), footer);
 
@@ -779,6 +815,26 @@ fn new_branch_name(input: &str) -> Result<String, String> {
         Err("type a branch name".into())
     } else {
         Ok(name.to_string())
+    }
+}
+
+/// Whether Ctrl+C COPIES instead of closing the popup: the rename / new-branch
+/// screens, where the input IS the payload, and only when there is something to
+/// copy. Everywhere else — and with an empty input — Ctrl+C keeps its cancel
+/// meaning. Pure so the rule is testable without a clipboard.
+fn ctrl_c_copies(op: Op, edit_screen: bool, input: &str) -> bool {
+    edit_screen && matches!(op, Op::Rename | Op::New) && !input.is_empty()
+}
+
+/// The footer line for a Ctrl+C copy of `text`, and whether it failed. Pure so
+/// the wording is testable without touching a clipboard.
+fn copy_notice(text: &str, result: io::Result<ClipboardWrite>) -> (String, bool) {
+    match result {
+        Ok(ClipboardWrite::Native) => (format!("copied {text}"), false),
+        Ok(ClipboardWrite::Osc52Unacknowledged) => {
+            (format!("sent {text} to the terminal clipboard"), false)
+        }
+        Err(err) => (format!("copy failed: {err}"), true),
     }
 }
 
@@ -1314,6 +1370,55 @@ mod tests {
             branch("origin/release", false, true),
         ];
         app
+    }
+
+    /// Ctrl+C in a name screen copies; everywhere else, and with an empty
+    /// input, it keeps closing the popup (user-reported: Ctrl+A then copy threw
+    /// the name away and cancelled the rename).
+    #[test]
+    fn ctrl_c_copies_only_in_a_filled_name_screen() {
+        assert!(ctrl_c_copies(Op::Rename, true, "feature/x"));
+        assert!(ctrl_c_copies(Op::New, true, "feature/x"));
+        // Nothing to copy: the old cancel gesture survives.
+        assert!(!ctrl_c_copies(Op::Rename, true, ""));
+        // The filter screens and the result screen keep cancelling on Ctrl+C.
+        assert!(!ctrl_c_copies(Op::Switch, true, "login"));
+        assert!(!ctrl_c_copies(Op::Merge, true, "main"));
+        assert!(!ctrl_c_copies(Op::History, true, "abc"));
+        assert!(!ctrl_c_copies(Op::Rename, false, "feature/x"));
+
+        let mut rename = app(Op::Rename);
+        rename.input = "feature/x".into();
+        rename.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!rename.done, "Ctrl+C must not close the rename popup");
+        assert!(
+            rename.copy_notice.is_some(),
+            "the copy reports itself in the footer"
+        );
+        assert_eq!(rename.input, "feature/x", "the name is left alone");
+
+        // A non-empty FILTER is not a name: Ctrl+C still cancels there.
+        let mut switch = app(Op::Switch);
+        switch.input = "login".into();
+        switch.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(switch.done, "Ctrl+C cancels the switch filter");
+    }
+
+    #[test]
+    fn copy_notice_wording_distinguishes_a_failed_copy() {
+        assert_eq!(
+            copy_notice("main", Ok(ClipboardWrite::Native)),
+            ("copied main".to_string(), false)
+        );
+        let (text, failed) = copy_notice("main", Ok(ClipboardWrite::Osc52Unacknowledged));
+        assert!(text.contains("terminal clipboard"), "{text}");
+        assert!(!failed, "OSC 52 is reported as sent, not as a failure");
+        let (text, failed) = copy_notice(
+            "main",
+            Err(io::Error::new(io::ErrorKind::NotFound, "no clipboard tool")),
+        );
+        assert!(text.starts_with("copy failed: "), "{text}");
+        assert!(failed);
     }
 
     #[test]

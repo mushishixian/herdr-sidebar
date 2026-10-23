@@ -838,6 +838,57 @@ impl Repo {
     }
 }
 
+/// What the shared name-field handler decided.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FieldKey {
+    Nothing,
+    Close,
+    Confirm,
+    /// Ctrl+C: hand the field's text to the clipboard, keep the dialog open.
+    Copy,
+}
+
+/// One text field of a dialog: caret-less editing, Ctrl+A = select all,
+/// Esc drops the selection before it closes. Shared by the pane and branch
+/// rename dialogs so the two cannot drift.
+fn field_key(key: KeyEvent, input: &mut String, select_all: &mut SelectAll) -> FieldKey {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Esc if select_all.armed() => {
+            select_all.disarm();
+            FieldKey::Nothing
+        }
+        KeyCode::Esc => FieldKey::Close,
+        KeyCode::Backspace => {
+            if !take_selected(input, select_all) {
+                input.pop();
+            }
+            FieldKey::Nothing
+        }
+        KeyCode::Char('a') if ctrl && !alt => {
+            select_all.arm_if_nonempty(!input.is_empty());
+            FieldKey::Nothing
+        }
+        KeyCode::Char('u') if ctrl && !alt => {
+            select_all.disarm();
+            input.clear();
+            FieldKey::Nothing
+        }
+        // Ctrl+C used to fall into the `Char(c)` arm below and TYPE a "c" over
+        // the field — with Ctrl+A armed, that replaced the whole name
+        // (user-reported). It copies the field instead.
+        KeyCode::Char('c') if ctrl && !alt => FieldKey::Copy,
+        KeyCode::Char(c) => {
+            take_selected(input, select_all);
+            input.push(c);
+            FieldKey::Nothing
+        }
+        KeyCode::Enter => FieldKey::Confirm,
+        _ => FieldKey::Nothing,
+    }
+}
+
 /// Drop an armed Ctrl+A (`ui::SelectAll`) by clearing `input`, and report that
 /// the edit about to happen must be skipped. The rename dialog has no caret, so
 /// `SelectAll::take`'s cursor is the end of the text.
@@ -957,7 +1008,9 @@ fn branch_menu_entries(current: bool, local: bool) -> Vec<MenuEntry> {
 /// by accident and then presses a file key that used to be silent.
 fn section_row_hint(row: Row) -> Option<&'static str> {
     match row {
-        Row::StagedHeader(_) => Some("Staged Changes is a section - pick a file (j/k) for its menu"),
+        Row::StagedHeader(_) => {
+            Some("Staged Changes is a section - pick a file (j/k) for its menu")
+        }
         Row::ChangesHeader(_) => Some("Changes is a section - pick a file (j/k) for its menu"),
         Row::RepoHeader(_) => Some("a repository header has no menu - pick a file"),
         Row::Message(_) | Row::Commit(_) => Some("that is the commit box - Enter/Tab to use it"),
@@ -2761,12 +2814,7 @@ impl App {
                         let marker_width = status_marker(entry.letter, conflicts).0.chars().count();
                         match (self.hovered == Some(index))
                             .then(|| {
-                                file_hover_action_at(
-                                    x,
-                                    self.last_width,
-                                    true,
-                                    marker_width as u16,
-                                )
+                                file_hover_action_at(x, self.last_width, true, marker_width as u16)
                             })
                             .flatten()
                         {
@@ -2792,12 +2840,7 @@ impl App {
                         let marker_width = status_marker(entry.letter, conflicts).0.chars().count();
                         match (self.hovered == Some(index))
                             .then(|| {
-                                file_hover_action_at(
-                                    x,
-                                    self.last_width,
-                                    false,
-                                    marker_width as u16,
-                                )
+                                file_hover_action_at(x, self.last_width, false, marker_width as u16)
                             })
                             .flatten()
                         {
@@ -2967,6 +3010,18 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The text of the open name dialog, for Ctrl+C. `None` when no such
+    /// overlay is open (or its field is empty, where a copy would send nothing).
+    fn overlay_input(&self) -> Option<String> {
+        let text = match &self.overlay {
+            Some(Overlay::PaneRename { input, .. }) | Some(Overlay::BranchRename { input, .. }) => {
+                input.clone()
+            }
+            _ => return None,
+        };
+        (!text.is_empty()).then_some(text)
     }
 
     /// Name our pane with the text typed into the rename overlay.
@@ -3174,51 +3229,10 @@ impl App {
             Picker(PickerAction),
             PaneRenameConfirmed,
             BranchRenameConfirmed,
+            /// Ctrl+C in a name field: copy it and keep the dialog open.
+            CopyInput,
         }
 
-        /// What the shared name-field handler decided.
-        enum FieldKey {
-            Nothing,
-            Close,
-            Confirm,
-        }
-
-        /// One text field of a dialog: caret-less editing, Ctrl+A = select all,
-        /// Esc drops the selection before it closes. Shared by the pane and
-        /// branch rename dialogs so the two cannot drift.
-        fn field_key(key: KeyEvent, input: &mut String, select_all: &mut SelectAll) -> FieldKey {
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            let alt = key.modifiers.contains(KeyModifiers::ALT);
-            match key.code {
-                KeyCode::Esc if select_all.armed() => {
-                    select_all.disarm();
-                    FieldKey::Nothing
-                }
-                KeyCode::Esc => FieldKey::Close,
-                KeyCode::Backspace => {
-                    if !take_selected(input, select_all) {
-                        input.pop();
-                    }
-                    FieldKey::Nothing
-                }
-                KeyCode::Char('a') if ctrl && !alt => {
-                    select_all.arm_if_nonempty(!input.is_empty());
-                    FieldKey::Nothing
-                }
-                KeyCode::Char('u') if ctrl && !alt => {
-                    select_all.disarm();
-                    input.clear();
-                    FieldKey::Nothing
-                }
-                KeyCode::Char(c) => {
-                    take_selected(input, select_all);
-                    input.push(c);
-                    FieldKey::Nothing
-                }
-                KeyCode::Enter => FieldKey::Confirm,
-                _ => FieldKey::Nothing,
-            }
-        }
         let settings = self.settings_rows();
         let row_count = settings.len();
         let cmd = match self.overlay.as_mut() {
@@ -3287,16 +3301,18 @@ impl App {
                 match field_key(key, input, select_all) {
                     FieldKey::Close => Cmd::Close,
                     FieldKey::Confirm => Cmd::PaneRenameConfirmed,
+                    FieldKey::Copy => Cmd::CopyInput,
                     FieldKey::Nothing => Cmd::Nothing,
                 }
             }
-            Some(Overlay::BranchRename { input, select_all, .. }) => {
-                match field_key(key, input, select_all) {
-                    FieldKey::Close => Cmd::Close,
-                    FieldKey::Confirm => Cmd::BranchRenameConfirmed,
-                    FieldKey::Nothing => Cmd::Nothing,
-                }
-            }
+            Some(Overlay::BranchRename {
+                input, select_all, ..
+            }) => match field_key(key, input, select_all) {
+                FieldKey::Close => Cmd::Close,
+                FieldKey::Confirm => Cmd::BranchRenameConfirmed,
+                FieldKey::Copy => Cmd::CopyInput,
+                FieldKey::Nothing => Cmd::Nothing,
+            },
             Some(Overlay::ConfirmDiscard { repo, entry }) => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     Cmd::DiscardConfirmed(*repo, entry.clone())
@@ -3368,8 +3384,22 @@ impl App {
                 }
             }
             Cmd::BranchRenameConfirmed => {
-                if let Some(Overlay::BranchRename { repo, from, input, .. }) = self.overlay.take() {
+                if let Some(Overlay::BranchRename {
+                    repo, from, input, ..
+                }) = self.overlay.take()
+                {
                     self.confirm_branch_rename(repo, from, input);
+                }
+            }
+            Cmd::CopyInput => {
+                if let Some(text) = self.overlay_input() {
+                    self.flash = Some(match copy_to_clipboard(&text) {
+                        Ok(ClipboardWrite::Native) => (format!("copied: {text}"), false),
+                        Ok(ClipboardWrite::Osc52Unacknowledged) => {
+                            (format!("sent to terminal clipboard: {text}"), false)
+                        }
+                        Err(err) => (format!("copy failed: {err}"), true),
+                    });
                 }
             }
         }
@@ -5733,7 +5763,10 @@ impl App {
 
     /// The branch-rename field, drawn like the pane-rename one.
     fn draw_branch_rename(&mut self, frame: &mut Frame) {
-        let Some(Overlay::BranchRename { input, select_all, .. }) = self.overlay.as_ref() else {
+        let Some(Overlay::BranchRename {
+            input, select_all, ..
+        }) = self.overlay.as_ref()
+        else {
             return;
         };
         herdr_sidebar::ui::draw_input_dialog(
@@ -6202,12 +6235,7 @@ impl App {
                         let hovered_action = row_hovered
                             .then(|| {
                                 mouse_pos.and_then(|(x, _)| {
-                                    file_hover_action_at(
-                                        x,
-                                        width as u16,
-                                        true,
-                                        marker_width as u16,
-                                    )
+                                    file_hover_action_at(x, width as u16, true, marker_width as u16)
                                 })
                             })
                             .flatten();
@@ -7222,7 +7250,10 @@ mod tests {
             letter: 'D',
         };
         assert!(opens_in_editor(&conflicted));
-        assert!(opens_in_editor(&modified), "a changed file goes to the editor");
+        assert!(
+            opens_in_editor(&modified),
+            "a changed file goes to the editor"
+        );
         assert!(opens_in_editor(&untracked));
         assert!(!opens_in_editor(&deleted), "nothing to open: keep the diff");
     }
@@ -7415,8 +7446,14 @@ mod tests {
 
         // The checked-out local branch: rename and undo, never delete.
         let current = labels(&branch_menu_entries(true, true));
-        assert!(!current.iter().any(|l| l.starts_with("Delete")), "{current:?}");
-        assert!(current.iter().any(|l| l.starts_with("Rename")), "{current:?}");
+        assert!(
+            !current.iter().any(|l| l.starts_with("Delete")),
+            "{current:?}"
+        );
+        assert!(
+            current.iter().any(|l| l.starts_with("Rename")),
+            "{current:?}"
+        );
         assert!(current.iter().any(|l| l.starts_with("Undo")), "{current:?}");
 
         // Another local branch: delete + rename, no undo (that one is HEAD's).
@@ -7428,9 +7465,63 @@ mod tests {
         // A remote-tracking ref (`origin/main`): neither, which is the bug that
         // reported "branch not found" after choosing Delete.
         let remote = labels(&branch_menu_entries(false, false));
-        assert!(!remote.iter().any(|l| l.starts_with("Delete")), "{remote:?}");
-        assert!(!remote.iter().any(|l| l.starts_with("Rename")), "{remote:?}");
+        assert!(
+            !remote.iter().any(|l| l.starts_with("Delete")),
+            "{remote:?}"
+        );
+        assert!(
+            !remote.iter().any(|l| l.starts_with("Rename")),
+            "{remote:?}"
+        );
         assert!(remote.contains(&"Copy Branch Name"), "{remote:?}");
+    }
+
+    /// Ctrl+C in a rename field copies it and leaves the dialog alone. It used
+    /// to fall through to the `Char(c)` arm and TYPE a "c" — with Ctrl+A armed,
+    /// that replaced the whole branch name (user-reported).
+    #[test]
+    fn ctrl_c_in_a_name_field_copies_instead_of_typing_c() {
+        let key = |code: KeyCode, modifiers: KeyModifiers| KeyEvent::new(code, modifiers);
+        let mut input = "feature/x".to_string();
+        let mut select_all = SelectAll::default();
+
+        // Ctrl+A arms the selection, Ctrl+C copies and keeps it armed (the next
+        // character still replaces the value, like a real selection).
+        assert_eq!(
+            field_key(
+                key(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                &mut input,
+                &mut select_all
+            ),
+            FieldKey::Nothing
+        );
+        assert!(select_all.armed());
+        assert_eq!(
+            field_key(
+                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &mut input,
+                &mut select_all
+            ),
+            FieldKey::Copy
+        );
+        assert_eq!(input, "feature/x", "Ctrl+C must not touch the field");
+        assert!(select_all.armed(), "the selection survives a copy");
+
+        // AltGr arrives as CONTROL|ALT: it must keep typing a literal "c".
+        let mut altgr = "ab".to_string();
+        let mut no_selection = SelectAll::default();
+        assert_eq!(
+            field_key(
+                key(
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT
+                ),
+                &mut altgr,
+                &mut no_selection
+            ),
+            FieldKey::Nothing
+        );
+        assert_eq!(altgr, "abc");
     }
 
     #[test]

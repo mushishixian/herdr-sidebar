@@ -2106,6 +2106,19 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   (`SelectAll::take` only speaks `String`). The experimental editor (`editor.rs`) needs none of this: it
   has a real selection and its own Ctrl+A. Every arm is guarded `!ALT` so an AltGr character
   (CONTROL|ALT on Windows) still types.
+- **Ctrl+C in a name field COPIES it; it must not close the popup** (user-reported: Ctrl+A then
+  a copy "关闭窗口了" — the branch name was thrown away and the rename cancelled). `git_popup`'s
+  Ctrl+C branch is now gated by the pure `ctrl_c_copies(op, edit_screen, input)`: the rename and
+  new-branch screens copy when the input is non-empty, and everything else (the switch/merge
+  FILTER screens, the result screen, an empty input) keeps cancelling. The copy lands in the
+  footer via `copy_notice(text, result)` and the armed Ctrl+A stays armed, so the next character
+  still replaces the value. The SCM drawer's rename dialog had the same trap from the other
+  side: `field_key`'s bare `Char(c)` arm TYPED a "c" over the field — with Ctrl+A armed that
+  replaced the whole name. It returns `FieldKey::Copy` now, handled by `Cmd::CopyInput` +
+  `App::overlay_input`, and `field_key`/`FieldKey` moved to module scope so the rule is unit
+  tested. Both clipboard calls are stubbed under `cfg(test)` (like `git_action::notify`), so a
+  test run never clobbers a real clipboard. Live-verified in a throwaway repo: Ctrl+A, Ctrl+C
+  left the popup open, the footer read `copied feature/rename-me`, and xclip held the name.
   Alt+C / Alt+W / Alt+R toggle Match Case / Whole Word / Regex (clicking the `Aa`/`ab`/`.*` chips
   does the same). Up/Down and PgUp/PgDn move over headers and matches alike; Enter or a double-click
   opens (a header opens its first match). Esc cancels. The wheel scrolls the list view, or the

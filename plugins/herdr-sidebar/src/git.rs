@@ -243,11 +243,7 @@ impl Git {
             .ok_or_else(|| "detached HEAD: nothing to publish".to_string())?;
         let remote = self.publish_remote(&branch)?;
         Ok((
-            vec![
-                "--set-upstream".to_string(),
-                remote.clone(),
-                branch.clone(),
-            ],
+            vec!["--set-upstream".to_string(), remote.clone(), branch.clone()],
             format!("Published {branch} to {remote}."),
         ))
     }
@@ -1944,7 +1940,10 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
         run(&work, &["init", "-q"]);
         run(&work, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-        run(&work, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        run(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
         std::fs::write(work.join("a.txt"), "a\n").unwrap();
         run(&work, &["add", "."]);
         run(
