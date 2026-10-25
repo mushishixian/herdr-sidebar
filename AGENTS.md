@@ -1279,7 +1279,9 @@ HACKING.md — budget time for that before promising a patched build.
   dirty) plus clickable ⟳ sync / ✓ commit icons in the fixed last-6 columns. List rows now
   have VARIABLE HEIGHT — mouse hit-testing walks `Row::height()`, and j/k skip the widget
   rows (`Row::selectable()`). The ✧ suggest / S sync keys act on the ACTIVE repo — the one
-  the selection is in (named in the panel header).
+  the selection is in (named in the panel header). ✧ (and `A`) first stages every change of that
+  repo through `Git::stage_under(root)` — the AI-commit staging, so nested repos never become
+  gitlinks — and then describes the staged diff.
 - **A changed row opens the FILE in the editor; only a deletion keeps its diff.** `o`, a click and
   the hover `↗` ("↗ Open in Editor") go through `open_entry` → `opens_in_editor` (everything except
   `D`) → `file_popup::open_file_in_workspace`, the same path a tree click uses, so a conflicted (`!`)
@@ -1298,6 +1300,7 @@ HACKING.md — budget time for that before promising a patched build.
   prefilled input dialog) and **Undo Last Commit (soft)…** (`reset --soft HEAD~1`, current branch
   only, since it acts on HEAD whatever is selected) are offered instead. `o`-style confirmation still
   goes through `Overlay::ConfirmGit`.
+- **Undo lives in ONE place: `Git::undo_last_commit`** (`reset --soft HEAD~1`: the commit goes, its changes stay staged). It refuses during a merge/rebase/cherry-pick/revert, with no commits, and on the root commit, and it reports whether the commit was already pushed. Four entry points reach it: the Branches drawer's **Undo Last Commit (soft)…** (current branch), the HEAD commit row's menu, `U` in Source Control (y/N dialog `Overlay::ConfirmUndoCommit`, via `request_undo_commit`/`undo_commit`), and the global action `git-undo-commit` (`ctrl+alt+z`, no confirm: the toast names the hash and the `git reset --soft <hash>` that redoes it). Never add a second implementation of the reset.
 - **Edit Commit Message…** (commit rows' menu, only for commits on HEAD's history — `Git::is_ancestor_of_head`) edits the subject in a prefilled dialog and keeps the body verbatim. `Git::reword_commit` rewrites the commit and its `--ancestry-path` descendants with `commit-tree` (author preserved, parents remapped, merges included) and moves HEAD with one guarded `update-ref`, so the index and work tree are never touched and nothing can conflict; it refuses while a merge/rebase/cherry-pick is in progress, and the flash says when the commit was already pushed (a force-push is then needed).
 - **A ref-changing git command changes no file, so `refresh()` alone leaves the drawers stale.**
   `refresh()` early-returns when `git status` is unchanged (that is what keeps the 2 s poll cheap),

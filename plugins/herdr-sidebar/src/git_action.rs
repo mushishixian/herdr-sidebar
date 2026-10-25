@@ -1,10 +1,12 @@
 //! Asynchronous Git operations (Pull, Push and AI Commit) with progress notifications.
 //!
 //! Invoked as plugin actions (e.g. `ctrl+alt+p` -> `git-pull`, `ctrl+alt+k` -> `git-push`,
-//! `git-commit-ai` -> `commit`). Resolves the focused pane's repository and performs git
-//! pull/push. AI Commit does not commit here: it hands the repository to the tab's Source
-//! Control sidebar (see [`crate::ai_commit`]), which generates the message into its Message
-//! box for the user to edit and commit. Live toast notifications:
+//! `git-commit-ai` -> `commit`, `ctrl+alt+z` -> `git-undo-commit`). Resolves the focused
+//! pane's repository and performs git pull/push. AI Commit does not commit here: it hands the
+//! repository to the tab's Source Control sidebar (see [`crate::ai_commit`]), which generates
+//! the message into its Message box for the user to edit and commit. Undo is instant: it runs
+//! [`Git::undo_last_commit`] right away (`reset --soft HEAD~1`) and reports the hash to redo it.
+//! Live toast notifications:
 //! 1. Initial notification when started (branch name & repo).
 //! 2. Live progress notification updates (throttled) as git reports progress.
 //! 3. Completion notification with human-readable summary or error.
@@ -21,22 +23,24 @@ use crate::git::Git;
 use crate::shortcut_tip;
 
 pub fn run(op: &str) -> io::Result<()> {
-    if op != "pull" && op != "push" && op != "commit" {
+    if op != "pull" && op != "push" && op != "commit" && op != "undo" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "expected 'pull', 'push' or 'commit'",
+            "expected 'pull', 'push', 'commit' or 'undo'",
         ));
     }
 
     let op_label = match op {
         "pull" => "Git Pull",
         "push" => "Git Push",
+        "undo" => "Undo Commit",
         _ => "AI Commit",
     };
     // Key reminder on the FIRST notification only (plugin-action runs alone).
     let action_id = match op {
         "pull" => "git-pull",
         "push" => "git-push",
+        "undo" => "git-undo-commit",
         _ => "git-commit-ai",
     };
     let tip = shortcut_tip::suffix_for(action_id);
@@ -67,6 +71,10 @@ pub fn run(op: &str) -> io::Result<()> {
     let repo_name = git.name();
     if op == "commit" {
         request_ai_commit(&git, &repo_name, &tip);
+        return Ok(());
+    }
+    if op == "undo" {
+        undo_commit(&git, &repo_name, &tip);
         return Ok(());
     }
     let branch = git.current_branch().unwrap_or_else(|| "HEAD".to_string());
@@ -229,6 +237,26 @@ pub fn run(op: &str) -> io::Result<()> {
     drop(lock_file);
 
     Ok(())
+}
+
+/// Undo the last commit now (no confirmation: the toast names the hash and the
+/// `git reset --soft <hash>` that redoes it).
+fn undo_commit(git: &Git, repo_name: &str, tip: &str) {
+    let title = format!("Undo Commit [{repo_name}]{tip}");
+    let body = match git.undo_last_commit() {
+        Ok(undone) => {
+            let mut body = format!(
+                "Undid {} \"{}\" — its changes are staged. Redo: git reset --soft {}",
+                undone.hash, undone.subject, undone.hash
+            );
+            if undone.pushed {
+                body.push_str(" It was already pushed.");
+            }
+            body
+        }
+        Err(error) => error,
+    };
+    notify(&title, &body);
 }
 
 /// Hand the repository to this tab's Source Control sidebar: it stages, asks

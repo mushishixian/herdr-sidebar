@@ -1135,6 +1135,13 @@ enum Overlay {
         repo: usize,
         behind: usize,
     },
+    /// The "Undo last commit" question for HEAD (`git::Git::undo_last_commit`).
+    /// `y` undoes it; any other key cancels.
+    ConfirmUndoCommit {
+        repo: usize,
+        hash: String,
+        subject: String,
+    },
     /// The ⚙ settings modal: mouse-toggleable panel settings.
     Settings {
         selected: usize,
@@ -2638,6 +2645,7 @@ impl App {
             KeyCode::Char('t') => self.toggle_tree_view(),
             KeyCode::Char('a') => self.stage_all(),
             KeyCode::Char('u') => self.unstage_all(),
+            KeyCode::Char('U') => self.request_undo_commit(self.active),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('i') => self.set_theme(self.theme.toggled()),
             KeyCode::Char('A') => self.suggest_message(),
@@ -3178,6 +3186,17 @@ impl App {
                         "Edit Commit Message…",
                     ));
                 }
+                // Only HEAD itself can be undone (`reset --soft HEAD~1`).
+                let is_head = self
+                    .repos
+                    .get(self.active)
+                    .is_some_and(|repo| repo.git.is_head(h));
+                if is_head {
+                    entries.push(MenuEntry::Action(
+                        MenuAction::UndoLastCommit,
+                        "Undo Last Commit (soft)…",
+                    ));
+                }
                 entries.extend([
                     MenuEntry::Action(MenuAction::Checkout, "Checkout (Detached)"),
                     MenuEntry::Action(MenuAction::CherryPick, "Cherry-Pick"),
@@ -3252,6 +3271,7 @@ impl App {
             GitConfirmed(usize, Vec<String>),
             PullThenCommit(usize),
             CommitNow(usize),
+            UndoConfirmed(usize, String),
             Picker(PickerAction),
             PaneRenameConfirmed,
             BranchRenameConfirmed,
@@ -3368,6 +3388,10 @@ impl App {
                 // click/key press was a commit request.
                 _ => Cmd::CommitNow(*repo),
             },
+            Some(Overlay::ConfirmUndoCommit { repo, hash, .. }) => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Cmd::UndoConfirmed(*repo, hash.clone()),
+                _ => Cmd::Close,
+            },
             None => Cmd::Nothing,
         };
         match cmd {
@@ -3395,6 +3419,10 @@ impl App {
             Cmd::CommitNow(repo) => {
                 self.overlay = None;
                 self.commit_repo(repo);
+            }
+            Cmd::UndoConfirmed(repo, hash) => {
+                self.overlay = None;
+                self.undo_commit(repo, &hash);
             }
             Cmd::DiscardConfirmed(repo, entry) => {
                 self.overlay = None;
@@ -3470,6 +3498,7 @@ impl App {
                 | Some(Overlay::ConfirmDiscardAll { .. })
                 | Some(Overlay::ConfirmGit { .. })
                 | Some(Overlay::ConfirmPullThenCommit { .. })
+                | Some(Overlay::ConfirmUndoCommit { .. })
         ) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if hits(self.zones.confirm_yes, mouse.column, mouse.row) {
@@ -4377,12 +4406,7 @@ impl App {
                     }
                 }
             }
-            MenuAction::UndoLastCommit => self.confirm_git(
-                repo,
-                "Undo last commit",
-                format!("Undo the last commit on '{spec}'? Its changes stay staged."),
-                vec!["reset".into(), "--soft".into(), "HEAD~1".into()],
-            ),
+            MenuAction::UndoLastCommit => self.request_undo_commit(repo),
             MenuAction::DeleteTag => self.confirm_git(
                 repo,
                 "Delete tag",
@@ -4406,6 +4430,51 @@ impl App {
         }
         self.refresh();
         // The command may have moved refs without touching the status.
+        self.refresh_refs();
+    }
+
+    /// Open the "Undo last commit" dialog for HEAD of `repo`. Nothing to undo
+    /// (no commits yet) is flashed instead.
+    fn request_undo_commit(&mut self, repo: usize) {
+        let Some(git) = self.repos.get(repo).map(|r| r.git.clone()) else {
+            self.flash = Some(("repository is gone".to_string(), true));
+            return;
+        };
+        match git.head_summary() {
+            Some((hash, subject)) => {
+                self.overlay = Some(Overlay::ConfirmUndoCommit {
+                    repo,
+                    hash,
+                    subject,
+                });
+            }
+            None => self.flash = Some(("nothing to undo: no commits yet".to_string(), true)),
+        }
+    }
+
+    /// Undo HEAD through the shared `Git::undo_last_commit`, then refresh status
+    /// and refs (the branch moved, the working tree did not). `expected` is the
+    /// hash the dialog named: a commit made while it was open must not be the
+    /// one that silently goes instead.
+    fn undo_commit(&mut self, repo: usize, expected: &str) {
+        let result = match self.repos.get(repo) {
+            Some(r) if r.git.head_summary().map(|(hash, _)| hash).as_deref() != Some(expected) => {
+                Err(format!("HEAD is no longer {expected}; nothing undone"))
+            }
+            Some(r) => r.git.undo_last_commit(),
+            None => Err("repository is gone".to_string()),
+        };
+        match result {
+            Ok(undone) => {
+                let mut text = format!("undid {} — its changes are staged", undone.hash);
+                if undone.pushed {
+                    text.push_str(" (it was pushed: the remote still has it)");
+                }
+                self.flash = Some((text, false));
+            }
+            Err(error) => self.flash = Some((error, true)),
+        }
+        self.refresh();
         self.refresh_refs();
     }
 
@@ -5227,14 +5296,28 @@ impl App {
     }
 
     /// Kick off ✧ commit-message generation in the background.
+    ///
+    /// Stage every change of the active repository (nested-repo safe, like AI
+    /// commit), then ask for a message describing the staged diff.
     fn suggest_message(&mut self) {
         if self.suggesting.is_some() {
+            return;
+        }
+        let index = self.active;
+        if self.ai_commit_busy_for(index) {
             return;
         }
         let Some(repo) = self.active_repo() else {
             return;
         };
-        match repo.git.diff_for_message() {
+        let git = repo.git.clone();
+        if let Err(e) = git.stage_under(git.root()) {
+            self.flash = Some((e, true));
+            self.refresh();
+            return;
+        }
+        self.refresh();
+        match git.diff_for_message() {
             Ok((diff, files)) if diff.trim().is_empty() && files.is_empty() => {
                 self.flash = Some(("no changes to describe".into(), true));
             }
@@ -5781,6 +5864,7 @@ impl App {
             | Some(Overlay::ConfirmDiscardAll { .. })
             | Some(Overlay::ConfirmGit { .. }) => self.draw_confirm(frame),
             Some(Overlay::ConfirmPullThenCommit { .. }) => self.draw_confirm(frame),
+            Some(Overlay::ConfirmUndoCommit { .. }) => self.draw_confirm(frame),
             _ => {}
         }
     }
@@ -5801,6 +5885,10 @@ impl App {
                 "Discard all unstaged changes?".to_string(),
             ),
             Some(Overlay::ConfirmGit { title, prompt, .. }) => (title.clone(), prompt.clone()),
+            Some(Overlay::ConfirmUndoCommit { hash, subject, .. }) => (
+                "Undo last commit".to_string(),
+                format!("Undo commit {hash} \"{subject}\"? Its changes stay staged."),
+            ),
             Some(Overlay::ConfirmPullThenCommit { repo, behind }) => {
                 let branch = self
                     .repos
@@ -6541,6 +6629,7 @@ impl App {
             ("t", if self.tree_view { "list" } else { "tree" }),
             ("a", "all"),
             ("u", "none"),
+            ("U", "undo commit"),
             ("c", "msg"),
             ("A", "suggest"),
             ("o", "diff"),

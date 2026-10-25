@@ -225,10 +225,18 @@ type = "plugin_action"
 command = "herdr-sidebar.git-push"
 description = "Git push (原 Zed ctrl+alt+k，后台 + 进度 toast)"
 
+# ---- 撤销上一次提交：git reset --soft HEAD~1，改动留在暂存区，不弹确认 ----
+# toast 里有被撤销提交的 hash，`git reset --soft <hash>` 可以把它找回来。
+[[keys.command]]
+key = "ctrl+alt+z"
+type = "plugin_action"
+command = "herdr-sidebar.git-undo-commit"
+description = "撤销上一次提交 (git reset --soft HEAD~1，改动保留在暂存区)"
+
 # ---- 原 Zed: ctrl-shift-a → task "Git: AI Commit All" ----
 # 走插件流程（不是弹窗）：切到该 tab 的 Source Control，nested-repo 安全地暂存，
 # oco 用裁剪后的临时 index 生成消息（大文件只喂前 40 行、两个 token 上限都钉死），
-# 填进 Message 框，~0.9s 后走 ✓ Commit 提交——消息可以在这 0.9s 里改。
+# 填进 Message 框并停在那里：消息留给你改，改完自己按 ✓ Commit 提交（不会自动提交）。
 # Windows Terminal 默认把 Ctrl+Shift+A 绑成 Select all，要解绑。
 # 自己那份 popup 脚本（scripts/ai-commit.sh）还在，想用就重绑一个键。
 [[keys.command]]

@@ -205,7 +205,8 @@ moves the copy aside.
 | `ctrl+alt+g` | lazygit branch panel (switch / merge / rename / new / delete; needs the `lazygit-viewer` plugin) |
 | `ctrl+alt+p` | Git: pull (background, progress toasts) |
 | `ctrl+alt+k` | Git: push (background, progress toasts) |
-| `ctrl+shift+a` | Git: stage all + OpenCommit message into Source Control, then commit |
+| `ctrl+alt+z` | Git: undo last commit (`reset --soft HEAD~1`, changes stay staged; no confirm, the toast names the hash to redo it) |
+| `ctrl+shift+a` | Git: stage all + OpenCommit message into Source Control's Message box (edit it, then ✓ Commit) |
 | `ctrl+alt+shift+f` | Git: force reset + clean (`scripts/force-reset.sh`, extra y/N prompt) |
 | `alt+w`, `ctrl+alt+h` | lazygit (whole UI / the log panel) as popups |
 | `ctrl+alt+v` | File viewer pane (`herdr-file-viewer`; `e` opens the file in Fresh) |

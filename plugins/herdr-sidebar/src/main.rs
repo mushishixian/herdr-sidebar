@@ -102,6 +102,9 @@ fn main() -> std::io::Result<()> {
         Some("--git-commit") => {
             return herdr_sidebar::git_action::run("commit");
         }
+        Some("--git-undo-commit") => {
+            return herdr_sidebar::git_action::run("undo");
+        }
         Some("--launch-decision") => {
             // Optional second arg picks the source-control decision; default
             // is the explorer/sidebar decision.

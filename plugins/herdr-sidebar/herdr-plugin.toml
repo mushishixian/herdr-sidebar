@@ -209,6 +209,20 @@ description = "Open Source Control, stage all changes and put an OpenCommit mess
 command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--git-commit"]
 
 [[actions]]
+id = "git-undo-commit"
+platforms = ["linux", "macos"]
+title = "Git: Undo Last Commit"
+description = "Undo the last commit with git reset --soft HEAD~1: the commit goes, its changes stay staged."
+command = ["./target/release/herdr-sidebar", "--git-undo-commit"]
+
+[[actions]]
+id = "git-undo-commit-windows"
+platforms = ["windows"]
+title = "Git: Undo Last Commit"
+description = "Undo the last commit with git reset --soft HEAD~1: the commit goes, its changes stay staged."
+command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--git-undo-commit"]
+
+[[actions]]
 id = "git-switch-branch"
 platforms = ["linux", "macos"]
 title = "Switch branch"

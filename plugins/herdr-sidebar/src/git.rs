@@ -865,6 +865,71 @@ impl Git {
         run_in(&self.root, &["merge-base", "--is-ancestor", &full, "HEAD"]).is_ok()
     }
 
+    /// A merge, cherry-pick, revert or rebase is paused in this repository. Such
+    /// a state must be finished before history is rewritten.
+    pub fn operation_in_progress(&self) -> bool {
+        let Some(dir) = self.git_dir() else {
+            return false;
+        };
+        [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "rebase-merge",
+            "rebase-apply",
+        ]
+        .iter()
+        .any(|name| dir.join(name).exists())
+    }
+
+    /// Whether `commit` names the current HEAD commit.
+    pub fn is_head(&self, commit: &str) -> bool {
+        let Ok(full) = self.resolve_commit(commit) else {
+            return false;
+        };
+        run_in(&self.root, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            .map(|head| head.trim() == full)
+            .unwrap_or(false)
+    }
+
+    /// HEAD's short hash and subject; `None` when there are no commits yet.
+    pub fn head_summary(&self) -> Option<(String, String)> {
+        let line = run_in(&self.root, &["log", "-1", "--format=%h%x00%s", "HEAD"]).ok()?;
+        let (hash, subject) = line.trim_end_matches('\n').split_once('\0')?;
+        Some((hash.to_string(), subject.to_string()))
+    }
+
+    /// Undo the last commit with `reset --soft HEAD~1`: the commit leaves the
+    /// branch and its changes stay staged. This is the one implementation every
+    /// entry point (Branches drawer, commit row menu, `U`, the global action)
+    /// shares. Refuses during an operation, without commits, and on a root commit.
+    pub fn undo_last_commit(&self) -> Result<Undone, String> {
+        if self.operation_in_progress() {
+            return Err("finish the merge/rebase in progress first".to_string());
+        }
+        if run_in(&self.root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
+            return Err("nothing to undo: no commits yet".to_string());
+        }
+        if run_in(&self.root, &["rev-parse", "--verify", "--quiet", "HEAD~1"]).is_err() {
+            return Err("the first commit cannot be undone".to_string());
+        }
+        let line = run_in(&self.root, &["log", "-1", "--format=%H%x00%s", "HEAD"])?;
+        let (full, subject) = line
+            .trim_end_matches('\n')
+            .split_once('\0')
+            .ok_or_else(|| "could not read HEAD".to_string())?;
+        let (full, subject) = (full.to_string(), subject.to_string());
+        let pushed = run_in(&self.root, &["branch", "-r", "--contains", &full])
+            .map(|out| !out.trim().is_empty())
+            .unwrap_or(false);
+        run_in(&self.root, &["reset", "--soft", "HEAD~1"])?;
+        Ok(Undone {
+            hash: full.chars().take(7).collect(),
+            subject,
+            pushed,
+        })
+    }
+
     /// Replace `commit`'s message and rewrite its descendants up to HEAD with
     /// plumbing (`commit-tree` + one guarded `update-ref`). Trees, authors and
     /// the index / work tree are untouched, so nothing can conflict.
@@ -872,17 +937,8 @@ impl Git {
         if message.trim().is_empty() {
             return Err("Commit message is empty.".to_string());
         }
-        if let Some(dir) = self.git_dir() {
-            let busy = [
-                "MERGE_HEAD",
-                "CHERRY_PICK_HEAD",
-                "REVERT_HEAD",
-                "rebase-merge",
-                "rebase-apply",
-            ];
-            if busy.iter().any(|name| dir.join(name).exists()) {
-                return Err("finish the merge/rebase in progress first".to_string());
-            }
+        if self.operation_in_progress() {
+            return Err("finish the merge/rebase in progress first".to_string());
         }
         let full = self.resolve_commit(commit)?;
         if !self.is_ancestor_of_head(&full) {
@@ -1130,6 +1186,15 @@ pub struct Reworded {
     pub new: String,
     /// The original commit is on a remote-tracking branch, so a remote needs a
     /// force-push to match the rewritten history.
+    pub pushed: bool,
+}
+
+/// What [`Git::undo_last_commit`] removed; `hash` is 7 characters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Undone {
+    pub hash: String,
+    pub subject: String,
+    /// The commit is on a remote-tracking branch, so the remote still has it.
     pub pushed: bool,
 }
 
@@ -2534,6 +2599,45 @@ mod tests {
         assert!(git.rename_branch(&original, "bad..name").is_err());
         git.rename_branch(&original, " renamed ").unwrap();
         assert_eq!(git.current_branch().as_deref(), Some("renamed"));
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    #[test]
+    fn undo_last_commit_drops_the_commit_and_keeps_its_changes_staged() {
+        let git = repo_with_identity("undo-last");
+        commit_file(&git, "a.txt", "a\n", "subject a");
+        commit_file(&git, "b.txt", "b\n", "subject b");
+        let before = subjects(&git);
+        let undone = git.undo_last_commit().unwrap();
+        assert_eq!(undone.subject, "subject b");
+        assert_eq!(undone.hash.len(), 7);
+        assert!(!undone.pushed);
+        assert_eq!(subjects(&git), before[1..].to_vec());
+        let staged = run_in(&git.root, &["diff", "--cached", "--name-only"]).unwrap();
+        assert_eq!(staged.trim(), "b.txt");
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    #[test]
+    fn undo_last_commit_refuses_the_root_commit() {
+        let git = repo_with_identity("undo-root");
+        let err = git.undo_last_commit().unwrap_err();
+        assert_eq!(err, "the first commit cannot be undone");
+        assert_eq!(subjects(&git).len(), 1);
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    #[test]
+    fn undo_last_commit_refuses_during_a_merge() {
+        let git = repo_with_identity("undo-merge");
+        commit_file(&git, "a.txt", "a\n", "subject a");
+        commit_file(&git, "b.txt", "b\n", "subject b");
+        std::fs::write(git.root.join(".git/MERGE_HEAD"), "0123456789abcdef\n").unwrap();
+        assert_eq!(
+            git.undo_last_commit().unwrap_err(),
+            "finish the merge/rebase in progress first"
+        );
+        assert_eq!(subjects(&git).len(), 3);
         let _ = std::fs::remove_dir_all(&git.root);
     }
 

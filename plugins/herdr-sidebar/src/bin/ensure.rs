@@ -67,6 +67,13 @@ fn main() {
             }
             return;
         }
+        Some("--git-undo-commit") => {
+            if let Err(error) = herdr_sidebar::git_action::run("undo") {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         _ => {}
     }
     let mode = match std::env::args().nth(1).as_deref() {
