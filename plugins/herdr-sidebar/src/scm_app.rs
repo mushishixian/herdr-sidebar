@@ -1935,6 +1935,9 @@ impl App {
         }
         // The spaces rail's `$agents` line. Self-throttled and failure-tolerant.
         self.agent_tokens.report_if_due();
+        // The first tab's label follows the checked-out branch (own 5 s
+        // throttle; elected session-wide like the rail reporters).
+        herdr_sidebar::tab_title::sync_if_due();
         // pi's hook goes idle while a background subagent still runs: report
         // `working` for it from the persisted transcript.
         self.pi_state.report_if_due();

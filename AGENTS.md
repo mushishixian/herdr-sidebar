@@ -393,9 +393,12 @@ Manifest `[[events]]` hooks (undocumented in CLI help; see herdr `src/api/schema
   fall back to the focused tab.
 - **herdr labels a new workspace's first tab with its position** ("1") and the tab bar renders
   that label; `tab.rename` is the only lever. `ensure` therefore renames an *untouched* first tab
-  (`number == 1` and `label == number`) to `main`, on `tab.created`/`workspace.created` and
-  explicit user actions only — focus hooks are deliberately excluded (they fire in bursts and
-  every later tab is numbered too). Hooks resolve the target from the event payload
+  (`number == 1` and `label == number`) to the workspace's **checked-out branch**, on
+  `tab.created`/`workspace.created` and explicit user actions only — focus hooks are deliberately
+  excluded (they fire in bursts and every later tab is numbered too). The branch comes from
+  `git::branch_label_at` (the git dir's `HEAD`, a worktree's `.git` FILE included, NO git
+  process), read from the tab's own pane cwd; outside a repository, or on any failure, the label
+  falls back to `main` (`launch::FIRST_TAB_LABEL`). Hooks resolve the target from the event payload
   (`launch::event_scope`), never from `HERDR_TAB_ID`: a `workspace_created` hook can be handed
   the PREVIOUS workspace's focused tab. Explicit actions (toggle/activate) have no event payload
   and DO use `HERDR_TAB_ID`, the tab the user acted on. A scope containing `:` is a tab id and
@@ -403,15 +406,23 @@ Manifest `[[events]]` hooks (undocumented in CLI help; see herdr `src/api/schema
   `workspace_created` shape) resolves through `tab.list` and `launch::generated_first_tab_in`,
   which only looks at that workspace's tabs. On a host whose payload carries no workspace/tab
   context the scope is empty and the rename silently no-ops. A tab a human named, a later
-  numbered tab, and an already-renamed `main` are never touched. The rename is about the tab
+  numbered tab, and an already-labelled first tab are never touched. The rename is about the tab
   bar, not the sidebar, so it runs BEFORE the `auto_open` gate: with Auto-open off a new
-  workspace still gets `main`. It also runs before the launcher lock is taken, not for lock
+  workspace still gets its branch. It also runs before the launcher lock is taken, not for lock
   re-entrancy (hooks are separate processes and focus hooks only `try_lock`) but because a
   socket call with a 5 s timeout must never run while the launcher lock is held. Every failure
-  is silent. Gate: `ensure::should_label_first_tab`; tests in `launch.rs`
+  is silent. After creation, `tab_title::sync_if_due` (called from both sidebars' 5 s heartbeat,
+  elected one process per session like the rail reporters) re-reads `HEAD` and renames when the
+  branch moved — a popup, a `git switch` typed in a terminal, a branch rename. It only replaces
+  its OWN labels: the generated position, `main`, the branch it applied before, and the label it
+  remembers applying to that tab; a human's rename is left alone (the applied map is
+  process-wide, so the unified view switch does not forget it). Gate:
+  `ensure::should_label_first_tab`; tests in `launch.rs`
   (`first_tab_renames_the_generated_label_only`, `first_tab_rename_degrades_quietly`,
-  `generated_first_tab_in_picks_only_the_untouched_first_tab`) and `ensure.rs`
-  (`only_creation_events_and_explicit_actions_label_a_tab`).
+  `generated_first_tab_in_picks_only_the_untouched_first_tab`), `ensure.rs`
+  (`only_creation_events_and_explicit_actions_label_a_tab`), `git.rs`
+  (`branch_label_reads_head_without_git`, `branch_label_follows_a_worktree_gitdir_file`) and
+  `tab_title.rs` (`only_our_labels_are_replaced`).
 - A launcher that hooks `pane.*` and also creates panes must pre-stamp identity while holding
   the shared launcher lock; otherwise its own layout/focus events form a duplicate-pane loop.
 

@@ -36,6 +36,7 @@ pub mod suggest;
 pub mod symbol_popup;
 pub mod symbol_search;
 pub mod syntax;
+pub mod tab_title;
 pub mod takeover;
 pub mod tree;
 pub mod ui;

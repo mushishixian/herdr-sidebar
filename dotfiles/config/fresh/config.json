@@ -29,6 +29,14 @@
     "rainbow_indentation": true,
   },
 
+  // Markdown opens in page view — Fresh's compose/preview mode: centred text,
+  // formatting marks concealed, soft-wrapped at editor.page_width (80). The
+  // per-language default is the declarative form of "Toggle Compose/Preview
+  // (All Files)"; "Toggle Page View" still flips a single buffer to source.
+  "languages": {
+    "markdown": { "page_view": true },
+  },
+
   // herdr-sidebar is the explorer; don't pop Fresh's own tree open.
   "file_explorer": {
     "auto_open_on_last_buffer_close": false,

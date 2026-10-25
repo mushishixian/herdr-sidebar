@@ -1005,7 +1005,8 @@ fn should_label_first_tab(explicit: bool, event_json: &str) -> bool {
         )
 }
 
-/// Rename herdr's generated first-tab label ("1") to `main`.
+/// Rename herdr's generated first-tab label ("1") to the workspace's checked
+/// out branch (falling back to `main` outside a repository).
 ///
 /// Called only for creation events and explicit user actions, and only from
 /// before the launcher lock is taken (see `run`). The target comes from the
@@ -1035,7 +1036,12 @@ fn label_first_tab(explicit: bool, event_json: &str) {
             .and_then(|list| launch::generated_first_tab_in(&list, &scope))
             .map(|tab_id| (tab_id, launch::FIRST_TAB_LABEL))
     };
-    if let Some((tab_id, label)) = target {
+    if let Some((tab_id, fallback)) = target {
+        // A new workspace's panes are already in `pane.list`, so the tab bar
+        // can show the branch immediately instead of after the first 5 s
+        // heartbeat ([`crate::tab_title::sync_if_due`]).
+        let label =
+            crate::tab_title::branch_label_for_tab(&tab_id).unwrap_or_else(|| fallback.to_string());
         let _ = ipc::call_text(
             "tab.rename",
             serde_json::json!({ "tab_id": tab_id, "label": label }),

@@ -155,16 +155,7 @@ impl Git {
     /// walk — no git process — so the Explorer can ask on every tick. A
     /// worktree's or submodule's `.git` is a FILE and counts too.
     pub fn is_initialized(dir: &Path) -> bool {
-        let mut path = dir;
-        loop {
-            if path.join(".git").exists() {
-                return true;
-            }
-            match path.parent() {
-                Some(parent) => path = parent,
-                None => return false,
-            }
-        }
+        repo_root(dir).is_some()
     }
 
     /// VS Code's Sync Changes: pull then push. Returns a short human summary;
@@ -820,17 +811,7 @@ impl Git {
     /// The repository's git directory. In a worktree or a submodule `.git` is a
     /// FILE holding `gitdir: <path>`, not a directory.
     pub fn git_dir(&self) -> Option<PathBuf> {
-        let dot_git = self.root.join(".git");
-        if dot_git.is_dir() {
-            return Some(dot_git);
-        }
-        let text = std::fs::read_to_string(&dot_git).ok()?;
-        let path = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
-        Some(if path.is_absolute() {
-            path
-        } else {
-            self.root.join(path)
-        })
+        git_dir_at(&self.root)
     }
 
     /// The checked-out branch; `None` on a detached HEAD.
@@ -975,6 +956,50 @@ fn run_in(dir: &Path, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("git: {e}"))?;
     command_result(out.status, out.stdout, out.stderr)
+}
+
+/// The repository root above `dir`: the nearest ancestor holding a `.git`
+/// entry (a directory, or the FILE a worktree/submodule uses).
+fn repo_root(dir: &Path) -> Option<PathBuf> {
+    let mut path = dir;
+    loop {
+        if path.join(".git").exists() {
+            return Some(path.to_path_buf());
+        }
+        path = path.parent()?;
+    }
+}
+
+/// The git directory for `root`, resolving the `gitdir:` file worktrees and
+/// submodules use. Shared by [`Git::git_dir`] and [`branch_label_at`].
+fn git_dir_at(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    let text = std::fs::read_to_string(&dot_git).ok()?;
+    let path = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+    Some(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
+}
+
+/// The checked-out branch read straight from the git dir's `HEAD` — no git
+/// process, so a 5 s heartbeat can afford it. A branch keeps its slashes; a
+/// detached HEAD yields the short commit hash (7 chars). `None` outside a
+/// repository or when `HEAD` is unreadable.
+pub fn branch_label_at(dir: &Path) -> Option<String> {
+    let root = repo_root(dir)?;
+    let head = std::fs::read_to_string(git_dir_at(&root)?.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(refname) = head.strip_prefix("ref: ") {
+        let name = refname.strip_prefix("refs/heads/").unwrap_or(refname);
+        return (!name.is_empty()).then(|| name.to_string());
+    }
+    let short: String = head.chars().take(7).collect();
+    (!short.is_empty()).then_some(short)
 }
 
 /// The tip named by `refname` in a `packed-refs` file. Loose refs win over
@@ -1587,6 +1612,70 @@ fn child_dirs(dir: &Path, depth: usize) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_branch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aa-git-branch-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The tab label reads `HEAD` directly: no git process, worktrees included.
+    #[test]
+    fn branch_label_reads_head_without_git() {
+        let base = scratch_branch("head");
+        let root = base.join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/feat/tab-name\n").unwrap();
+        assert_eq!(
+            branch_label_at(&root.join("src/deep")).as_deref(),
+            Some("feat/tab-name"),
+            "a nested cwd still finds the repository root"
+        );
+
+        // Detached HEAD: the short commit, which is still better than "main".
+        std::fs::write(
+            root.join(".git/HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        assert_eq!(
+            branch_label_at(&root).as_deref(),
+            Some("0123456"),
+            "detached HEAD renders the short hash"
+        );
+
+        // No repository anywhere above the directory.
+        std::fs::create_dir_all(base.join("plain")).unwrap();
+        assert_eq!(branch_label_at(&base.join("plain")), None);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A worktree/submodule `.git` is a FILE pointing at a shared git dir; the
+    /// label must come from the worktree's own `HEAD` there.
+    #[test]
+    fn branch_label_follows_a_worktree_gitdir_file() {
+        let base = scratch_branch("worktree");
+        let worktree = base.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let gitdir = base.join("main/.git/worktrees/wt");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/topic\n").unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../main/.git/worktrees/wt\n").unwrap();
+        assert_eq!(branch_label_at(&worktree).as_deref(), Some("topic"));
+
+        // An absolute gitdir is what `git worktree add` writes on some hosts.
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        assert_eq!(branch_label_at(&worktree).as_deref(), Some("topic"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn conflict_blocks_count_only_their_own_markers() {
