@@ -49,8 +49,6 @@ const REPO_HEADER_ACTIONS: &str = " ⇅  ✓ ";
 /// How long two clicks on the same row still count as a double click (to pin
 /// a diff/show tab), matching the file explorer.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(450);
-/// How long an AI-generated message stays in the Message box before it is committed.
-const AI_COMMIT_REVIEW: std::time::Duration = std::time::Duration::from_millis(900);
 /// How often this sidebar checks its tab's AI commit request file.
 const AI_REQUEST_POLL: std::time::Duration = std::time::Duration::from_millis(300);
 /// How often the focused pane re-reads `git status`. The idle cadence
@@ -132,8 +130,6 @@ const SHIMMER_STEP: usize = 2;
 enum AiPhase {
     /// OpenCommit is writing the message.
     Generating,
-    /// The message is in the box and the commit fires shortly.
-    Committing,
 }
 
 /// Animation frame index since the AI commit started.
@@ -146,7 +142,6 @@ fn ai_button_label(phase: AiPhase, elapsed: std::time::Duration) -> String {
     let frame = AI_SPINNER[ai_frame(elapsed) % AI_SPINNER.len()];
     match phase {
         AiPhase::Generating => format!("{frame} AI generating…"),
-        AiPhase::Committing => format!("{frame} Committing…"),
     }
 }
 
@@ -1041,6 +1036,8 @@ enum MenuAction {
     /// `git reset --soft HEAD~1` on the current branch: the commit goes, the
     /// changes stay staged.
     UndoLastCommit,
+    /// Edit a commit's subject (commit rows on HEAD's history only); the body is kept.
+    RewordCommit,
     CherryPick,
     Revert,
     ResetHere,
@@ -1155,6 +1152,15 @@ enum Overlay {
     BranchRename {
         repo: usize,
         from: String,
+        input: String,
+        select_all: SelectAll,
+    },
+    /// The subject of a commit's message ("Edit Commit Message…"). `body` is the
+    /// rest of the message, kept verbatim; only the subject is edited.
+    CommitReword {
+        repo: usize,
+        commit: String,
+        body: String,
         input: String,
         select_all: SelectAll,
     },
@@ -1466,8 +1472,6 @@ pub struct App {
     /// AI commit claimed from this tab's request file: the repo index and the
     /// worker's outcome (see [`herdr_sidebar::ai_commit`]).
     ai_commit: Option<(usize, std::sync::mpsc::Receiver<AiOutcome>)>,
-    /// A generated message waiting to be committed once it has been visible.
-    ai_commit_due: Option<(usize, std::time::Instant)>,
     /// Last time this sidebar looked for an AI commit request (throttle).
     ai_commit_checked: Option<std::time::Instant>,
     /// When the claimed AI commit started; drives the button animation.
@@ -1659,7 +1663,6 @@ impl App {
             syncing: None,
             pulling: None,
             ai_commit: None,
-            ai_commit_due: None,
             ai_commit_checked: None,
             ai_commit_started: None,
             my_tab,
@@ -2199,10 +2202,9 @@ impl App {
         self.syncing.is_some() || self.pulling.is_some()
     }
 
-    /// AI commit is generating, or its message is waiting to be committed; the
-    /// event loop polls faster while this holds.
+    /// AI commit is generating; the event loop polls faster while this holds.
     pub fn is_ai_commit_busy(&self) -> bool {
-        self.ai_commit.is_some() || self.ai_commit_due.is_some()
+        self.ai_commit.is_some()
     }
 
     pub fn on_resize(&mut self, width: u16) {
@@ -2488,7 +2490,9 @@ impl App {
         self.overlay.is_some()
             && !matches!(
                 self.overlay,
-                Some(Overlay::PaneRename { .. }) | Some(Overlay::BranchRename { .. })
+                Some(Overlay::PaneRename { .. })
+                    | Some(Overlay::BranchRename { .. })
+                    | Some(Overlay::CommitReword { .. })
             )
     }
 
@@ -2658,6 +2662,9 @@ impl App {
             select_all.disarm();
         }
         if let Some(Overlay::BranchRename { select_all, .. }) = self.overlay.as_mut() {
+            select_all.disarm();
+        }
+        if let Some(Overlay::CommitReword { select_all, .. }) = self.overlay.as_mut() {
             select_all.disarm();
         }
         if let Some(repo) = self.active_repo_mut() {
@@ -3019,9 +3026,9 @@ impl App {
     /// overlay is open (or its field is empty, where a copy would send nothing).
     fn overlay_input(&self) -> Option<String> {
         let text = match &self.overlay {
-            Some(Overlay::PaneRename { input, .. }) | Some(Overlay::BranchRename { input, .. }) => {
-                input.clone()
-            }
+            Some(Overlay::PaneRename { input, .. })
+            | Some(Overlay::BranchRename { input, .. })
+            | Some(Overlay::CommitReword { input, .. }) => input.clone(),
             _ => return None,
         };
         (!text.is_empty()).then_some(text)
@@ -3155,16 +3162,32 @@ impl App {
             return;
         };
         let mut entries: Vec<MenuEntry> = match dref {
-            DrawerRef::Commit(_) => vec![
-                MenuEntry::Action(MenuAction::ShowRef, "Show Changes"),
-                MenuEntry::Separator,
-                MenuEntry::Action(MenuAction::Checkout, "Checkout (Detached)"),
-                MenuEntry::Action(MenuAction::CherryPick, "Cherry-Pick"),
-                MenuEntry::Action(MenuAction::Revert, "Revert"),
-                MenuEntry::Action(MenuAction::ResetHere, "Reset Current Branch Here…"),
-                MenuEntry::Separator,
-                MenuEntry::Action(MenuAction::CopyRef, "Copy Hash"),
-            ],
+            DrawerRef::Commit(h) => {
+                // Rewording rewrites HEAD's history, so only commits on it qualify.
+                let on_head = self
+                    .repos
+                    .get(self.active)
+                    .is_some_and(|repo| repo.git.is_ancestor_of_head(h));
+                let mut entries = vec![
+                    MenuEntry::Action(MenuAction::ShowRef, "Show Changes"),
+                    MenuEntry::Separator,
+                ];
+                if on_head {
+                    entries.push(MenuEntry::Action(
+                        MenuAction::RewordCommit,
+                        "Edit Commit Message…",
+                    ));
+                }
+                entries.extend([
+                    MenuEntry::Action(MenuAction::Checkout, "Checkout (Detached)"),
+                    MenuEntry::Action(MenuAction::CherryPick, "Cherry-Pick"),
+                    MenuEntry::Action(MenuAction::Revert, "Revert"),
+                    MenuEntry::Action(MenuAction::ResetHere, "Reset Current Branch Here…"),
+                    MenuEntry::Separator,
+                    MenuEntry::Action(MenuAction::CopyRef, "Copy Hash"),
+                ]);
+                entries
+            }
             DrawerRef::Branch { name, current } => {
                 // `git branch -a` also lists remote-tracking refs (`origin/main`):
                 // deleting one ran `git branch -d -- origin/main` and failed with
@@ -3232,6 +3255,7 @@ impl App {
             Picker(PickerAction),
             PaneRenameConfirmed,
             BranchRenameConfirmed,
+            CommitRewordConfirmed,
             /// Ctrl+C in a name field: copy it and keep the dialog open.
             CopyInput,
         }
@@ -3316,6 +3340,14 @@ impl App {
                 FieldKey::Copy => Cmd::CopyInput,
                 FieldKey::Nothing => Cmd::Nothing,
             },
+            Some(Overlay::CommitReword {
+                input, select_all, ..
+            }) => match field_key(key, input, select_all) {
+                FieldKey::Close => Cmd::Close,
+                FieldKey::Confirm => Cmd::CommitRewordConfirmed,
+                FieldKey::Copy => Cmd::CopyInput,
+                FieldKey::Nothing => Cmd::Nothing,
+            },
             Some(Overlay::ConfirmDiscard { repo, entry }) => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     Cmd::DiscardConfirmed(*repo, entry.clone())
@@ -3392,6 +3424,18 @@ impl App {
                 }) = self.overlay.take()
                 {
                     self.confirm_branch_rename(repo, from, input);
+                }
+            }
+            Cmd::CommitRewordConfirmed => {
+                if let Some(Overlay::CommitReword {
+                    repo,
+                    commit,
+                    body,
+                    input,
+                    ..
+                }) = self.overlay.take()
+                {
+                    self.confirm_commit_reword(repo, commit, body, input);
                 }
             }
             Cmd::CopyInput => {
@@ -4313,6 +4357,26 @@ impl App {
                     });
                 }
             }
+            MenuAction::RewordCommit => {
+                if let DrawerRef::Commit(h) = &dref {
+                    match self.repos.get(repo).map(|r| r.git.commit_message(h)) {
+                        Some(Ok(raw)) => {
+                            let (subject, rest) =
+                                raw.split_once('\n').unwrap_or((raw.as_str(), ""));
+                            let body = rest.trim_start_matches('\n').trim_end().to_string();
+                            self.overlay = Some(Overlay::CommitReword {
+                                repo,
+                                commit: h.clone(),
+                                body,
+                                input: subject.to_string(),
+                                select_all: SelectAll::default(),
+                            });
+                        }
+                        Some(Err(error)) => self.flash = Some((error, true)),
+                        None => self.flash = Some(("repository is gone".to_string(), true)),
+                    }
+                }
+            }
             MenuAction::UndoLastCommit => self.confirm_git(
                 repo,
                 "Undo last commit",
@@ -4370,6 +4434,40 @@ impl App {
         match git.rename_branch(&from, &new) {
             Ok(()) => {
                 self.flash = Some((format!("renamed {from} -> {new}"), false));
+                self.refresh();
+                self.refresh_refs();
+            }
+            Err(error) => self.flash = Some((error, true)),
+        }
+    }
+
+    /// Reword a commit's subject; the body is kept verbatim. The rewrite never
+    /// touches the index or work tree, so the only outcomes are done or refused.
+    fn confirm_commit_reword(&mut self, repo: usize, commit: String, body: String, input: String) {
+        let new = input.trim().to_string();
+        if new.is_empty() {
+            self.flash = Some(("Commit message is empty.".to_string(), true));
+            return;
+        }
+        let message = if body.is_empty() {
+            new
+        } else {
+            format!("{new}\n\n{body}")
+        };
+        let Some(git) = self.repos.get(repo).map(|r| r.git.clone()) else {
+            self.flash = Some(("repository is gone".to_string(), true));
+            return;
+        };
+        match git.reword_commit(&commit, &message) {
+            Ok(done) if done.old == done.new => {
+                self.flash = Some(("message unchanged".to_string(), false));
+            }
+            Ok(done) => {
+                let mut text = format!("reworded {} -> {}", done.old, done.new);
+                if done.pushed {
+                    text.push_str(" (already pushed: force-push to update the remote)");
+                }
+                self.flash = Some((text, false));
                 self.refresh();
                 self.refresh_refs();
             }
@@ -5191,10 +5289,10 @@ impl App {
         self.syncing = Some((index, rx));
     }
 
-    /// Claim a fresh AI commit request for this tab, collect the worker, and
-    /// commit the message once it has been visible for [`AI_COMMIT_REVIEW`].
+    /// Claim a fresh AI commit request for this tab and collect the worker. The
+    /// generated message only fills the Message box; it is never committed here.
     fn poll_ai_commit(&mut self) {
-        if self.ai_commit.is_none() && self.ai_commit_due.is_none() {
+        if self.ai_commit.is_none() {
             self.take_ai_request();
         }
         if let Some((index, rx)) = &self.ai_commit {
@@ -5211,12 +5309,6 @@ impl App {
                 self.finish_ai_commit(index, outcome);
             }
         }
-        if let Some((index, due)) = self.ai_commit_due
-            && std::time::Instant::now() >= due
-        {
-            self.ai_commit_due = None;
-            self.commit_ai_message(index);
-        }
         if !self.is_ai_commit_busy() {
             self.ai_commit_started = None;
         }
@@ -5224,22 +5316,14 @@ impl App {
 
     /// The AI commit phase running for repo `index`, with its elapsed time.
     fn ai_state(&self, index: usize) -> Option<(AiPhase, std::time::Duration)> {
-        let phase = if self.ai_commit.as_ref().is_some_and(|(r, _)| *r == index) {
-            AiPhase::Generating
-        } else if self
-            .ai_commit_due
-            .as_ref()
-            .is_some_and(|(r, _)| *r == index)
-        {
-            AiPhase::Committing
-        } else {
+        if self.ai_commit.as_ref().map(|(r, _)| *r) != Some(index) {
             return None;
-        };
+        }
         let elapsed = self
             .ai_commit_started
             .map(|at| at.elapsed())
             .unwrap_or_default();
-        Some((phase, elapsed))
+        Some((AiPhase::Generating, elapsed))
     }
 
     /// A user-initiated commit while the branch is BEHIND its upstream offers a
@@ -5324,7 +5408,8 @@ impl App {
             .unwrap_or_default();
         match outcome {
             AiOutcome::Message(generated) => {
-                // The commit below needs the staged list to be current.
+                // Keep the staged list current for the commit that follows the
+                // user's edit.
                 self.refresh();
                 if let Some(repo) = self.repos.get_mut(index) {
                     // The generated message replaces the draft: drop an armed
@@ -5337,14 +5422,17 @@ impl App {
                 self.focus = Focus::Message;
                 let summarised = generated.summarised.len();
                 let flash = if summarised == 0 {
-                    "✧ AI message ready — committing…".to_string()
+                    "✧ AI message ready — edit it, then ✓ Commit".to_string()
                 } else {
                     format!(
-                        "✧ AI message ready ({summarised} large file(s) summarised for the AI) — committing…"
+                        "✧ AI message ready ({summarised} large file(s) summarised for the AI) — edit it, then ✓ Commit"
                     )
                 };
                 self.flash = Some((flash, false));
-                self.ai_commit_due = Some((index, std::time::Instant::now() + AI_COMMIT_REVIEW));
+                herdr_sidebar::git_action::notify(
+                    &format!("AI Commit [{name}]"),
+                    "Message ready in Source Control — edit it, then press ✓ Commit.",
+                );
             }
             AiOutcome::NothingToCommit => {
                 self.flash = Some(("AI commit: nothing to commit".into(), false));
@@ -5357,25 +5445,6 @@ impl App {
                 herdr_sidebar::git_action::notify(&format!("AI Commit Failed [{name}]"), &error);
                 self.flash = Some((format!("AI commit: {error}"), true));
             }
-        }
-    }
-
-    /// Commit through the same path as ✓ Commit, then toast the result.
-    fn commit_ai_message(&mut self, index: usize) {
-        let name = self
-            .repos
-            .get(index)
-            .map(|repo| repo.name.clone())
-            .unwrap_or_default();
-        self.commit_repo(index);
-        match &self.flash {
-            Some((error, true)) => {
-                herdr_sidebar::git_action::notify(&format!("AI Commit Failed [{name}]"), error)
-            }
-            Some((summary, false)) => {
-                herdr_sidebar::git_action::notify(&format!("AI Commit [{name}]"), summary)
-            }
-            None => {}
         }
     }
 
@@ -5707,6 +5776,7 @@ impl App {
             Some(Overlay::Settings { .. }) => self.draw_settings(frame),
             Some(Overlay::PaneRename { .. }) => self.draw_pane_rename(frame),
             Some(Overlay::BranchRename { .. }) => self.draw_branch_rename(frame),
+            Some(Overlay::CommitReword { .. }) => self.draw_commit_reword(frame),
             Some(Overlay::ConfirmDiscard { .. })
             | Some(Overlay::ConfirmDiscardAll { .. })
             | Some(Overlay::ConfirmGit { .. }) => self.draw_confirm(frame),
@@ -5775,6 +5845,21 @@ impl App {
         herdr_sidebar::ui::draw_input_dialog(
             frame,
             "Rename branch",
+            input.as_str(),
+            select_all.armed(),
+        );
+    }
+
+    fn draw_commit_reword(&mut self, frame: &mut Frame) {
+        let Some(Overlay::CommitReword {
+            input, select_all, ..
+        }) = self.overlay.as_ref()
+        else {
+            return;
+        };
+        herdr_sidebar::ui::draw_input_dialog(
+            frame,
+            "Edit commit message",
             input.as_str(),
             select_all.armed(),
         );
@@ -8140,7 +8225,6 @@ mod ai_commit_button_tests {
         assert!(frame(120).starts_with("⠙ AI generating"));
         assert!(frame(1_080).starts_with("⠏ AI generating"));
         assert!(frame(1_200).starts_with("⠋ AI generating"));
-        assert_eq!(ai_button_label(AiPhase::Committing, ms(0)), "⠋ Committing…");
     }
 
     #[test]
@@ -8210,14 +8294,14 @@ mod ai_commit_button_tests {
         let item = commit_button_item(
             &ahead,
             false,
-            Some((AiPhase::Committing, ms(240))),
+            Some((AiPhase::Generating, ms(240))),
             true,
             false,
             30,
         );
         List::new(vec![item]).render(area, &mut buf);
         let row: String = (0..30).map(|x| buf[(x, 1)].symbol()).collect();
-        assert!(row.contains("⠹ Committing…"), "row was {row:?}");
+        assert!(row.contains("⠹ AI generating"), "row was {row:?}");
         assert!(!row.contains("Sync"), "row was {row:?}");
     }
 }

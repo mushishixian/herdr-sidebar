@@ -692,8 +692,8 @@ pane's repo and activates that tab's Source Control view — **without moving yo
 that had it gets it back right after the activation (unless you switched panes in the meantime), so
 the AI commit runs while you keep typing in the editor or the agent pane. The Source Control sidebar
 then stages everything (`stage_under`, nested-repo safe), asks OpenCommit for a message
-and puts it in the Message box, then commits through the same path as the ✓ Commit
-button about 0.9 s later. Nothing staged → toast "Nothing to commit".
+and puts it in the Message box, and a toast says it is ready. Nothing is committed
+automatically: edit the message, then press ✓ Commit (or Enter). Nothing staged → toast "Nothing to commit".
 
 The message comes from oco's `prepare-commit-msg` hook mode: a private temp dir holds a
 `hooks/prepare-commit-msg` SYMLINK to oco's `cli.cjs` (it must be a symlink, since oco
@@ -712,7 +712,7 @@ subtracts the output ceiling from that input budget.
 When a file was shortened the flash says how many ("N large file(s)
 summarised for the AI").
 
-While it runs, the ✓ Commit button shows a braille spinner with "AI generating…" (then "Committing…")
+While it runs, the ✓ Commit button shows a braille spinner with "AI generating…"
 and a sweeping highlight band. Clicking ✓ Commit during that just says "AI commit in progress…".
 
 Sidebar defaults seeded by the installer (`dotfiles/herdr-sidebar/state.json`):

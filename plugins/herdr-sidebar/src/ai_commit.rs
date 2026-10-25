@@ -4,8 +4,8 @@
 //! The action process does not commit anything. It writes a per-tab request
 //! file (`<rundir>/ai_commit/tab-<tab>.req`) and activates the tab's Source
 //! Control view. The sidebar TUI claims the request, stages the repository,
-//! asks OpenCommit for a message, fills the Message box and then commits
-//! through its own ✓ Commit path.
+//! asks OpenCommit for a message and fills the Message box. Nothing is
+//! committed automatically: the user edits the message and presses ✓ Commit.
 //!
 //! Message generation uses OpenCommit's `prepare-commit-msg` hook mode. oco
 //! treats itself as the hook when `process.argv[1]` equals
@@ -90,7 +90,7 @@ pub fn request_path(tab_id: &str) -> PathBuf {
     crate::rundir::dir("ai_commit").join(request_file_name(tab_id))
 }
 
-/// Ask the sidebar of `tab_id` to generate and commit for `repo_root`.
+/// Ask the sidebar of `tab_id` to generate a message for `repo_root`.
 pub fn write_request(tab_id: &str, repo_root: &Path) -> io::Result<()> {
     let path = request_path(tab_id);
     let dir = path

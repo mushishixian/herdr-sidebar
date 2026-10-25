@@ -85,7 +85,8 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   and writes the message to the file it is given. The hooks path comes from
   `GIT_CONFIG_COUNT=1 / core.hooksPath` in the child env. The hook MUST be a symlink to the real
   `cli.cjs` (oco loads `tiktoken_bg.wasm` from its own directory); a copy breaks. The message fills
-  the Message box and `commit_repo` (the ✓ path) commits it about 0.9 s later. oco's own commit
+  the Message box and stays there for the user to edit; nothing commits until the user presses ✓ Commit /
+  Enter (the ordinary `commit_with_pull_offer` path, so a behind branch is offered a pull first). oco's own commit
   path is not used. Pitfall: `oco --yes` without the hook mode commits and then PROMPTS to push
   unless `OCO_GITPUSH=false`. An unconfigured oco (no AI provider) starts its setup wizard, and with
   null stdin it crashes with `ERR_TTY_INIT_FAILED` (verified, oco 3.3.11); `summarize_oco_failure`
@@ -1297,6 +1298,7 @@ HACKING.md — budget time for that before promising a patched build.
   prefilled input dialog) and **Undo Last Commit (soft)…** (`reset --soft HEAD~1`, current branch
   only, since it acts on HEAD whatever is selected) are offered instead. `o`-style confirmation still
   goes through `Overlay::ConfirmGit`.
+- **Edit Commit Message…** (commit rows' menu, only for commits on HEAD's history — `Git::is_ancestor_of_head`) edits the subject in a prefilled dialog and keeps the body verbatim. `Git::reword_commit` rewrites the commit and its `--ancestry-path` descendants with `commit-tree` (author preserved, parents remapped, merges included) and moves HEAD with one guarded `update-ref`, so the index and work tree are never touched and nothing can conflict; it refuses while a merge/rebase/cherry-pick is in progress, and the flash says when the commit was already pushed (a force-push is then needed).
 - **A ref-changing git command changes no file, so `refresh()` alone leaves the drawers stale.**
   `refresh()` early-returns when `git status` is unchanged (that is what keeps the 2 s poll cheap),
   and a branch delete / rename / checkout / reset leaves the working tree as it was — live symptom:

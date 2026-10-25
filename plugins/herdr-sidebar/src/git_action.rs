@@ -4,7 +4,7 @@
 //! `git-commit-ai` -> `commit`). Resolves the focused pane's repository and performs git
 //! pull/push. AI Commit does not commit here: it hands the repository to the tab's Source
 //! Control sidebar (see [`crate::ai_commit`]), which generates the message into its Message
-//! box and commits it. Live toast notifications:
+//! box for the user to edit and commit. Live toast notifications:
 //! 1. Initial notification when started (branch name & repo).
 //! 2. Live progress notification updates (throttled) as git reports progress.
 //! 3. Completion notification with human-readable summary or error.
@@ -232,8 +232,8 @@ pub fn run(op: &str) -> io::Result<()> {
 }
 
 /// Hand the repository to this tab's Source Control sidebar: it stages, asks
-/// OpenCommit for a message, fills the Message box and commits. Nothing is
-/// committed by this process.
+/// OpenCommit for a message and fills the Message box for the user to edit.
+/// Nothing is committed until the user presses ✓ Commit there.
 fn request_ai_commit(git: &Git, repo_name: &str, tip: &str) {
     let title = format!("AI Commit [{repo_name}]");
     let fail_title = format!("AI Commit Failed [{repo_name}]");

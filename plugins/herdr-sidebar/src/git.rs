@@ -832,6 +832,178 @@ impl Git {
         run_in(&self.root, &["branch", "-m", old, new]).map(drop)
     }
 
+    /// Full hash of `commit` (any rev that names a commit).
+    fn resolve_commit(&self, commit: &str) -> Result<String, String> {
+        run_in(
+            &self.root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &format!("{commit}^{{commit}}"),
+            ],
+        )
+        .map(|hash| hash.trim().to_string())
+    }
+
+    /// The raw message of `commit`: everything after the header/message separator.
+    pub fn commit_message(&self, commit: &str) -> Result<String, String> {
+        let full = self.resolve_commit(commit)?;
+        let raw = run_in(&self.root, &["cat-file", "commit", &full])?;
+        Ok(raw
+            .split_once("\n\n")
+            .map(|(_, message)| message.to_string())
+            .unwrap_or_default())
+    }
+
+    /// Whether `commit` is reachable from HEAD. Any failure counts as no.
+    pub fn is_ancestor_of_head(&self, commit: &str) -> bool {
+        let Ok(full) = self.resolve_commit(commit) else {
+            return false;
+        };
+        run_in(&self.root, &["merge-base", "--is-ancestor", &full, "HEAD"]).is_ok()
+    }
+
+    /// Replace `commit`'s message and rewrite its descendants up to HEAD with
+    /// plumbing (`commit-tree` + one guarded `update-ref`). Trees, authors and
+    /// the index / work tree are untouched, so nothing can conflict.
+    pub fn reword_commit(&self, commit: &str, message: &str) -> Result<Reworded, String> {
+        if message.trim().is_empty() {
+            return Err("Commit message is empty.".to_string());
+        }
+        if let Some(dir) = self.git_dir() {
+            let busy = [
+                "MERGE_HEAD",
+                "CHERRY_PICK_HEAD",
+                "REVERT_HEAD",
+                "rebase-merge",
+                "rebase-apply",
+            ];
+            if busy.iter().any(|name| dir.join(name).exists()) {
+                return Err("finish the merge/rebase in progress first".to_string());
+            }
+        }
+        let full = self.resolve_commit(commit)?;
+        if !self.is_ancestor_of_head(&full) {
+            return Err("that commit is not on the current branch".to_string());
+        }
+        let old_head = run_in(&self.root, &["rev-parse", "HEAD"])?
+            .trim()
+            .to_string();
+        let old_message = self.commit_message(&full)?;
+        let new_message = format!("{}\n", message.trim_end());
+        let short = |hash: &str| hash.get(..7).unwrap_or(hash).to_string();
+        let pushed = run_in(&self.root, &["branch", "-r", "--contains", &full])
+            .map(|out| !out.trim().is_empty())
+            .unwrap_or(false);
+        if new_message == old_message {
+            return Ok(Reworded {
+                old: short(&full),
+                new: short(&full),
+                pushed,
+            });
+        }
+
+        let listing = run_in(
+            &self.root,
+            &[
+                "rev-list",
+                "--topo-order",
+                "--reverse",
+                "--ancestry-path",
+                &format!("{full}..HEAD"),
+            ],
+        )?;
+        let mut map = std::collections::HashMap::new();
+        let new_full = self.write_rewritten_commit(&full, &new_message, &map)?;
+        map.insert(full.clone(), new_full.clone());
+        for descendant in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let raw = self.commit_message(descendant)?;
+            let rewritten = self.write_rewritten_commit(descendant, &raw, &map)?;
+            map.insert(descendant.to_string(), rewritten);
+        }
+
+        let new_head = map
+            .get(&old_head)
+            .cloned()
+            .unwrap_or_else(|| old_head.clone());
+        let subject = message.trim().lines().next().unwrap_or("");
+        run_in(
+            &self.root,
+            &[
+                "update-ref",
+                "-m",
+                &format!("reword: {subject}"),
+                "HEAD",
+                &new_head,
+                &old_head,
+            ],
+        )?;
+        Ok(Reworded {
+            old: short(&full),
+            new: short(&new_full),
+            pushed,
+        })
+    }
+
+    /// A copy of `commit` with `message`, parents remapped through `map` and the
+    /// author (name, email, raw date) preserved. Returns the new full hash.
+    fn write_rewritten_commit(
+        &self,
+        commit: &str,
+        message: &str,
+        map: &std::collections::HashMap<String, String>,
+    ) -> Result<String, String> {
+        let tree = run_in(&self.root, &["rev-parse", &format!("{commit}^{{tree}}")])?
+            .trim()
+            .to_string();
+        let parents = run_in(&self.root, &["log", "-1", "--format=%P", commit])?;
+        let mut args: Vec<String> = vec!["commit-tree".to_string(), tree];
+        for parent in parents.split_whitespace() {
+            args.push("-p".to_string());
+            args.push(
+                map.get(parent)
+                    .cloned()
+                    .unwrap_or_else(|| parent.to_string()),
+            );
+        }
+        args.extend(["-F".to_string(), "-".to_string()]);
+        let author = run_in(
+            &self.root,
+            &[
+                "log",
+                "-1",
+                "--format=%an%x00%ae%x00%ad",
+                "--date=raw",
+                commit,
+            ],
+        )?;
+        let fields: Vec<&str> = author.trim_end_matches('\n').split('\0').collect();
+        let [name, email, date] = fields[..] else {
+            return Err(format!("could not read the author of {commit}"));
+        };
+
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut child = git_command(&self.root, &refs)
+            .env("GIT_AUTHOR_NAME", name)
+            .env("GIT_AUTHOR_EMAIL", email)
+            .env("GIT_AUTHOR_DATE", date)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("git: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin
+                .write_all(message.as_bytes())
+                .map_err(|e| format!("git stdin: {e}"))?;
+        }
+        let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
+        command_result(out.status, out.stdout, out.stderr).map(|hash| hash.trim().to_string())
+    }
+
     /// Merge `name` into the current branch, committing with git's default
     /// message when it is not a fast-forward. A dirty worktree that the merge
     /// would touch is refused by git and reported as Err, with nothing done.
@@ -949,6 +1121,16 @@ fn lines(out: String) -> Result<Vec<String>, String> {
         .map(str::to_string)
         .filter(|l| !l.is_empty())
         .collect())
+}
+
+/// What [`Git::reword_commit`] did; `old`/`new` are 7-character hashes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reworded {
+    pub old: String,
+    pub new: String,
+    /// The original commit is on a remote-tracking branch, so a remote needs a
+    /// force-push to match the rewritten history.
+    pub pushed: bool,
 }
 
 fn run_in(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -2352,6 +2534,154 @@ mod tests {
         assert!(git.rename_branch(&original, "bad..name").is_err());
         git.rename_branch(&original, " renamed ").unwrap();
         assert_eq!(git.current_branch().as_deref(), Some("renamed"));
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    /// `repo_with_head` plus a committer identity, so `commit-tree` works without a
+    /// global git identity.
+    fn repo_with_identity(name: &str) -> Git {
+        let git = repo_with_head(name);
+        run_in(&git.root, &["config", "user.name", "t"]).unwrap();
+        run_in(&git.root, &["config", "user.email", "t@t.dev"]).unwrap();
+        git
+    }
+
+    /// Like `commit_file`, but with a fixed foreign author and date, so a test can
+    /// check that a reword keeps both.
+    fn commit_as_ada(git: &Git, file: &str, message: &str) {
+        std::fs::write(git.root.join(file), format!("{file}\n")).unwrap();
+        run_in(&git.root, &["add", file]).unwrap();
+        let out = git_command(&git.root, &["commit", "-q", "-m", message])
+            .env("GIT_AUTHOR_NAME", "Ada Author")
+            .env("GIT_AUTHOR_EMAIL", "ada@example.dev")
+            .env("GIT_AUTHOR_DATE", "1600000000 +0200")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t.dev")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "commit failed");
+    }
+
+    fn subjects(git: &Git) -> Vec<String> {
+        run_in(&git.root, &["log", "--format=%s"])
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn reword_commit_rewrites_the_middle_commit_and_keeps_the_index() {
+        let git = repo_with_identity("reword-middle");
+        let branch = git.current_branch().unwrap();
+        commit_file(&git, "a.txt", "a\n", "subject a");
+        commit_as_ada(&git, "b.txt", "subject b\n\nold body\n");
+        commit_file(&git, "c.txt", "c\n", "subject c");
+
+        // A staged change that must stay staged, and an unstaged one that must stay put.
+        std::fs::write(git.root.join("staged.txt"), "s\n").unwrap();
+        run_in(&git.root, &["add", "staged.txt"]).unwrap();
+        std::fs::write(git.root.join("a.txt"), "dirty\n").unwrap();
+
+        let tree_before = run_in(&git.root, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        let b_hash = run_in(&git.root, &["rev-parse", "HEAD~1"])
+            .unwrap()
+            .trim()
+            .to_string();
+        let author_before = run_in(
+            &git.root,
+            &["log", "-1", "--format=%an%n%ae%n%ad", "--date=raw", &b_hash],
+        )
+        .unwrap();
+
+        let reworded = git
+            .reword_commit(&b_hash, "new subject\n\nold body\n")
+            .unwrap();
+        assert_eq!(reworded.old, b_hash[..7]);
+        assert_ne!(reworded.new, reworded.old);
+        assert!(!reworded.pushed);
+
+        assert_eq!(
+            subjects(&git),
+            ["subject c", "new subject", "subject a", "init"]
+        );
+        assert_eq!(
+            run_in(&git.root, &["rev-parse", "HEAD^{tree}"]).unwrap(),
+            tree_before,
+            "the tree of HEAD is unchanged"
+        );
+        assert_eq!(
+            run_in(
+                &git.root,
+                &[
+                    "log",
+                    "-1",
+                    "--format=%an%n%ae%n%ad",
+                    "--date=raw",
+                    "HEAD~1"
+                ],
+            )
+            .unwrap(),
+            author_before,
+            "author name, email and date survive"
+        );
+        assert_eq!(
+            git.commit_message("HEAD~1").unwrap(),
+            "new subject\n\nold body\n"
+        );
+        assert!(
+            run_in(&git.root, &["diff", "--cached", "--name-only"])
+                .unwrap()
+                .contains("staged.txt")
+        );
+        assert!(
+            run_in(&git.root, &["diff", "--name-only"])
+                .unwrap()
+                .contains("a.txt")
+        );
+        assert_eq!(git.current_branch().as_deref(), Some(branch.as_str()));
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    #[test]
+    fn reword_commit_on_head_keeps_the_body_and_the_commit_count() {
+        let git = repo_with_identity("reword-head");
+        commit_file(&git, "a.txt", "a\n", "old subject\n\nkeep this body");
+        let count = run_in(&git.root, &["rev-list", "--count", "HEAD"]).unwrap();
+
+        let reworded = git
+            .reword_commit("HEAD", "renamed\n\nkeep this body")
+            .unwrap();
+        assert_ne!(reworded.new, reworded.old);
+        assert_eq!(
+            run_in(&git.root, &["rev-list", "--count", "HEAD"]).unwrap(),
+            count
+        );
+        assert_eq!(
+            git.commit_message("HEAD").unwrap(),
+            "renamed\n\nkeep this body\n"
+        );
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    #[test]
+    fn reword_commit_refuses_a_commit_off_the_current_branch_and_empty_messages() {
+        let git = repo_with_identity("reword-refuse");
+        let main = git.current_branch().unwrap();
+        run_in(&git.root, &["switch", "-q", "-c", "side"]).unwrap();
+        commit_file(&git, "side.txt", "s\n", "side commit");
+        let side = run_in(&git.root, &["rev-parse", "HEAD"]).unwrap();
+        run_in(&git.root, &["switch", "-q", &main]).unwrap();
+
+        assert!(!git.is_ancestor_of_head(side.trim()));
+        assert_eq!(
+            git.reword_commit(side.trim(), "x").unwrap_err(),
+            "that commit is not on the current branch"
+        );
+        assert_eq!(
+            git.reword_commit("HEAD", "  \n").unwrap_err(),
+            "Commit message is empty."
+        );
         let _ = std::fs::remove_dir_all(&git.root);
     }
 
