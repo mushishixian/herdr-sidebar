@@ -161,10 +161,9 @@ impl Git {
     /// VS Code's Sync Changes: pull then push. Returns a short human summary;
     /// the caller runs this on a background thread.
     ///
-    /// The pull passes NO strategy flag on purpose: whether a pull merges or
-    /// rebases is the user's `pull.rebase` / `merge.ff` configuration, and a
-    /// tool that quietly adds `--rebase` rewrites their history for them
-    /// (user-reported).
+    /// The pull goes through `PULL_ARGS`, i.e. it MERGES (`--no-rebase`). A
+    /// `pull.rebase=true` machine is not worth the dirty-index refusal, and the
+    /// panel must not rebase behind the user's back (user-requested).
     pub fn sync(&self) -> Result<String, String> {
         // A branch created here has no upstream, so there is nothing to pull
         // from and `git pull` refuses — publish it instead (see `push`).
@@ -243,10 +242,10 @@ impl Git {
     /// Fails fast instead of waiting on a credential prompt — this runs on a
     /// worker, so a hang would leave a stray process behind.
     ///
-    /// `PULL_ARGS` deliberately carries no merge/rebase strategy flag: the
-    /// user's git config decides, and git's own refusal (a `pull.rebase=true`
-    /// machine will not rebase onto a staged index) is reported verbatim instead
-    /// of being papered over with `--no-rebase`.
+    /// `PULL_ARGS` always merges (`--no-rebase`): a `pull.rebase=true` machine
+    /// would otherwise refuse a pull with a dirty index, and the panel must not
+    /// rebase behind the user's back. `--no-edit` keeps a merge from opening an
+    /// editor in a TUI with no stdin.
     pub fn pull(&self) -> Result<String, String> {
         let out = git_command(&self.root, PULL_ARGS)
             .env("GIT_TERMINAL_PROMPT", "0")
@@ -259,6 +258,19 @@ impl Git {
         } else {
             "Pulled.".to_string()
         })
+    }
+
+    /// Refresh the remote-tracking refs so the next [`Git::status`] can report
+    /// how far the branch is behind. Best effort, quiet and non-interactive:
+    /// this runs on a UI-owned worker, never on the event loop, and a dead
+    /// network must not turn the refresh that follows into an error.
+    pub fn fetch(&self) -> Result<(), String> {
+        let out = git_command(&self.root, &["fetch", "--quiet"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("git: {e}"))?;
+        command_result(out.status, out.stdout, out.stderr).map(drop)
     }
 
     pub fn status(&self) -> Result<Status, String> {
@@ -1527,9 +1539,12 @@ fn ref_created_at(root: &Path) -> std::collections::HashMap<String, i64> {
     created
 }
 
-/// Every `git pull` this crate runs. `--no-edit` only keeps a merge from
-/// opening an editor in a TUI with no stdin; it picks no strategy.
-const PULL_ARGS: &[&str] = &["pull", "--no-edit"];
+/// Every `git pull` this crate runs. `--no-edit` keeps a merge from opening an
+/// editor in a TUI with no stdin; `--no-rebase` makes a pull MERGE by default
+/// instead of honouring a machine-wide `pull.rebase=true` (user-requested:
+/// rebasing a dirty index fails and rewriting history behind their back is
+/// worse). A user who wants a rebase can still run it by hand.
+const PULL_ARGS: &[&str] = &["pull", "--no-edit", "--no-rebase"];
 
 fn git_command(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
@@ -2124,6 +2139,71 @@ mod tests {
         Git { root }
     }
 
+    /// `status` compares against the LAST known upstream tip, so a branch whose
+    /// remote moved on still reads `behind 0` until something fetches. The
+    /// Source Control button relies on `fetch` to become Sync Changes.
+    #[test]
+    fn fetch_makes_a_behind_branch_visible_to_status() {
+        let base = std::env::temp_dir().join(format!(
+            "aa-git-fetch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let remote = base.join("remote.git");
+        let one = base.join("one");
+        let two = base.join("two");
+        let run = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.email=t@t.dev", "-c", "user.name=t"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&base, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        run(
+            &base,
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                one.to_str().unwrap(),
+            ],
+        );
+        run(&one, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        run(&one, &["push", "-q", "-u", "origin", "HEAD"]);
+        run(
+            &base,
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                two.to_str().unwrap(),
+            ],
+        );
+        run(&two, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        run(&two, &["push", "-q"]);
+
+        let git = Git::discover(&one).unwrap();
+        assert_eq!(
+            git.status().unwrap().behind,
+            0,
+            "without a fetch the remote-tracking ref is stale"
+        );
+        git.fetch().unwrap();
+        assert_eq!(git.status().unwrap().behind, 1, "fetch updated the refs");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// `is_initialized` is a filesystem walk, so it must see a fresh `git init`
     /// (and not claim a repository above a nested, unrelated folder).
     #[test]
@@ -2265,11 +2345,10 @@ mod tests {
         );
         git(&one, &["push", "-q"]);
 
-        // We no longer pick a strategy, so the pull behaves exactly as this
-        // clone's config says: pin merge here instead of inheriting whatever the
-        // machine has globally (a global `pull.rebase=true` refuses a pull with a
-        // staged index, which is the user's choice to make, not ours).
-        git(&two, &["config", "pull.rebase", "false"]);
+        // Even with a rebase config, our pull MERGES: the staged index would
+        // make `git pull --rebase` refuse, and rewriting history behind the
+        // user is worse than a merge commit (user-requested).
+        git(&two, &["config", "pull.rebase", "true"]);
         std::fs::write(two.join("c.txt"), "c\n").unwrap();
         git(&two, &["add", "c.txt"]);
 
@@ -2444,13 +2523,15 @@ mod tests {
     }
 
     #[test]
-    fn a_pull_never_dictates_a_merge_or_rebase_strategy() {
-        // The user's git config decides how a pull lands. A tool that quietly
-        // adds `--rebase` (or `--no-rebase`) rewrites history for them.
+    fn a_pull_merges_instead_of_rebasing() {
+        // Defaulting to merge is user-requested: a machine-wide
+        // `pull.rebase=true` makes a pull with a dirty index fail, and a rebase
+        // run by the panel rewrites history without being asked.
+        assert!(PULL_ARGS.contains(&"--no-rebase"), "{PULL_ARGS:?}");
         for arg in PULL_ARGS {
             assert!(
-                !arg.contains("rebase") && !arg.contains("ff") && *arg != "--merge",
-                "PULL_ARGS must not pick a strategy: {PULL_ARGS:?}"
+                !arg.contains("ff") && *arg != "--rebase" && *arg != "--merge",
+                "PULL_ARGS must not defer to the config: {PULL_ARGS:?}"
             );
         }
         assert!(PULL_ARGS.contains(&"pull"));

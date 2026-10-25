@@ -69,11 +69,17 @@ const IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(400);
 /// width setting — a drag is a burst of resize events, not one.
 const WIDTH_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How often a focused pane refreshes the remote-tracking refs. `git status`
+/// compares the branch against the LAST known upstream tip, so without a fetch
+/// a branch that gained remote commits still reads `0↓` and the Commit button
+/// never turns into Sync Changes. Only refs are updated — nothing is merged.
+const FETCH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Nothing staged means there is nothing to commit, so Sync (pull then push) is
+/// the button's action — even with unstaged edits in the tree, which do not
+/// change what a commit would contain.
 fn sync_is_primary(status: &Status) -> bool {
-    status.staged.is_empty()
-        && status.unstaged.is_empty()
-        && status.has_upstream
-        && status.ahead + status.behind > 0
+    status.staged.is_empty() && status.has_upstream && status.ahead + status.behind > 0
 }
 
 /// The default action on a changed file (click, `o`, the hover `↗`) hands the
@@ -1476,6 +1482,13 @@ pub struct App {
     /// Pending "pull, then commit" run, polled from tick(); holds the repo to
     /// commit in once the pull lands.
     pulling: Option<(usize, Receiver<Result<String, String>>)>,
+    /// A background `git fetch` (one worker over every repo with an upstream).
+    /// Polled from tick(): when it lands, status is re-read so the behind count
+    /// is current.
+    fetching: Option<Receiver<()>>,
+    /// When the last fetch STARTED — the [`FETCH_EVERY`] throttle. Set before
+    /// the work so a failing network is not retried on every tick.
+    last_fetch: Option<std::time::Instant>,
     /// AI commit claimed from this tab's request file: the repo index and the
     /// worker's outcome (see [`herdr_sidebar::ai_commit`]).
     ai_commit: Option<(usize, std::sync::mpsc::Receiver<AiOutcome>)>,
@@ -1669,6 +1682,8 @@ impl App {
             suggesting: None,
             syncing: None,
             pulling: None,
+            fetching: None,
+            last_fetch: None,
             ai_commit: None,
             ai_commit_checked: None,
             ai_commit_started: None,
@@ -2025,6 +2040,7 @@ impl App {
     pub fn tick(&mut self) {
         self.collect_editor_failures();
         self.collect_fs_watch();
+        self.poll_fetch();
         let shared = sidebar::load_state();
         self.sidebar_state.custom_editor_on_click = shared.custom_editor_on_click;
         self.sidebar_state.custom_editor_inline = shared.custom_editor_inline;
@@ -2124,6 +2140,7 @@ impl App {
         // while focused it is [`FOCUSED_REFRESH`].
         let gained_focus = !self.was_focused;
         self.was_focused = true;
+        self.maybe_fetch();
         if !gained_focus
             && self
                 .last_git_read
@@ -2142,6 +2159,56 @@ impl App {
             }
         }
         self.refresh();
+    }
+
+    /// Collect the background fetch. Its whole point is the behind count, so
+    /// the next focused tick must not wait out [`FOCUSED_REFRESH`] — clearing
+    /// `last_git_read` re-reads status then (and never while unfocused).
+    fn poll_fetch(&mut self) {
+        let Some(rx) = &self.fetching else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.fetching = None;
+                self.last_git_read = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Keep the remote-tracking refs fresh while this pane is focused: one
+    /// quiet `git fetch` per [`FETCH_EVERY`], on a worker, for the repos that
+    /// track an upstream. Without it a branch whose remote moved on keeps
+    /// showing `0↓`, so the Commit button would never offer Sync Changes.
+    fn maybe_fetch(&mut self) {
+        if self.fetching.is_some() || self.syncing.is_some() || self.pulling.is_some() {
+            return;
+        }
+        if self.last_fetch.is_some_and(|at| at.elapsed() < FETCH_EVERY) {
+            return;
+        }
+        let remotes: Vec<Git> = self
+            .repos
+            .iter()
+            .filter(|repo| repo.status.has_upstream)
+            .map(|repo| repo.git.clone())
+            .collect();
+        if remotes.is_empty() {
+            return;
+        }
+        // Stamped before the work: a failed fetch (offline, no credentials)
+        // must not retry on every tick.
+        self.last_fetch = Some(std::time::Instant::now());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for git in remotes {
+                // Best effort: on failure the old counts simply stay.
+                let _ = git.fetch();
+            }
+            let _ = tx.send(());
+        });
+        self.fetching = Some(rx);
     }
 
     /// An inline custom editor that died on the spot. Its stdio is null, so
@@ -5348,9 +5415,8 @@ impl App {
         self.pulling = Some((index, rx));
         self.flash = Some(("Pulling…".to_string(), false));
     }
-    /// VS Code's Sync Changes (pull, then push — no strategy flag, so the
-    /// user's git config decides) on a background
-    /// thread; tick() collects the outcome.
+    /// VS Code's Sync Changes (pull, then push — the pull merges, see
+    /// `PULL_ARGS`) on a background thread; tick() collects the outcome.
     fn sync_changes(&mut self) {
         self.sync_repo(self.active);
     }
@@ -7465,7 +7531,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_diverged_repo_uses_sync_as_the_primary_action() {
+    fn nothing_staged_makes_sync_the_primary_action() {
         let status = Status {
             ahead: 43,
             has_upstream: true,
@@ -7473,15 +7539,29 @@ mod tests {
         };
         assert!(sync_is_primary(&status));
 
+        // Unstaged edits do not change what a commit would contain, so the
+        // button still offers Sync — otherwise clicking it would only answer
+        // "no staged changes" and the pull would be unreachable.
         let dirty = Status {
             unstaged: vec![FileEntry {
                 path: "README.md".into(),
                 orig: None,
                 letter: 'M',
             }],
+            ..status.clone()
+        };
+        assert!(sync_is_primary(&dirty));
+
+        // Staged work IS a commit, even while behind: the button stays Commit.
+        let staged = Status {
+            staged: vec![FileEntry {
+                path: "a.txt".into(),
+                orig: None,
+                letter: 'M',
+            }],
             ..status
         };
-        assert!(!sync_is_primary(&dirty));
+        assert!(!sync_is_primary(&staged));
     }
 
     #[test]
@@ -8355,6 +8435,24 @@ mod ai_commit_button_tests {
             ..Status::default()
         };
         assert_eq!(button_label(&clean, false, None), "⟳ Sync Changes 2↓");
+
+        // Unstaged edits do not change what a commit would contain, so the
+        // button must still offer the pull. Before this it read
+        // "✓ Commit · 2↓" and a click only answered "no staged changes".
+        let dirty_worktree = Status {
+            behind: 2,
+            has_upstream: true,
+            unstaged: vec![FileEntry {
+                path: "a.txt".into(),
+                orig: None,
+                letter: 'M',
+            }],
+            ..Status::default()
+        };
+        assert_eq!(
+            button_label(&dirty_worktree, false, None),
+            "⟳ Sync Changes 2↓"
+        );
 
         // Not behind: the plain label, unchanged.
         let ahead_only = Status {

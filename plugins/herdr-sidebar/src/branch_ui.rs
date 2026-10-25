@@ -387,6 +387,13 @@ pub fn draw_git_footer(
             Style::default().dim()
         }
     };
+    // Incoming commits are waiting to be pulled: that count is an action, so it
+    // must not blend into the dim footer (user-requested).
+    let sync_style = if status.has_upstream && status.behind > 0 {
+        Style::default().fg(palette().accent)
+    } else {
+        Style::default().dim()
+    };
     frame.render_widget(
         Paragraph::new(truncate_to(branch_text, usize::from(branch_width)))
             .style(button_style(branch))
@@ -395,7 +402,11 @@ pub fn draw_git_footer(
     );
     frame.render_widget(
         Paragraph::new(truncate_to(sync_text, usize::from(sync_width)))
-            .style(button_style(sync))
+            .style(if mouse_pos.is_some_and(|(x, y)| hits(sync, x, y)) {
+                hover_style()
+            } else {
+                sync_style
+            })
             .alignment(Alignment::Left),
         sync,
     );

@@ -20,6 +20,8 @@
 [init]
 	defaultBranch = main
 [pull]
-	rebase = true
+	# Merge, not rebase: a rebase pull refuses a dirty index and rewrites
+	# history without being asked. Opt in per pull with `git pull --rebase`.
+	rebase = false
 [push]
 	autoSetupRemote = true

@@ -1331,22 +1331,28 @@ HACKING.md — budget time for that before promising a patched build.
   `⟳ Sync Changes N↑` once the branch tracks, and the busy label reads `Publishing…`.
   Live-verified both entry points on a fresh branch: the row appeared, `S` set
   `origin/<branch>` and created the remote branch, and `ctrl+alt+k` did the same.
-- **The ✓ Commit button offers a pull when the branch is behind.** Behind ≠ 0 AND something
-  staged (so the button reads `✓ Commit · N↓` rather than Sync Changes) makes a click / ⏎ open
+- **The ✓ Commit button offers a pull when the branch is behind.** With NOTHING staged and
+  behind ≠ 0 the button is Sync Changes (pull, then push) even when the work tree has unstaged
+  edits: there is nothing to commit, so a Commit button could only answer "no staged changes"
+  while the pull stayed unreachable (user-requested). The Sync row below stays hidden (the button
+  IS Sync) and the footer's `⟳` count turns accent-colored while behind > 0. With something
+  STAGED and behind ≠ 0 the button reads `✓ Commit · N↓` and a click / ⏎ opens
   `Overlay::ConfirmPullThenCommit` ("&lt;branch&gt; is N commit(s) behind its upstream. Pull
   first?"): `y` runs a plain `git pull` on a worker and then commits, anything else commits
   immediately. `commit_with_pull_offer` is the only entry point that asks — the AI-commit path
   and `Cmd::CommitNow` call `commit_repo` directly — and a failed pull never commits (the branch
   is not where the user thinks it is). **Every pull here goes through `PULL_ARGS`
-  (`["pull", "--no-edit"]`) and picks NO strategy** — user-reported: "don't quietly add `rebase`".
-  Whether it merges or rebases is the user's `pull.rebase`/`merge.ff` config, and the
-  consequence is reported verbatim instead of papered over: this machine's
-  `dotfiles/config/git/dotfiles.gitconfig` sets `pull.rebase=true`, so "Pull first?" on a staged
-  index comes back with git's own `cannot pull with rebase: Your index contains uncommitted
-  changes.` (verified by the test that used to need `--no-rebase`). `--no-edit` stays: it only
-  keeps a merge from opening an editor in a TUI with no stdin. The behind
-  count comes from git's remote-tracking refs, so it is only as fresh as the last `git fetch`
-  (Sync, or a drawer's fetch); the button does not fetch on its own.
+  (`["pull", "--no-edit", "--no-rebase"]`) and therefore MERGES** — user-requested: a
+  `pull.rebase=true` machine refuses a dirty index ("cannot pull with rebase: Your index contains
+  uncommitted changes"), and rebasing behind the user's back is worse. The `git-pull` action adds
+  the same flag to its argv, and `dotfiles/config/git/dotfiles.gitconfig` now ships
+  `pull.rebase = false`, so terminal pulls merge too; a rebase is opt-in per pull. `--no-edit`
+  keeps a merge from opening an editor in a TUI with no stdin. (An earlier version pinned NO
+  strategy and obeyed the config — that is exactly what made "Pull first?" fail whenever
+  something was staged.) The behind count comes from git's
+  remote-tracking refs, so it is only as fresh as the last fetch — a focused pane now runs one
+  every `FETCH_EVERY` (see the polling bullet below), which is what makes the Sync offer appear
+  without the user fetching by hand.
 - Branch labels are actions, not decoration: clicking the Source Control panel header, a
   multi-repo header's branch label, or either view's Git footer opens the shared `BranchPicker`.
   Local choices use a normal checkout; a remote choice creates its local tracking branch.
@@ -1379,6 +1385,14 @@ HACKING.md — budget time for that before promising a patched build.
   status` per repo, no UI churn), and the 300 ms branch probe (`Git::head_signature`) keeps
   branch switches instant without a git process. The Explorer's decorations follow the same rule
   (`DECO_REFRESH` 2 s, and `request_decorations` skips while unfocused).
+- **A focused Source Control pane fetches remote refs every `FETCH_EVERY` (60 s).** `Git::fetch`
+  (`fetch --quiet`, `GIT_TERMINAL_PROMPT=0`, stdin null) runs on a worker over the repos whose
+  status says they track an upstream; `tick`'s `poll_fetch` collects it. `git status` compares
+  against the LAST known upstream tip, so without a fetch a branch whose remote moved on keeps
+  reading `0↓` and the Commit button never turns into Sync Changes (user-requested). A failure is
+  silent (old counts stay) and `last_fetch` is stamped BEFORE the work, so a dead network is not
+  retried every tick. When it lands `last_git_read` is cleared: the next focused tick re-reads
+  status instead of waiting out `FOCUSED_REFRESH`.
 - Periodic Source Control status/drawer refresh backs off while its pane is unfocused, just
   like Explorer decorations. Suggestion/sync worker results are still collected first so a
   hidden pane never strands completed background work. A pane launched with

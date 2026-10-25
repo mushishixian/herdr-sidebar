@@ -138,6 +138,12 @@ pub fn run(op: &str) -> io::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Pulls MERGE, like every other pull this plugin runs: a machine-wide
+    // `pull.rebase=true` would fail on a dirty index and rewrite history
+    // unasked (user-requested).
+    if op == "pull" {
+        cmd.arg("--no-rebase");
+    }
     // Publishing: `--set-upstream <remote> <branch>` (empty for a plain push).
     for arg in &push_extra {
         cmd.arg(arg);
