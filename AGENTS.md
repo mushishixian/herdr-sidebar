@@ -2224,7 +2224,10 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
 - Open editor buffers (Fresh) do not get a notification. They see the change on disk as an external
   change through their own reload or conflict handling.
 - Inputs are filled boxes (`keycap_bg`/`keycap_fg`, placeholders "Search" and "Replace with…" when
-  unfocused and empty). The Replace row carries a bold `header_accent` label with the cod-replace icon
+  unfocused and empty), and a dim solid rule (`─`, field-width, aligned with the inputs) separates
+  Find from Replace — a full blank line read as tall as a whole field, a half-block bar looked like
+  a glitch, and touching boxes read as one block (all user-reported; `extra = 2` while the row is
+  open). The Replace row carries a bold `header_accent` label with the cod-replace icon
   (`⇄` outside Material), and its buttons never use `muted_button_*`: the terminal theme's muted fill is
   ANSI Black, invisible on a dark terminal (the user could not find the Replace entry). Disabled buttons
   use `keycap_bg`; enabled ones `button_bg`.

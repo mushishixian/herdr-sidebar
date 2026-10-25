@@ -1392,7 +1392,9 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        if area.width < 20 || area.height < 6 {
+        // The Replace mode needs one row more than Find alone (see `extra`).
+        let min_height = 6 + u16::from(self.replace_open);
+        if area.width < 20 || area.height < min_height {
             return;
         }
         let width = area.width;
@@ -1404,10 +1406,11 @@ impl App {
         };
         let accent = Style::default().fg(palette().accent);
         let dim = Style::default().add_modifier(Modifier::DIM);
-        // The Replace row adds one line under the query; everything below it
-        // moves down by that much.
+        // The Replace row adds a separator row plus the row itself under the
+        // query (so the two inputs do not read as one block), and everything
+        // below moves down by that much.
         let replace_row = self.replace_open;
-        let extra = u16::from(replace_row);
+        let extra = 2 * u16::from(replace_row);
         let list_y = area.y + 4 + extra;
         let list_height = area.height.saturating_sub(5 + extra);
         self.list_area = Rect::new(area.x, list_y, left_width, list_height);
@@ -1466,9 +1469,16 @@ impl App {
         self.query_field = Rect::new(query_x, area.y + 1, query_width, 1);
         self.draw_input(frame, query_x, area.y + 1, query_width, dim);
 
-        // Row 2 (replace mode, when open): the Replace label, input and buttons.
+        // Row 2 (replace mode, when open): a dim rule under Find, then the
+        // Replace label, input and buttons. A full blank line read as tall as a
+        // whole field and a half-block bar looked like a glitch (user-reported),
+        // so the gap is a solid rule aligned with the fields.
         if replace_row {
-            self.draw_replace_row(frame, area.x, area.y + 2, left_width, fit);
+            frame.render_widget(
+                Paragraph::new(Span::styled("─".repeat(usize::from(query_width)), dim)),
+                Rect::new(query_x, area.y + 2, query_width, 1),
+            );
+            self.draw_replace_row(frame, area.x, area.y + 3, left_width, fit);
         } else {
             self.replace_field = Rect::default();
             self.replace_zones.clear();
@@ -2858,23 +2868,28 @@ mod replace_tests {
         empty.replace_open = true;
         let buffer = drawn(&mut empty, 120, 30);
         let row = buffer_text(&buffer);
-        let row2 = row.lines().nth(2).unwrap();
+        // Row 2 is the dim rule that separates Replace from Find; the Replace
+        // row itself is row 3.
+        let spacer = row.lines().nth(2).unwrap();
+        assert!(spacer.contains('─'), "separator rule: {spacer}");
+        // Row 3 is the Replace row itself.
+        let row2 = row.lines().nth(3).unwrap();
         assert!(row2.contains("⇄ Replace"), "label: {row2}");
         assert!(row2.contains("⇉ All"), "All button: {row2}");
         assert!(row2.contains("Replace with…"), "placeholder: {row2}");
-        let all_x = columns_of(&buffer, 2, "All")[0];
-        assert_eq!(buffer[(all_x, 2)].bg, palette().keycap_bg, "disabled bg");
-        assert_eq!(buffer[(all_x, 2)].fg, palette().keycap_fg, "disabled fg");
+        let all_x = columns_of(&buffer, 3, "All")[0];
+        assert_eq!(buffer[(all_x, 3)].bg, palette().keycap_bg, "disabled bg");
+        assert_eq!(buffer[(all_x, 3)].fg, palette().keycap_fg, "disabled fg");
 
         // With results the buttons take the enabled button colors.
         let root = project("box-enabled");
         let mut app = replace_app(&root, "pin");
         let buffer = drawn(&mut app, 120, 30);
-        let all_x = columns_of(&buffer, 2, "All")[0];
-        assert_eq!(buffer[(all_x, 2)].bg, palette().button_bg, "enabled bg");
-        assert_eq!(buffer[(all_x, 2)].fg, palette().button_fg, "enabled fg");
-        let replace_x = *columns_of(&buffer, 2, "Replace").last().unwrap();
-        assert_eq!(buffer[(replace_x, 2)].bg, palette().button_bg);
+        let all_x = columns_of(&buffer, 3, "All")[0];
+        assert_eq!(buffer[(all_x, 3)].bg, palette().button_bg, "enabled bg");
+        assert_eq!(buffer[(all_x, 3)].fg, palette().button_fg, "enabled fg");
+        let replace_x = *columns_of(&buffer, 3, "Replace").last().unwrap();
+        assert_eq!(buffer[(replace_x, 3)].bg, palette().button_bg);
         let _ = std::fs::remove_dir_all(root);
     }
 
