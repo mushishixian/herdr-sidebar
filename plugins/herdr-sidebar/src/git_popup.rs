@@ -18,7 +18,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -178,7 +178,11 @@ pub fn run(flag: Option<&str>) -> io::Result<()> {
     let result = (|| -> io::Result<()> {
         while !app.done {
             terminal.draw(|frame| app.draw(frame))?;
-            if !event::poll(Duration::from_millis(250))? {
+            app.tick();
+            if app.done {
+                break;
+            }
+            if !event::poll(app.poll_timeout())? {
                 continue;
             }
             match event::read()? {
@@ -213,6 +217,11 @@ enum Screen {
     },
 }
 
+/// How long a successful merge's summary stays on screen before the popup
+/// closes itself. Only the clean-merge result auto-closes: a conflict screen
+/// waits for the user (`a` aborts).
+const MERGE_RESULT_DWELL: Duration = Duration::from_secs(1);
+
 struct App {
     op: Op,
     git: Option<Git>,
@@ -229,6 +238,8 @@ struct App {
     copy_notice: Option<(String, bool)>,
     screen: Screen,
     done: bool,
+    /// When the merge result screen closes itself (a clean merge only).
+    auto_close: Option<Instant>,
     /// Shown as a herdr notification after the popup closes.
     toast: Option<(String, String)>,
 }
@@ -249,6 +260,7 @@ impl App {
             copy_notice: None,
             screen: Screen::Edit,
             done: false,
+            auto_close: None,
             toast: None,
         };
         let git = match git {
@@ -290,6 +302,25 @@ impl App {
 
     fn message(&mut self, lines: Vec<Line<'static>>, conflicts: bool) {
         self.screen = Screen::Message { lines, conflicts };
+    }
+
+    /// Close the merge result screen once its dwell time is over; the frame
+    /// with git's summary has already been drawn by then.
+    fn tick(&mut self) {
+        if let Some(deadline) = self.auto_close
+            && Instant::now() >= deadline
+        {
+            self.done = true;
+        }
+    }
+
+    /// Never sleep past the auto-close deadline, so the popup closes on time
+    /// instead of up to one poll interval late.
+    fn poll_timeout(&self) -> Duration {
+        const IDLE: Duration = Duration::from_millis(250);
+        self.auto_close.map_or(IDLE, |deadline| {
+            deadline.saturating_duration_since(Instant::now()).min(IDLE)
+        })
     }
 
     fn rows(&self) -> Vec<Row> {
@@ -535,6 +566,7 @@ impl App {
                 lines.push(Line::default());
                 lines.extend(summary.lines().map(|line| Line::from(line.to_string())));
                 self.toast = Some(("Merged".into(), format!("{} → {into}", branch.name)));
+                self.auto_close = Some(Instant::now() + MERGE_RESULT_DWELL);
                 self.message(lines, false);
             }
             Ok(MergeOutcome::Conflicts(files)) => {
@@ -1477,11 +1509,37 @@ mod tests {
         assert_eq!(Op::History.popup_size().1, serde_json::json!("90%"));
     }
 
+    /// A clean merge's summary is shown, then the popup closes itself; there is
+    /// no deadline until one is set, so the conflict screen waits for a key.
+    #[test]
+    fn merge_result_dwells_then_closes_itself() {
+        let mut merge = app(Op::Merge);
+        merge.message(vec![Line::from("✓ Merged feature/login into main")], false);
+        merge.tick();
+        assert!(!merge.done, "no deadline: the screen waits for a key");
+        assert_eq!(merge.poll_timeout(), Duration::from_millis(250));
+
+        merge.auto_close = Some(Instant::now() - MERGE_RESULT_DWELL);
+        merge.tick();
+        assert!(
+            merge.done,
+            "the merge summary closes once the dwell is over"
+        );
+        assert_eq!(
+            merge.poll_timeout(),
+            Duration::ZERO,
+            "an expired deadline never blocks the poll"
+        );
+    }
+
     #[test]
     fn new_branch_name_is_trimmed_and_never_blank() {
         assert_eq!(new_branch_name("  feature/x "), Ok("feature/x".to_string()));
         assert_eq!(new_branch_name(""), Err("type a branch name".to_string()));
-        assert_eq!(new_branch_name("   "), Err("type a branch name".to_string()));
+        assert_eq!(
+            new_branch_name("   "),
+            Err("type a branch name".to_string())
+        );
     }
 
     /// The new-branch popup is an input, not a picker: it takes the rename

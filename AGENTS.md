@@ -1475,7 +1475,9 @@ and asks separately before `-D` (#78). Keep `--` before branch names in both pat
   the failure in the footer instead of a toast. The switch popup's "+ type a new name" row
   uses the same `Git::create_branch`, so the two cannot drift. **Merge merges on the first
   ⏎** (the old second-Enter "Merge X into Y?" screen is gone, user-requested); the result /
-  conflict message screen stays, and conflicts still offer `a` for `merge --abort`.
+  conflict message screen stays, and conflicts still offer `a` for `merge --abort`. A clean
+  merge's summary is only a confirmation, so it closes itself after `MERGE_RESULT_DWELL`
+  (1 s, capped into the event poll); the conflict screen has no deadline and waits for a key.
 - **A moved branch is detected by reading the git dir, never by polling git.** The branch
   popups are separate processes, so they cannot tell the sidebar; `Git::head_signature` is a
   string the views compare, built from three small file reads (and it resolves a worktree's
