@@ -49,6 +49,8 @@ const REPO_HEADER_ACTIONS: &str = " ⇅  ✓ ";
 /// How long two clicks on the same row still count as a double click (to pin
 /// a diff/show tab), matching the file explorer.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(450);
+/// How long an AI-generated message stays in the Message box before it is committed.
+const AI_COMMIT_REVIEW: std::time::Duration = std::time::Duration::from_millis(900);
 /// How often this sidebar checks its tab's AI commit request file.
 const AI_REQUEST_POLL: std::time::Duration = std::time::Duration::from_millis(300);
 /// How often the focused pane re-reads `git status`. The idle cadence
@@ -136,6 +138,8 @@ const SHIMMER_STEP: usize = 2;
 enum AiPhase {
     /// OpenCommit is writing the message.
     Generating,
+    /// The message is in the box and the commit fires shortly.
+    Committing,
 }
 
 /// Animation frame index since the AI commit started.
@@ -148,6 +152,7 @@ fn ai_button_label(phase: AiPhase, elapsed: std::time::Duration) -> String {
     let frame = AI_SPINNER[ai_frame(elapsed) % AI_SPINNER.len()];
     match phase {
         AiPhase::Generating => format!("{frame} AI generating…"),
+        AiPhase::Committing => format!("{frame} Committing…"),
     }
 }
 
@@ -1492,6 +1497,8 @@ pub struct App {
     /// AI commit claimed from this tab's request file: the repo index and the
     /// worker's outcome (see [`herdr_sidebar::ai_commit`]).
     ai_commit: Option<(usize, std::sync::mpsc::Receiver<AiOutcome>)>,
+    /// A generated message waiting to be committed once it has been visible.
+    ai_commit_due: Option<(usize, std::time::Instant)>,
     /// Last time this sidebar looked for an AI commit request (throttle).
     ai_commit_checked: Option<std::time::Instant>,
     /// When the claimed AI commit started; drives the button animation.
@@ -1685,6 +1692,7 @@ impl App {
             fetching: None,
             last_fetch: None,
             ai_commit: None,
+            ai_commit_due: None,
             ai_commit_checked: None,
             ai_commit_started: None,
             my_tab,
@@ -2276,9 +2284,10 @@ impl App {
         self.syncing.is_some() || self.pulling.is_some()
     }
 
-    /// AI commit is generating; the event loop polls faster while this holds.
+    /// AI commit is generating, or its message is waiting to be committed; the
+    /// event loop polls faster while this holds.
     pub fn is_ai_commit_busy(&self) -> bool {
-        self.ai_commit.is_some()
+        self.ai_commit.is_some() || self.ai_commit_due.is_some()
     }
 
     pub fn on_resize(&mut self, width: u16) {
@@ -5438,10 +5447,10 @@ impl App {
         self.syncing = Some((index, rx));
     }
 
-    /// Claim a fresh AI commit request for this tab and collect the worker. The
-    /// generated message only fills the Message box; it is never committed here.
+    /// Claim a fresh AI commit request for this tab, collect the worker, and
+    /// commit the message once it has been visible for [`AI_COMMIT_REVIEW`].
     fn poll_ai_commit(&mut self) {
-        if self.ai_commit.is_none() {
+        if self.ai_commit.is_none() && self.ai_commit_due.is_none() {
             self.take_ai_request();
         }
         if let Some((index, rx)) = &self.ai_commit {
@@ -5458,6 +5467,12 @@ impl App {
                 self.finish_ai_commit(index, outcome);
             }
         }
+        if let Some((index, due)) = self.ai_commit_due
+            && std::time::Instant::now() >= due
+        {
+            self.ai_commit_due = None;
+            self.commit_ai_message(index);
+        }
         if !self.is_ai_commit_busy() {
             self.ai_commit_started = None;
         }
@@ -5465,14 +5480,22 @@ impl App {
 
     /// The AI commit phase running for repo `index`, with its elapsed time.
     fn ai_state(&self, index: usize) -> Option<(AiPhase, std::time::Duration)> {
-        if self.ai_commit.as_ref().map(|(r, _)| *r) != Some(index) {
+        let phase = if self.ai_commit.as_ref().is_some_and(|(r, _)| *r == index) {
+            AiPhase::Generating
+        } else if self
+            .ai_commit_due
+            .as_ref()
+            .is_some_and(|(r, _)| *r == index)
+        {
+            AiPhase::Committing
+        } else {
             return None;
-        }
+        };
         let elapsed = self
             .ai_commit_started
             .map(|at| at.elapsed())
             .unwrap_or_default();
-        Some((AiPhase::Generating, elapsed))
+        Some((phase, elapsed))
     }
 
     /// A user-initiated commit while the branch is BEHIND its upstream offers a
@@ -5557,8 +5580,7 @@ impl App {
             .unwrap_or_default();
         match outcome {
             AiOutcome::Message(generated) => {
-                // Keep the staged list current for the commit that follows the
-                // user's edit.
+                // The commit below needs the staged list to be current.
                 self.refresh();
                 if let Some(repo) = self.repos.get_mut(index) {
                     // The generated message replaces the draft: drop an armed
@@ -5571,17 +5593,14 @@ impl App {
                 self.focus = Focus::Message;
                 let summarised = generated.summarised.len();
                 let flash = if summarised == 0 {
-                    "✧ AI message ready — edit it, then ✓ Commit".to_string()
+                    "✧ AI message ready — committing…".to_string()
                 } else {
                     format!(
-                        "✧ AI message ready ({summarised} large file(s) summarised for the AI) — edit it, then ✓ Commit"
+                        "✧ AI message ready ({summarised} large file(s) summarised for the AI) — committing…"
                     )
                 };
                 self.flash = Some((flash, false));
-                herdr_sidebar::git_action::notify(
-                    &format!("AI Commit [{name}]"),
-                    "Message ready in Source Control — edit it, then press ✓ Commit.",
-                );
+                self.ai_commit_due = Some((index, std::time::Instant::now() + AI_COMMIT_REVIEW));
             }
             AiOutcome::NothingToCommit => {
                 self.flash = Some(("AI commit: nothing to commit".into(), false));
@@ -5594,6 +5613,26 @@ impl App {
                 herdr_sidebar::git_action::notify(&format!("AI Commit Failed [{name}]"), &error);
                 self.flash = Some((format!("AI commit: {error}"), true));
             }
+        }
+    }
+
+    /// Commit a generated AI message and toast the outcome (the user is not
+    /// necessarily looking at this pane).
+    fn commit_ai_message(&mut self, index: usize) {
+        let name = self
+            .repos
+            .get(index)
+            .map(|repo| repo.name.clone())
+            .unwrap_or_default();
+        self.commit_repo(index);
+        match &self.flash {
+            Some((error, true)) => {
+                herdr_sidebar::git_action::notify(&format!("AI Commit Failed [{name}]"), error)
+            }
+            Some((summary, false)) => {
+                herdr_sidebar::git_action::notify(&format!("AI Commit [{name}]"), summary)
+            }
+            None => {}
         }
     }
 
@@ -8394,6 +8433,7 @@ mod ai_commit_button_tests {
         assert!(frame(120).starts_with("⠙ AI generating"));
         assert!(frame(1_080).starts_with("⠏ AI generating"));
         assert!(frame(1_200).starts_with("⠋ AI generating"));
+        assert_eq!(ai_button_label(AiPhase::Committing, ms(0)), "⠋ Committing…");
     }
 
     #[test]

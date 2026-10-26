@@ -4,8 +4,8 @@
 //! The action process does not commit anything. It writes a per-tab request
 //! file (`<rundir>/ai_commit/tab-<tab>.req`) and activates the tab's Source
 //! Control view. The sidebar TUI claims the request, stages the repository,
-//! asks OpenCommit for a message and fills the Message box. Nothing is
-//! committed automatically: the user edits the message and presses ✓ Commit.
+//! asks OpenCommit for a message, fills the Message box and then commits it
+//! through the ordinary ✓ Commit path after a short review window.
 //!
 //! Message generation uses OpenCommit's `prepare-commit-msg` hook mode. oco
 //! treats itself as the hook when `process.argv[1]` equals

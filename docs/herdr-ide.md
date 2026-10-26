@@ -206,7 +206,7 @@ moves the copy aside.
 | `ctrl+alt+p` | Git: pull (background, progress toasts) |
 | `ctrl+alt+k` | Git: push (background, progress toasts) |
 | `ctrl+alt+z` | Git: undo last commit (`reset --soft HEAD~1`, changes stay staged; no confirm, the toast names the hash to redo it) |
-| `ctrl+shift+a` | Git: stage all + OpenCommit message into Source Control's Message box (edit it, then ✓ Commit) |
+| `ctrl+shift+a` | Git: stage all + OpenCommit message into Source Control, then commit |
 | `ctrl+alt+shift+f` | Git: force reset + clean (`scripts/force-reset.sh`, extra y/N prompt) |
 | `alt+w`, `ctrl+alt+h` | lazygit (whole UI / the log panel) as popups |
 | `ctrl+alt+v` | File viewer pane (`herdr-file-viewer`; `e` opens the file in Fresh) |
@@ -657,6 +657,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | ea18341 | **Git pull / push (+ first AI commit), shortcut toasts** | `src/git_action.rs`, `src/shortcut_tip.rs`; actions `git-pull`, `git-push`, `git-commit-ai` (`--git-pull/--git-push/--git-commit`). Pull/push take a per-repo OS file lock; results are herdr toasts (`notification.show`); toasts carry the bound key, and only for plugin actions (`HERDR_PLUGIN_ACTION_ID`). Git runs with `GIT_TERMINAL_PROMPT=0` and null stdin so a credential prompt fails instead of hanging. |
 | *uncommitted* | **Branches menu: no phantom delete, plus rename and undo** | `git branch -a` also lists remote-tracking refs, so the drawer offered `origin/main` a **Delete Branch…** that ran `git branch -d -- origin/main` and answered "branch not found" (user-reported). `branch_menu_entries` (pure, unit-tested) now decides from `Git::is_local_branch`: remote-tracking refs get neither delete nor rename, the current branch cannot be deleted, and the menu gained **Rename Branch…** (any local branch, prefilled input dialog → `git branch -m`) and **Undo Last Commit (soft)…** (`reset --soft HEAD~1`, current branch only). Ref-changing commands also call the new `refresh_refs()`, because `refresh()` skips the drawer reload when `git status` did not change — deleting a branch left it on screen. |
 | *uncommitted* | **AI commit no longer steals focus** | `ctrl+shift+a` used to leave you in the Source Control pane (activating a view focuses its pane, and docking a new one always does). `git_action::request_ai_commit` now snapshots the focused pane and `restore_focus` puts it back — only when the activation actually took it *and* the new focus is one of our own panes (`focus_to_restore`, pure + unit-tested), so a user who switched panes meanwhile is never overridden. The request is a file and `take_ai_request` has no focus gate, so the unfocused sidebar still stages, generates and commits. |
+| *uncommitted* | **AI commit commits again** | 9eef928 made ✧ AI Commit stop after filling the Message box, so every AI commit needed a manual ✓ Commit (user-reported regression). The review window is back: when the message lands, the ✓ button switches to "Committing…" and the commit fires `AI_COMMIT_REVIEW` (900 ms) later through `commit_repo` — the ordinary ✓ path — and the outcome is toasted. 900 ms is enough to start editing the message, and `Edit Commit Message…` still rewrites it afterwards. |
 | 2a64708 | **AI commit through Source Control** | `src/ai_commit.rs`: `ctrl+shift+a` writes a per-tab request; that tab's Source Control sidebar stages everything, gets the OpenCommit message (prepare-commit-msg hook mode), fills Message, and commits through the ✓ Commit path. |
 | aedfbd6 | **Popup → editor caller context; AI-commit button animation** | Popups belong to no tab, so the inline editor is started with the CALLER pane's `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`. The ✓ Commit button shows a braille spinner with "AI generating…" / "Committing…" and a sweeping highlight band while an AI commit runs, and blocks a second commit. |
 | 2c02d3e | **Search popup + line-aware open** | `src/search_popup.rs`; the engine moved to lib `src/content_search.rs` (shared with the sidebar Search view); preview highlighted with `syntax::highlight_lines`; `actions::open_in_editor_inline_at` (`{line}` placeholder, or `file:line` for `fresh` / `fresh-open`). |
@@ -695,8 +696,8 @@ pane's repo and activates that tab's Source Control view — **without moving yo
 that had it gets it back right after the activation (unless you switched panes in the meantime), so
 the AI commit runs while you keep typing in the editor or the agent pane. The Source Control sidebar
 then stages everything (`stage_under`, nested-repo safe), asks OpenCommit for a message
-and puts it in the Message box, and a toast says it is ready. Nothing is committed
-automatically: edit the message, then press ✓ Commit (or Enter). Nothing staged → toast "Nothing to commit".
+and puts it in the Message box, then commits through the same path as the ✓ Commit
+button about 0.9 s later. Nothing staged → toast "Nothing to commit".
 
 The message comes from oco's `prepare-commit-msg` hook mode: a private temp dir holds a
 `hooks/prepare-commit-msg` SYMLINK to oco's `cli.cjs` (it must be a symlink, since oco
@@ -715,7 +716,7 @@ subtracts the output ceiling from that input budget.
 When a file was shortened the flash says how many ("N large file(s)
 summarised for the AI").
 
-While it runs, the ✓ Commit button shows a braille spinner with "AI generating…"
+While it runs, the ✓ Commit button shows a braille spinner with "AI generating…" (then "Committing…")
 and a sweeping highlight band. Clicking ✓ Commit during that just says "AI commit in progress…".
 
 Sidebar defaults seeded by the installer (`dotfiles/herdr-sidebar/state.json`):

@@ -85,9 +85,8 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   and writes the message to the file it is given. The hooks path comes from
   `GIT_CONFIG_COUNT=1 / core.hooksPath` in the child env. The hook MUST be a symlink to the real
   `cli.cjs` (oco loads `tiktoken_bg.wasm` from its own directory); a copy breaks. The message fills
-  the Message box and stays there for the user to edit; nothing commits until the user presses ✓ Commit /
-  Enter (the ordinary `commit_with_pull_offer` path, so a behind branch is offered a pull first). oco's own commit
-  path is not used. Pitfall: `oco --yes` without the hook mode commits and then PROMPTS to push
+  the Message box and `commit_repo` (the ✓ path) commits it about 0.9 s later — long enough to
+  start editing the message, short enough to feel automatic. oco's own commit path is not used. Pitfall: `oco --yes` without the hook mode commits and then PROMPTS to push
   unless `OCO_GITPUSH=false`. An unconfigured oco (no AI provider) starts its setup wizard, and with
   null stdin it crashes with `ERR_TTY_INIT_FAILED` (verified, oco 3.3.11); `summarize_oco_failure`
   maps that to "run `oco setup`". On Windows npm installs `oco.cmd`; the hook path resolves

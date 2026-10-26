@@ -266,8 +266,7 @@ fn undo_commit(git: &Git, repo_name: &str, tip: &str) {
 }
 
 /// Hand the repository to this tab's Source Control sidebar: it stages, asks
-/// OpenCommit for a message and fills the Message box for the user to edit.
-/// Nothing is committed until the user presses ✓ Commit there.
+/// OpenCommit for a message, fills the Message box and commits it shortly after.
 fn request_ai_commit(git: &Git, repo_name: &str, tip: &str) {
     let title = format!("AI Commit [{repo_name}]");
     let fail_title = format!("AI Commit Failed [{repo_name}]");
