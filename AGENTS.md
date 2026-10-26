@@ -80,61 +80,56 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   file on disk and `take_ai_request` has no focus gate; verified live (focus stayed on the shell pane
   while an unfocused sidebar generated the message and committed).
   The SCM TUI polls its tab's request every 300 ms, runs `stage_under(root)` plus `has_staged`
-  on a worker, and generates the message WITHOUT committing via OpenCommit's prepare-commit-msg
-  hook mode: oco treats itself as the hook when `argv[1]` equals `<hooks path>/prepare-commit-msg`,
-  and writes the message to the file it is given. The hooks path comes from
-  `GIT_CONFIG_COUNT=1 / core.hooksPath` in the child env. The hook MUST be a symlink to the real
-  `cli.cjs` (oco loads `tiktoken_bg.wasm` from its own directory); a copy breaks. The message fills
-  the Message box and `commit_repo` (the ✓ path) commits it about 0.9 s later — long enough to
-  start editing the message, short enough to feel automatic. oco's own commit path is not used. Pitfall: `oco --yes` without the hook mode commits and then PROMPTS to push
-  unless `OCO_GITPUSH=false`. An unconfigured oco (no AI provider) starts its setup wizard, and with
-  null stdin it crashes with `ERR_TTY_INIT_FAILED` (verified, oco 3.3.11); `summarize_oco_failure`
-  maps that to "run `oco setup`". On Windows npm installs `oco.cmd`; the hook path resolves
-  `<prefix>/node_modules/opencommit/out/cli.cjs` next to it (untested live) and symlink creation
-  needs developer mode. Verified headless: `ai_commit::generate` on a staged scratch repo returned
-  a message and left HEAD unchanged (`cargo test -- --ignored e2e_generate` with
-  `HS_AI_COMMIT_E2E_REPO`).
-  **A gateway that wraps the completion breaks oco.** oco's openai engine is axios
-  (`response.data.choices[0].message`), i.e. it reads `choices` at the TOP level. Cline's
-  gateway (`https://api.cline.bot/api/v1`, model `cline-pass/…`) answers
-  `{"data":{"choices":[…]}}` — and only in its non-streaming form, which oco uses — so it
-  dies with `TypeError: Cannot read properties of undefined (reading '0')` (verified live
-  2026-10-19; pi reads the same endpoint fine because it streams and unwraps). Point oco at a
-  plain OpenAI-compatible gateway instead. This machine points it at the OFFICIAL DeepSeek API
-  (2026-10-23): `OCO_API_URL=https://api.deepseek.com/v1`, `OCO_MODEL=deepseek-flash` (pi's
-  built-in `deepseek` provider ids are `deepseek-flash` / `deepseek-v4-pro`; the catalog's
-  baseUrl is `https://api.deepseek.com`, and the OpenAI SDK needs the `/v1` suffix that pi
-  appends itself), `OCO_API_KEY` copied from pi's `auth.json` `deepseek.key`, and
-  `~/.opencommit` chmod 600 because it now holds that key. Verified end-to-end with
-  `HS_AI_COMMIT_E2E_REPO=<scratch repo> cargo test --lib -- --ignored e2e_generate`: a real
-  `feat(main.rs): …` message came back and HEAD was untouched. The `happycoding` gateway
-  (`https://happycoding.xyz/v1`, `deepseek-v4.1-flash`) also works and returns bare `choices`
-  if the official key ever needs to be spared. Junk keys in `~/.opencommit` from an older provider
-  (`OCO_PROXY=undefined`, `OCO_API_CUSTOM_HEADERS=undefined`) are literal strings — delete
-  them rather than leaving them to be parsed as URLs/JSON.
-  **Curation (big or generated files).** oco diffs everything staged (minus its own excludes), and
-  when the diff exceeds its token limit it splits the diff per chunk, asks the model once per chunk and
-  joins the answers. A 1.8 MB generated `data.json` staged next to a 3-line change took 111 s (the
-  timeout is 120 s) and returned seven `feat(data.json)` messages glued together. Now `generate`
-  builds a TEMP index (`<work>/index`, a copy of the real one) and runs oco with `GIT_INDEX_FILE` set
-  to it, so only the message request sees the shortened view. Budgets: `PER_FILE_BYTES` 12 KiB,
-  `TOTAL_BYTES` 48 KiB (largest kept file shortened first), `KEEP_LINES` 40. Generated paths
-  (`.min.js`, `.map`, `.snap`, `dist/`, `vendor/`, `_generated.`, …) shrink regardless of size; binary
-  and oco-excluded files never count. Per file: an added file keeps its first 40 lines (a blob written
+  on a worker, and asks the AI for a message WITHOUT committing. The message fills the Message box
+  and `commit_repo` (the ✓ path) commits it about 0.9 s later — long enough to start editing the
+  message, short enough to feel automatic.
+  **The AI is an OpenAI-compatible chat-completions API the user enters in the sidebar**
+  (⚙ Settings → `AI commit…`, the shared page `src/ai_settings.rs` opened from BOTH views' Settings
+  modals; user-requested 2026-10-26, replacing OpenCommit/`oco` and its Node dependency). Fields:
+  API URL (a base like `https://api.deepseek.com/v1`, or the full `…/chat/completions`; empty =
+  OpenAI — `AiConfig::endpoint`), API key, Model, and a Test connection row (worker thread,
+  `ai_client::test_connection`). They live in `<state dir>/ai.json` (`src/ai_config.rs`), written
+  atomically and 0600, NEVER in `state.json` (which every sidebar re-reads and the shoot docs
+  tell agents to edit). Not configured → "AI commit is not set up" toast, changes stay staged.
+  Transport is a `curl` subprocess (`src/ai_client.rs`, same no-HTTP-crate choice as the update
+  check) whose WHOLE config — `Authorization` header, JSON body, URL — goes on stdin via `-K -`, so
+  the key never appears in argv/`ps`. Values are double-quoted curl-config strings (`\\` and `\"`
+  escaped, `curl_config`/`curl_quote`). `--write-out "\n%{http_code}"` and no `--fail`, so the
+  API's own error text survives (`parse_reply`: `error.message` / `error` / `message`; 401/403 →
+  "API key rejected: …"). The reply is read from `choices[0].message.content` at the top level OR
+  under `data` — Cline's gateway wraps it (`{"data":{"choices":…}}`), which is what broke oco on
+  this machine — and `clean_message` drops `<think>` blocks (reasoning models), code fences,
+  wrapping quotes and the subject's trailing period. The ✧ button (`suggest.rs`) uses the same
+  `ai_commit::generate` when ai.json is configured; otherwise it still asks the local `claude` CLI.
+  **Thinking row** (between Model and Test connection; Enter/Space/click cycles off→low→medium→high
+  and saves at once; `ai_config::Thinking`, OFF by default, an ai.json without the key or with an
+  unknown value loads as off). Mapping (`ai_client::thinking_fields`): `api.openai.com` gets only
+  `reasoning_effort` (off = `minimal`), every other host gets `"thinking":{"type":"disabled"|"enabled"}`
+  plus `reasoning_effort` for a level; any level raises max_tokens to 4000 (reasoning eats the budget).
+  Verified live on DeepSeek `deepseek-flash`: default (thinking unset) used 88 reasoning tokens for one
+  line; `disabled` used 0 and 12 tokens total. If a strict provider answers HTTP 400/422 naming the
+  fields (`rejects_thinking_fields`), the request is retried ONCE without them.
+  Verified headless against a mock server (scratch repo, key containing `"` and `\`, a
+  data-wrapped reply with a think block and a fence → `feat(app): add greeting`, HEAD untouched;
+  a wrong key → `API key rejected: Invalid API key`) with
+  `HERDR_PLUGIN_STATE_DIR=<dir with ai.json> HS_AI_COMMIT_E2E_REPO=<repo> cargo test --lib --
+  --ignored e2e_generate --nocapture`.
+  **Curation (big or generated files).** The model gets ONE request with the whole diff, so a huge
+  generated file would drown the real change (a 1.8 MB `data.json` next to a 3-line change once took
+  111 s and came back as seven glued messages). `generate` builds a TEMP index (`<work>/index`, a
+  copy of the real one) and reads `git diff --cached -M` through `GIT_INDEX_FILE`, so only the
+  message request sees the shortened view. Budgets: `PER_FILE_BYTES` 12 KiB, `TOTAL_BYTES` 48 KiB
+  (largest kept file shortened first), `KEEP_LINES` 40, then a hard `MAX_DIFF_BYTES` 64 KiB cap.
+  Generated paths (`.min.js`, `.map`, `.snap`, `dist/`, `vendor/`, `_generated.`, …) shrink
+  regardless of size; binary files never count, and `EXCLUDED` substrings (`.lock`, `-lock.`,
+  images) are left out of the diff as `:(exclude)*<s>*` pathspecs — when that leaves nothing, the
+  `--stat` summary is sent instead. Per file: an added file keeps its first 40 lines (a blob written
   with `hash-object -w`, a loose object `git gc` collects); a modified file keeps whole leading hunks
-  (`truncate_hunks`, reset to HEAD then `git apply --cached`); any other shrunk file (deleted, single-hunk
-  modified, rename, copy) is hidden. If nothing is left to diff, the largest hidden modified file is
-  staged shortened; if that still gives nothing, oco reads the real index. The real index is never
-  written. **Both** token ceilings are pinned (`pinned_oco_env`, env beats `~/.opencommit`):
-  `OCO_TOKENS_MAX_INPUT=24000` (`MAX_INPUT_TOKENS`, well above `TOTAL_BYTES`'s token count, so
-  oco never chunks) and `OCO_TOKENS_MAX_OUTPUT=500` (`MAX_OUTPUT_TOKENS`, oco's own default)
-  because oco SUBTRACTS the output ceiling from the input budget — a machine whose
-  `~/.opencommit` asks for a big output limit re-shrinks the diff budget right back and takes
-  the chunk path, and oco rejects values "much higher" than 500 anyway. Everything else
-  (provider, model, language, emoji, description) stays the user's. `Generated.summarised`
-  lists the affected files; the flash reads "N large file(s) summarised for the AI". The commit message
-  itself is never changed. Measured: the 1.8 MB case 111 s → 2.7 s (one message); a 146 KB real diff
-  (7 files shortened) 4.4 s.
+  (`truncate_hunks`, reset to HEAD then `git apply --cached`); any other shrunk file (deleted,
+  single-hunk modified, rename, copy) is hidden. If nothing is left to diff, the largest hidden
+  modified file is staged shortened; if that still gives nothing, the real index is read. The real
+  index is never written. `Generated.summarised` lists the affected files; the flash reads "N large
+  file(s) summarised for the AI". The commit message itself is never changed.
 
 ### Reference implementations (installed locally, read these before designing)
 

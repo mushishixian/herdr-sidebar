@@ -1,10 +1,12 @@
-//! The ✨ commit-message suggestion: ask the local `claude` CLI to summarize
-//! the pending diff (like VS Code's sparkle button), falling back to a
-//! filename-based heuristic when the CLI is missing, slow, or fails. Runs on a
-//! background thread so the TUI stays responsive; the app polls the returned
-//! channel from its refresh tick.
+//! The ✨ commit-message suggestion. With an AI configured in ⚙ Settings it asks
+//! that provider (see `ai_commit`); otherwise it asks the local `claude` CLI to
+//! summarize the pending diff (like VS Code's sparkle button). Either way a
+//! filename-based heuristic stands in when the answer is missing, slow, or
+//! fails. Runs on a background thread so the TUI stays responsive; the app
+//! polls the returned channel from its refresh tick.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
@@ -19,21 +21,44 @@ const PROMPT: &str = "Write a git commit message for the diff on stdin: one impe
                       subject line under 72 characters, no quotes, no trailing period. \
                       Reply with ONLY the message line.";
 
-/// Spawn generation for `diff`/`files`; the result arrives on the channel.
-/// Always yields exactly one message (the fallback is used on any failure).
-pub fn spawn(diff: String, files: Vec<String>) -> Receiver<String> {
+/// What the ✧ button produced.
+pub struct Suggestion {
+    pub message: String,
+    /// Why the configured AI failed. Set only when `message` is then the
+    /// filename placeholder, so the caller can say so.
+    pub error: Option<String>,
+}
+
+/// Spawn generation for the staged `diff`/`files` of the repository at `root`;
+/// the result arrives on the channel. Always yields exactly one suggestion.
+/// With an AI configured in ⚙ Settings it asks that provider; otherwise it
+/// asks the `claude` CLI and falls back to the filename heuristic.
+pub fn spawn(root: PathBuf, diff: String, files: Vec<String>) -> Receiver<Suggestion> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        let message = generate(&diff, &files);
-        let _ = tx.send(message);
+        let suggestion = suggest(&root, &diff, &files);
+        let _ = tx.send(suggestion);
     });
     rx
 }
 
-fn generate(diff: &str, files: &[String]) -> String {
-    match ask_claude(diff) {
-        Some(message) => message,
-        None => fallback(files),
+fn suggest(root: &Path, diff: &str, files: &[String]) -> Suggestion {
+    if crate::ai_config::load().is_configured() {
+        return match crate::ai_commit::generate(root) {
+            Ok(generated) => Suggestion {
+                message: generated.message,
+                error: None,
+            },
+            Err(error) => Suggestion {
+                message: fallback(files),
+                error: Some(error),
+            },
+        };
+    }
+    let message = ask_claude(diff).unwrap_or_else(|| fallback(files));
+    Suggestion {
+        message,
+        error: None,
     }
 }
 

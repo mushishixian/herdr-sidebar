@@ -235,7 +235,7 @@ description = "撤销上一次提交 (git reset --soft HEAD~1，改动保留在�
 
 # ---- 原 Zed: ctrl-shift-a → task "Git: AI Commit All" ----
 # 走插件流程（不是弹窗）：切到该 tab 的 Source Control，nested-repo 安全地暂存，
-# oco 用裁剪后的临时 index 生成消息（大文件只喂前 40 行、两个 token 上限都钉死），
+# 用裁剪后的 diff（大文件只喂前 40 行）请求 ⚙ Settings → AI commit 里配的 OpenAI 兼容 API 生成消息，
 # 填进 Message 框，约 0.9s 后自动提交（这段时间可以改消息）。
 # Windows Terminal 默认把 Ctrl+Shift+A 绑成 Select all，要解绑。
 # 自己那份 popup 脚本（scripts/ai-commit.sh）还在，想用就重绑一个键。
@@ -243,7 +243,7 @@ description = "撤销上一次提交 (git reset --soft HEAD~1，改动保留在�
 key = "ctrl+shift+a"
 type = "plugin_action"
 command = "herdr-sidebar.git-commit-ai"
-description = "AI 提交 (插件: Source Control + oco)"
+description = "AI 提交 (插件: Source Control + 设置里的 AI API)"
 
 # ---- 原 Zed: ctrl-alt-f → task "Git Force Reset & Clean" ----
 # 比 Zed 那边多一道 y/N 确认。ctrl+alt+f 让给了搜索弹窗，这里升到三修饰键

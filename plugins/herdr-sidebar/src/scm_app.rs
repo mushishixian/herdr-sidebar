@@ -23,6 +23,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 
 use herdr_sidebar::actions::{self, ClipboardWrite, copy_to_clipboard, open_external, reveal};
+use herdr_sidebar::ai_settings::{self, AiPageAction, AiSettingsPage};
 use herdr_sidebar::branch_ui::{
     BranchPicker, FooterZones, PickerAction, draw_git_footer, sync_glyph,
 };
@@ -136,7 +137,7 @@ const SHIMMER_STEP: usize = 2;
 /// Which half of the AI commit a repo's button is showing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AiPhase {
-    /// OpenCommit is writing the message.
+    /// The AI is writing the message.
     Generating,
     /// The message is in the box and the commit fires shortly.
     Committing,
@@ -254,7 +255,7 @@ enum Focus {
 
 /// What the `git-commit-ai` worker produced for one repository.
 enum AiOutcome {
-    /// OpenCommit's message for the staged changes, and the large files it
+    /// The AI's message for the staged changes, and the large files it
     /// saw only in shortened form.
     Message(herdr_sidebar::ai_commit::Generated),
     /// Nothing was staged after `git add -A` semantics: no changes at all.
@@ -1117,6 +1118,9 @@ enum MenuEntry {
 /// A modal layered over the list; while open it owns keyboard and mouse input.
 enum Overlay {
     BranchPicker(BranchPicker),
+    /// The AI commit page (API URL / key / model, connection test), opened from
+    /// the Settings modal.
+    AiSettings(AiSettingsPage),
     Menu {
         x: u16,
         y: u16,
@@ -1209,6 +1213,8 @@ enum Setting {
     Hotkeys,
     Folder,
     ScmViewMode,
+    /// Opens the AI commit page; the value is the configured model.
+    AiCommit,
 }
 
 /// (setting, label, current value, enabled) — disabled rows render dimmed and
@@ -1481,7 +1487,7 @@ pub struct App {
     /// One-shot footer notice: (text, is_error). Cleared on the next key press.
     flash: Option<(String, bool)>,
     /// Pending ✧ commit-message generation, polled from tick().
-    suggesting: Option<Receiver<String>>,
+    suggesting: Option<Receiver<suggest::Suggestion>>,
     /// Pending Sync Changes run, polled from tick().
     syncing: Option<(usize, Receiver<Result<String, String>>)>,
     /// Pending "pull, then commit" run, polled from tick(); holds the repo to
@@ -2076,16 +2082,19 @@ impl App {
         self.poll_ai_commit();
         if let Some(rx) = &self.suggesting {
             match rx.try_recv() {
-                Ok(message) => {
+                Ok(suggestion) => {
                     if let Some(repo) = self.active_repo_mut() {
                         // A fresh suggestion replaces the draft, so an armed
                         // Ctrl+A no longer describes what is on screen.
                         repo.select_all.disarm();
-                        repo.message = message.chars().collect();
+                        repo.message = suggestion.message.chars().collect();
                         repo.cursor = repo.message.len();
                     }
                     self.focus = Focus::Message;
-                    self.flash = Some(("✧ suggestion ready — edit or ⏎ to commit".into(), false));
+                    self.flash = Some(match suggestion.error {
+                        Some(error) => (format!("✧ AI: {error} — placeholder message used"), true),
+                        None => ("✧ suggestion ready — edit or ⏎ to commit".into(), false),
+                    });
                     self.suggesting = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -2288,6 +2297,30 @@ impl App {
     /// event loop polls faster while this holds.
     pub fn is_ai_commit_busy(&self) -> bool {
         self.ai_commit.is_some() || self.ai_commit_due.is_some()
+    }
+
+    /// Applies what the AI page asked for: Back returns to the Settings modal
+    /// with the AI commit row selected, Close dismisses everything.
+    fn ai_page_done(&mut self, action: AiPageAction) {
+        match action {
+            AiPageAction::None => {}
+            AiPageAction::Close => self.overlay = None,
+            AiPageAction::Back => self.reopen_settings_on(Setting::AiCommit),
+        }
+    }
+
+    /// Reopens the Settings modal with `setting` selected.
+    fn reopen_settings_on(&mut self, setting: Setting) {
+        let selected = self
+            .settings_rows()
+            .iter()
+            .position(|row| row.0 == setting)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::Settings {
+            selected,
+            rect: Rect::default(),
+            scroll: 0,
+        });
     }
 
     pub fn on_resize(&mut self, width: u16) {
@@ -3334,6 +3367,12 @@ impl App {
     }
 
     fn overlay_key(&mut self, key: KeyEvent) {
+        // The AI page owns its keys outright: route them before the Settings
+        // rows (which read ai.json) are built for every keystroke.
+        if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
+            let action = page.key(key);
+            return self.ai_page_done(action);
+        }
         enum Cmd {
             Nothing,
             Close,
@@ -3420,6 +3459,8 @@ impl App {
                 _ => Cmd::Nothing,
             },
             Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.key(key)),
+            // Routed to the page before this match (see the early return above).
+            Some(Overlay::AiSettings(_)) => Cmd::Nothing,
             Some(Overlay::PaneRename { input, select_all }) => {
                 match field_key(key, input, select_all) {
                     FieldKey::Close => Cmd::Close,
@@ -3557,6 +3598,10 @@ impl App {
     }
 
     fn overlay_mouse(&mut self, mouse: MouseEvent) {
+        if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
+            let action = page.mouse(mouse);
+            return self.ai_page_done(action);
+        }
         enum Cmd {
             Nothing,
             Close,
@@ -3887,6 +3932,12 @@ impl App {
                 true,
             ),
             (
+                Setting::AiCommit,
+                "AI commit…",
+                ai_settings::model_value(),
+                true,
+            ),
+            (
                 Setting::Folder,
                 "Change folder…",
                 self.cwd
@@ -3914,6 +3965,9 @@ impl App {
                 });
             }
             Setting::ScmViewMode => self.toggle_tree_view(),
+            Setting::AiCommit => {
+                self.overlay = Some(Overlay::AiSettings(AiSettingsPage::open()));
+            }
             Setting::UnifiedSidebar => {
                 // The pane layout changes underneath the modal; close it.
                 self.overlay = None;
@@ -5398,7 +5452,7 @@ impl App {
                 self.flash = Some(("no changes to describe".into(), true));
             }
             Ok((diff, files)) => {
-                self.suggesting = Some(suggest::spawn(diff, files));
+                self.suggesting = Some(suggest::spawn(git.root().to_path_buf(), diff, files));
                 self.flash = Some(("✧ generating commit message…".into(), false));
             }
             Err(e) => self.flash = Some((e, true)),
@@ -5565,10 +5619,7 @@ impl App {
         });
         self.ai_commit = Some((index, rx));
         self.ai_commit_started = Some(std::time::Instant::now());
-        self.flash = Some((
-            "✧ AI commit: generating message with OpenCommit…".into(),
-            false,
-        ));
+        self.flash = Some(("✧ AI commit: generating message…".into(), false));
     }
 
     /// Put a generated message in the Message box, or report why there is none.
@@ -5958,6 +6009,11 @@ impl App {
             Some(Overlay::BranchPicker(_)) => {
                 if let Some(Overlay::BranchPicker(picker)) = self.overlay.as_mut() {
                     picker.draw(frame);
+                }
+            }
+            Some(Overlay::AiSettings(_)) => {
+                if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
+                    page.draw(frame);
                 }
             }
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
@@ -7480,7 +7536,7 @@ fn no_repo_layout(area: Rect, merged: bool) -> [Rect; 2] {
     .areas(area)
 }
 
-/// Stage everything the repository has (nested-repo safe), then ask OpenCommit
+/// Stage everything the repository has (nested-repo safe), then ask the AI
 /// for a message describing the staged changes. Runs on a worker thread.
 fn ai_commit_outcome(git: &Git) -> AiOutcome {
     if let Err(error) = git.stage_under(git.root()) {

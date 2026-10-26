@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 
 use herdr_sidebar::actions::{self, MenuAction, MenuEntry};
+use herdr_sidebar::ai_settings::{self, AiPageAction, AiSettingsPage};
 use herdr_sidebar::branch_ui::{BranchPicker, FooterZones, PickerAction, draw_git_footer};
 use herdr_sidebar::content_search::{
     CONTENT_SEARCH_MATCH_LIMIT, ContentHit, SearchOptions, collect_content_hits,
@@ -270,6 +271,9 @@ enum PromptKind {
 /// delete confirmation. While one is open it owns keyboard and mouse input.
 enum Overlay {
     BranchPicker(BranchPicker),
+    /// The AI commit page (API URL / key / model, connection test), opened from
+    /// the Settings modal.
+    AiSettings(AiSettingsPage),
     Menu {
         /// Click position the popup anchors to.
         x: u16,
@@ -380,6 +384,8 @@ enum Setting {
     GitFooter,
     /// Ask before deleting a file or folder from the Explorer.
     ConfirmDelete,
+    /// Opens the AI commit page; the value is the configured model.
+    AiCommit,
     Folder,
 }
 
@@ -1408,6 +1414,7 @@ impl App {
             Some(
                 Overlay::Menu { .. }
                     | Overlay::BranchPicker(_)
+                    | Overlay::AiSettings(_)
                     | Overlay::Settings { .. }
                     | Overlay::ConfirmDelete { .. }
             )
@@ -1824,6 +1831,12 @@ impl App {
     }
 
     fn overlay_key(&mut self, key: KeyEvent) {
+        // The AI page owns its keys outright: route them before the Settings
+        // rows (which read ai.json) are built for every keystroke.
+        if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
+            let action = page.key(key);
+            return self.ai_page_done(action);
+        }
         enum Cmd {
             Nothing,
             Close,
@@ -1888,6 +1901,8 @@ impl App {
                 _ => Cmd::Nothing,
             },
             Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.key(key)),
+            // Routed to the page before this match (see the early return above).
+            Some(Overlay::AiSettings(_)) => Cmd::Nothing,
             Some(Overlay::Menu {
                 entries, selected, ..
             }) => match key.code {
@@ -2150,6 +2165,10 @@ impl App {
     }
 
     fn overlay_mouse(&mut self, mouse: MouseEvent) {
+        if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
+            let action = page.mouse(mouse);
+            return self.ai_page_done(action);
+        }
         // A left-click on the delete confirm's buttons is the same key as the
         // keyboard: Yes is `y`, No is Esc (any other key cancels too). Clicks
         // anywhere else do nothing.
@@ -2374,6 +2393,30 @@ impl App {
     }
 
     // ---- Settings modal ----
+
+    /// Applies what the AI page asked for: Back returns to the Settings modal
+    /// with the AI commit row selected, Close dismisses everything.
+    fn ai_page_done(&mut self, action: AiPageAction) {
+        match action {
+            AiPageAction::None => {}
+            AiPageAction::Close => self.overlay = None,
+            AiPageAction::Back => self.reopen_settings_on(Setting::AiCommit),
+        }
+    }
+
+    /// Reopens the Settings modal with `setting` selected.
+    fn reopen_settings_on(&mut self, setting: Setting) {
+        let selected = self
+            .settings_rows()
+            .iter()
+            .position(|row| row.0 == setting)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::Settings {
+            selected,
+            rect: Rect::default(),
+            scroll: 0,
+        });
+    }
 
     fn open_settings(&mut self) {
         herdr_sidebar::updates::check();
@@ -3037,6 +3080,12 @@ impl App {
                 true,
             ),
             (
+                Setting::AiCommit,
+                "AI commit…",
+                ai_settings::model_value(),
+                true,
+            ),
+            (
                 Setting::Folder,
                 "Change folder…",
                 self.tree.root_name(),
@@ -3146,6 +3195,9 @@ impl App {
             Setting::ConfirmDelete => {
                 self.sidebar_state =
                     sidebar::update_state(|state| state.confirm_delete = !state.confirm_delete);
+            }
+            Setting::AiCommit => {
+                self.overlay = Some(Overlay::AiSettings(AiSettingsPage::open()));
             }
             Setting::Folder => {
                 self.overlay = None;
@@ -4027,6 +4079,11 @@ impl App {
             Some(Overlay::BranchPicker(_)) => {
                 if let Some(Overlay::BranchPicker(picker)) = self.overlay.as_mut() {
                     picker.draw(frame);
+                }
+            }
+            Some(Overlay::AiSettings(_)) => {
+                if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
+                    page.draw(frame);
                 }
             }
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),

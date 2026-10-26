@@ -344,7 +344,7 @@ impl Git {
     }
 
     /// Whether anything is in the index. Used before an AI commit so an empty
-    /// index reports "nothing to commit" instead of asking OpenCommit.
+    /// index reports "nothing to commit" instead of asking the AI.
     pub fn has_staged(&self) -> Result<bool, String> {
         let out = run_in(&self.root, &["diff", "--cached", "--name-only"])?;
         Ok(!out.trim().is_empty())

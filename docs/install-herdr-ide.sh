@@ -5,14 +5,14 @@
 #   docs/install-herdr-ide.sh --no-lsp        skip the language servers (passed to dotfiles)
 #   docs/install-herdr-ide.sh --no-packages   skip apt (passed to dotfiles)
 #   docs/install-herdr-ide.sh --no-claude     skip the Claude Code hook (passed to dotfiles)
-#   docs/install-herdr-ide.sh --no-oco        skip OpenCommit (oco) for the AI commit key
 #   docs/install-herdr-ide.sh --dry-run       print what dotfiles/install.sh would do, then stop
 #   docs/install-herdr-ide.sh -h|--help       this text
 #
 # Ends with dotfiles/verify.sh: the run only succeeds if the machine really matches
 # the repo afterwards (links, tools, plugins, integrations, keymap scripts).
 #
-# --lsp is still accepted as a no-op (language servers are the default).
+# --lsp and --no-oco are still accepted as no-ops (language servers are the default;
+# the AI commit now calls the API set in the sidebar's ⚙ Settings → AI commit).
 #
 # On Windows run docs/install-herdr-ide.ps1 instead: it sets up the HOST (Windows
 # Terminal, Nerd Font, the herdr launcher, the two keybinding unbinds) and then
@@ -24,16 +24,16 @@ set -euo pipefail
 BIN="$HOME/.local/bin"
 export PATH="$BIN:$PATH"
 
-with_oco=1 with_lsp=1 dry_run=0
+with_lsp=1 dry_run=0
 passthrough=()
 while [ $# -gt 0 ]; do
   case $1 in
     --no-packages|--no-claude) passthrough+=("$1") ;;
     --no-lsp) passthrough+=("$1"); with_lsp=0 ;;
     --lsp) ;;
-    --no-oco) with_oco=0 ;;
+    --no-oco) ;;
     --dry-run) passthrough+=("$1"); dry_run=1 ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -87,25 +87,7 @@ if [ "$dry_run" = 1 ]; then
   exit 0
 fi
 
-# ── 3. OpenCommit (oco) for the Ctrl+Shift+A AI commit ─────────────────
-if [ "$with_oco" = 1 ]; then
-  step "OpenCommit (oco)"
-  if command -v oco >/dev/null; then
-    info "oco present"
-  else
-    if ! command -v npm >/dev/null; then
-      sudo apt-get install -y -qq nodejs npm
-    fi
-    # The global npm prefix is root-owned, hence the user prefix.
-    npm install -g --prefix "$HOME/.local" opencommit
-  fi
-  info "oco version: $(oco --version 2>/dev/null || echo unknown)"
-else
-  step "OpenCommit (oco)"
-  info "skipped (--no-oco)"
-fi
-
-# ── 4. Verify (report only; never aborts) ──────────────────────────────
+# ── 3. Verify (report only; never aborts) ──────────────────────────────
 step "verify"
 actions=$(herdr plugin action list 2>/dev/null || true)
 for a in git-commit-ai git-pull git-push file-search search-popup symbol-popup replace-popup git-switch-branch restart-fresh; do
@@ -179,21 +161,6 @@ else
   bad "rustc ${have:-missing} is too old or missing (needs >= ${need:-?}; dotfiles/herdr-sidebar/build.sh installs a rustup toolchain)"
 fi
 
-if [ "$with_oco" = 1 ]; then
-  if command -v node >/dev/null 2>&1; then
-    ok "node present (oco's hook mode needs it)"
-  else
-    bad "node missing (oco's hook mode needs it; sudo apt install nodejs)"
-  fi
-  # Read only the provider line; the API key is never printed.
-  provider=$(sed -n 's/^OCO_AI_PROVIDER=//p' "$HOME/.opencommit" 2>/dev/null | tail -n1 || true)
-  if [ -n "$provider" ] && [ "$provider" != undefined ]; then
-    ok "oco has an AI provider configured"
-  else
-    bad "oco has no AI provider (run oco setup)"
-  fi
-fi
-
 # CodeBuddy is not a herdr integration target, so its agent state comes from its
 # own hooks (dotfiles/config/codebuddy/hooks/herdr-agent-state.sh, merged into
 # ~/.codebuddy/settings.json by install.sh).
@@ -243,9 +210,9 @@ if ! "$DOTFILES/verify.sh"; then
   die "this machine is still out of sync (see the failures above); rerun after fixing them"
 fi
 
-# ── 5. Next steps ──────────────────────────────────────────────────────
+# ── 4. Next steps ──────────────────────────────────────────────────────
 step "next steps"
-[ "$with_oco" = 1 ] && info "1. oco setup   (once: choose the AI provider and key for the AI commit)"
+info "1. AI commit: in a sidebar press s → AI commit… and enter an OpenAI-compatible API URL, key and model"
 info "2. Restart Fresh so plugins and keys load (graceful: unsaved buffers come back):"
 info "     $DOTFILES/herdr-plugins/ide/bin/fresh-restart --all"
 info "3. Windows Terminal binds Ctrl+Shift+A to 'Select all' and Ctrl+Tab to 'next tab' by"

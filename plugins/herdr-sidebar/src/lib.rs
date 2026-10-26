@@ -6,7 +6,10 @@
 pub mod actions;
 pub mod agent_notify;
 pub mod agent_tokens;
+pub mod ai_client;
 pub mod ai_commit;
+pub mod ai_config;
+pub mod ai_settings;
 pub mod ansi;
 pub mod branch_ui;
 pub mod content_search;

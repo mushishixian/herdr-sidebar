@@ -2,7 +2,7 @@
 # install.sh — rebuild the herdr + Fresh terminal IDE inside WSL (Ubuntu).
 #
 # Lives in the herdr-sidebar repo under dotfiles/. Normally run by
-# docs/install-herdr-ide.sh (which adds OpenCommit and a verify report).
+# docs/install-herdr-ide.sh (which adds a verify report).
 #
 #   ./install.sh               packages, herdr, Fresh, configs, plugins, language servers
 #   ./install.sh --no-lsp      skip the language servers (dotfiles/install-lsp.sh)

@@ -38,7 +38,7 @@ Pressing Ctrl+` again on the Terminal parks it.
 | Fresh config | `dotfiles/config/fresh/config.json` → `~/.config/fresh/config.json` | symlink |
 | Fresh plugins | `dotfiles/config/fresh/plugins/*.ts` → `~/.config/fresh/plugins/` | one symlink per file |
 | Sidebar settings | `~/.local/state/herdr/plugins/herdr-sidebar/state.json` | seeded from `dotfiles/herdr-sidebar/state.json` |
-| OpenCommit | `~/.local/bin/oco` (`npm install -g --prefix ~/.local opencommit`) | npm CLI |
+| AI commit provider | `~/.local/state/herdr/plugins/herdr-sidebar/ai.json` (0600) | set in the sidebar: ⚙ Settings → AI commit… |
 | One-shot installer | `docs/install-herdr-ide.sh` (this folder) | wraps all of the above |
 
 ### Repository layout
@@ -70,7 +70,7 @@ repo to fetch.
 ```bash
 git clone https://github.com/mushishixian/herdr-siderbar.git ~/code/herdr-sidebar
 cd ~/code/herdr-sidebar
-docs/install-herdr-ide.sh            # --help for options (--no-lsp, --no-packages, --no-claude, --no-oco, --dry-run)
+docs/install-herdr-ide.sh            # --help for options (--no-lsp, --no-packages, --no-claude, --dry-run)
 ```
 
 `--dry-run` prints the whole plan (links, tools, plugins, integrations) and stops; the installer
@@ -155,13 +155,13 @@ What it does, in order:
    `build.sh` uses the first Rust toolchain at least as new as the crate's `rust-version`: the
    `rustc` on PATH, else an existing `~/.cargo/bin` (rustup), else it installs rustup into your
    home directory, non-interactively.
-3. Installs OpenCommit into `~/.local`.
-4. Verifies the actions, Fresh plugins and keys are visible, that the `herdr-sidebar`
+3. Verifies the actions, Fresh plugins and keys are visible, that the `herdr-sidebar`
    and `dotfiles-ide` registrations both point into this repo, then reloads herdr.
 
 Afterwards, once:
 
-- `oco setup`: choose the AI provider and key for the AI-commit key.
+- AI commit: in a sidebar press `s` → **AI commit…** and enter an OpenAI-compatible API URL
+  (e.g. `https://api.deepseek.com/v1`), the API key and the model, then **Test connection**.
 - Restart running Fresh so new plugins/keys load: `dotfiles/herdr-plugins/ide/bin/fresh-restart --all`
   from the repo root (see *Updating*).
 - Windows Terminal (and Pebrel): remove its default **Ctrl+Shift+A → Select all** and **Ctrl+Tab → next tab**
@@ -206,7 +206,7 @@ moves the copy aside.
 | `ctrl+alt+p` | Git: pull (background, progress toasts) |
 | `ctrl+alt+k` | Git: push (background, progress toasts) |
 | `ctrl+alt+z` | Git: undo last commit (`reset --soft HEAD~1`, changes stay staged; no confirm, the toast names the hash to redo it) |
-| `ctrl+shift+a` | Git: stage all + OpenCommit message into Source Control, then commit |
+| `ctrl+shift+a` | Git: stage all + AI message (⚙ Settings → AI commit) into Source Control, then commit |
 | `ctrl+alt+shift+f` | Git: force reset + clean (`scripts/force-reset.sh`, extra y/N prompt) |
 | `alt+w`, `ctrl+alt+h` | lazygit (whole UI / the log panel) as popups |
 | `ctrl+alt+v` | File viewer pane (`herdr-file-viewer`; `e` opens the file in Fresh) |
@@ -689,30 +689,33 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | *uncommitted* | **First tab wears the branch** | herdr's generated first tab is renamed to the checked-out branch instead of a fixed `main`: `Git::branch_label_at` reads the git dir's `HEAD` (worktree `.git` FILE resolved, no git process; detached HEAD → short hash), and `src/tab_title.rs` re-checks it on the existing 5 s heartbeat, elected once per session, so a checkout / branch rename / `git switch` in a terminal lands in the tab bar within one beat. It only replaces its own labels (generated number, `main`, the branch it applied before); a tab a human named is never touched. Creation (`ensure::label_first_tab`) labels immediately from the new tab's pane cwd; non-repositories keep `main`. |
 | *uncommitted* | **Nothing staged → the button pulls** | With an empty index, Sync Changes (`S`/⇅) was the only way to pull and ✓ Commit could only answer "no staged changes", so a behind branch stayed unpulled unless you found the secondary row. `sync_is_primary` now requires only an empty index — unstaged edits do not change what a commit would contain — so the button becomes `⟳ Sync Changes N↓` (pull then push), the Sync row below it hides, and the footer's `⟳` count turns accent-colored while behind > 0 (both the sidebar and the Explorer footer). `git status` only knows the LAST fetched upstream tip, so a focused Source Control pane now also runs a quiet `Git::fetch` (`fetch --quiet`, `GIT_TERMINAL_PROMPT=0`, null stdin) on a worker every 60 s (`FETCH_EVERY`) for the repos that track an upstream; `poll_fetch` makes the next tick re-read status. A failed fetch is silent and is not retried until the next window. |
 | *uncommitted* | **A rule separates Find from Replace** | The two inputs sat directly on top of each other and read as one block; a full blank line then looked as tall as a whole field, and a half-block `▀` bar looked like a rendering glitch (all user-reported). The spacer row now draws a dim solid `─` rule at the width of the inputs, so there is a visible separator without blank space; the Replace row, status, divider and list keep their one-row offset, and the rule row is not a click target. |
+| *uncommitted* | **AI commit without OpenCommit** | `ctrl+shift+a` and the ✧ button now call an OpenAI-compatible chat-completions API directly (`src/ai_client.rs`, through `curl` with the key on stdin, never in argv). The provider is entered in the sidebar itself: `s` → **AI commit…** opens a page with API URL, API key (shown masked), Model and Test connection (`src/ai_settings.rs`, in both views' Settings), saved to `<state dir>/ai.json` with mode 0600. The curated diff is unchanged; lock files and images are left out, and a lockfile-only change sends the `--stat` summary. The installer no longer installs `oco`/Node for this, and `verify.sh` no longer checks `~/.opencommit`. |
 
 **AI commit** (`ctrl+shift+a`): the action does not commit. It writes a per-tab
 request (`src/ai_commit.rs`, under the sidebar's private runtime dir) for the focused
 pane's repo and activates that tab's Source Control view — **without moving your focus**: the pane
 that had it gets it back right after the activation (unless you switched panes in the meantime), so
 the AI commit runs while you keep typing in the editor or the agent pane. The Source Control sidebar
-then stages everything (`stage_under`, nested-repo safe), asks OpenCommit for a message
+then stages everything (`stage_under`, nested-repo safe), asks the configured AI for a message
 and puts it in the Message box, then commits through the same path as the ✓ Commit
 button about 0.9 s later. Nothing staged → toast "Nothing to commit".
 
-The message comes from oco's `prepare-commit-msg` hook mode: a private temp dir holds a
-`hooks/prepare-commit-msg` SYMLINK to oco's `cli.cjs` (it must be a symlink, since oco
-loads `tiktoken_bg.wasm` next to itself), and `GIT_CONFIG_COUNT`/`core.hooksPath` points
-git there. oco treats itself as the hook, writes the message into the file it is given
-and never commits. It runs with `OCO_GITPUSH=false`, `NO_COLOR=1`, null stdin, and a 120 s
-timeout. An unconfigured oco reports `ERR_TTY_INIT_FAILED` (shown as "run `oco setup`").
-On failure the changes stay staged and the message box is left alone.
+The message comes straight from an **OpenAI-compatible chat-completions API** (`src/ai_client.rs`);
+there is no OpenCommit/Node dependency any more. Set it in any sidebar: `s` → **AI commit…** →
+API URL (a base URL such as `https://api.deepseek.com/v1`, or the full `…/chat/completions`
+endpoint; empty means OpenAI), API key, Model, and **Test connection**. They are stored in
+`<state dir>/ai.json`, owner-only (0600), never in `state.json`. A **Thinking** row (between Model and
+Test connection, default **off**) sets the reasoning level sent to the model: off, low, medium or high.
+The request goes through `curl`
+with the key fed on stdin (`-K -`), so it never shows in `ps`; a reply wrapped as
+`{"data":{"choices":…}}` (Cline-style gateways) and `<think>` blocks from reasoning models are
+handled. Timeout 120 s. Not configured, or the API fails → a toast says why, the changes stay
+staged and the message box is left alone. The ✧ button uses the same API when it is configured
+(and the local `claude` CLI otherwise).
 
 Big or generated files are shortened for the AI only: the first 40 lines of a new file, or the
 first hunks of a changed one, and generated/vendored paths (`*.min.js`, `*.map`, `dist/`, …) or
-anything over about 12 KB. The commit still contains every change. The sidebar also sends oco BOTH
-token ceilings whatever `~/.opencommit` says — `OCO_TOKENS_MAX_INPUT=24000` so oco never splits
-the diff into several messages, and `OCO_TOKENS_MAX_OUTPUT=500` (oco's own default) because oco
-subtracts the output ceiling from that input budget.
+anything over about 12 KB; lock files are left out. The commit still contains every change.
 When a file was shortened the flash says how many ("N large file(s)
 summarised for the AI").
 
@@ -993,7 +996,7 @@ Two things break that loop, both worth knowing:
 | Fresh burns CPU while unfocused, a daemon sits at 15-25 % | `ps -eo pid,pcpu,args \| grep 'fresh-editor/fresh --server'`, then sample `/proc/<pid>/stat` twice for the live number. Two known causes: a plugin recursing into its own command (*Gotchas*), and a stray daemon with no pane attached — `fresh --cmd daemon list`, `fresh --cmd daemon kill <name>`. Baseline is ~2-3 % per editor daemon (plugins + LSP + timers). `tail -200 ~/.local/state/fresh/logs/fresh-server-<pid>.log` names the looping handler |
 | An LSP key does nothing | `alt+shift+q` / `alt+shift+w` / `alt+o` need a trusted workspace and a running server (status bar `LSP (on)`; `F12` works too). If `alt+w` opened lazygit, herdr still owns it — `herdr server reload-config`, then compare `dotfiles/config/herdr/config.toml` |
 | `ctrl+shift+a` does nothing | Windows Terminal's Select-all binding; `herdr plugin action invoke herdr-sidebar.git-commit-ai` to test without the key |
-| "OpenCommit is not configured" toast | run `oco setup` |
+| "AI commit is not set up" toast | `s` in a sidebar → **AI commit…**: enter API URL, key and model, then **Test connection** |
 | Agent pane title stays "Agent" | the pane's shell must be zsh with the hook sourced (`. …/shell/agent-title.zsh`, or rebuild with `ctrl+b i`); check the title with `herdr pane list \| jq '.result.panes[] \| select(.label=="Agent") \| .title'` |
 | Spaces rail shows a space's agent idle while it is working | `herdr integration status`: the agent needs its hook (`herdr integration install pi`). An agent STARTED BEFORE the install must be **restarted** — `/reload` is not enough (verified: the hook only arms itself on `session_start`, which a reload does not re-emit) |
 | "No Agent pane in this tab" | the tab has no pane labelled `Agent`; run `ctrl+b i` |
@@ -1005,8 +1008,8 @@ Two things break that loop, both worth knowing:
 | `ctrl+alt+q` does nothing at all | two live-verified causes, in order: (1) a popup from an earlier attempt is still running — herdr reuses one popup per entrypoint, so the key silently starts nothing (`pkill -f -- "--symbol[-]popup"`, note the bracket or the pattern kills the shell typing it); (2) herdr is not reading the config you edited — `ls -la ~/.config/herdr/config.toml` must point at the file containing the binding (`herdr server reload-config` reports `applied` either way), and `herdr config check` should say `ok` |
 | A picture opens as garbage in Fresh | pictures open in the sidebar preview since the media-routing change; rebuild and redeploy the sidebar (`dotfiles/herdr-sidebar/build.sh`) if an old build is still running. The explicit "Open in Editor" menu item still sends it to Fresh |
 | A file opens in another workspace's Fresh | fixed: `fresh-open` only uses this workspace's editor; check the Fresh pane's `fresh_daemon` token with `herdr pane list` |
-| AI commit is slow or writes several messages | Update the sidebar (`dotfiles/herdr-sidebar/build.sh`) so the curated diff is used; lower `OCO_TOKENS_MAX_INPUT` in `~/.opencommit` too for manual `oco` runs (the sidebar already passes 24000) |
-| `ctrl+shift+a` message never appears in the box | the tab needs a sidebar (its Source Control view takes the request); the request expires after 30 s; `oco setup` |
+| AI commit is slow | the whole curated diff goes in ONE request; a slow model/gateway is the usual cause — pick a faster model in ⚙ Settings → AI commit |
+| `ctrl+shift+a` message never appears in the box | the tab needs a sidebar (its Source Control view takes the request); the request expires after 30 s; ⚙ Settings → AI commit must be filled in |
 | A `*.log` tab opens when I open a file | That language's server is missing and `lsp` auto-starts it: `dotfiles/install-lsp.sh --only <language>` (markdown, go, rust, dart, php, js, python), then `fresh-restart --all` |
 | Status bar says `Restricted` / `LSP (off)` | the workspace is not trusted: Fresh never starts servers there. `Ctrl+P` → "Trust This Folder" |
 | `LSP (rust)`: "outdated toolchain version" | the downloaded rust-analyzer is newer than your `rustc` supports: `dotfiles/install-lsp.sh --update --only rust` picks the release that matches |

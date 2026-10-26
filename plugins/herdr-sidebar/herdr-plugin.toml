@@ -198,14 +198,14 @@ command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--git-push"]
 id = "git-commit-ai"
 platforms = ["linux", "macos"]
 title = "Git: AI Commit"
-description = "Open Source Control, stage all changes, put an OpenCommit message in the Message box and commit it."
+description = "Open Source Control, stage all changes, put an AI message (⚙ Settings → AI commit) in the Message box and commit it."
 command = ["./target/release/herdr-sidebar", "--git-commit"]
 
 [[actions]]
 id = "git-commit-ai-windows"
 platforms = ["windows"]
 title = "Git: AI Commit"
-description = "Open Source Control, stage all changes, put an OpenCommit message in the Message box and commit it."
+description = "Open Source Control, stage all changes, put an AI message (⚙ Settings → AI commit) in the Message box and commit it."
 command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--git-commit"]
 
 [[actions]]

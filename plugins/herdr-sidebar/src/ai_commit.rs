@@ -4,68 +4,47 @@
 //! The action process does not commit anything. It writes a per-tab request
 //! file (`<rundir>/ai_commit/tab-<tab>.req`) and activates the tab's Source
 //! Control view. The sidebar TUI claims the request, stages the repository,
-//! asks OpenCommit for a message, fills the Message box and then commits it
-//! through the ordinary ✓ Commit path after a short review window.
-//!
-//! Message generation uses OpenCommit's `prepare-commit-msg` hook mode. oco
-//! treats itself as the hook when `process.argv[1]` equals
-//! `<git hooks path>/prepare-commit-msg`, writes the message into the file it
-//! is given and never commits. The hooks path is pointed at a private temp
-//! directory through `GIT_CONFIG_*` env. The hook must be a SYMLINK to the real
-//! `cli.cjs`, because oco loads `tiktoken_bg.wasm` from next to itself.
+//! builds a curated copy of the staged diff, asks the AI for a message through
+//! the OpenAI-compatible endpoint saved in `ai.json` (see [`crate::ai_client`]),
+//! fills the Message box and then commits it through the ordinary ✓ Commit path
+//! after a short review window.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::git_action::summarize_oco_failure;
+use crate::ai_config::AiConfig;
 
 /// A request older than this is discarded instead of committing something the
 /// user no longer expects.
 const REQUEST_MAX_AGE_SECS: u64 = 30;
 
-/// How long OpenCommit may run before it is killed.
-const OCO_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long the model may take to answer before the request is abandoned.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Patch bytes one file may contribute before the AI sees a shortened version.
-/// Bigger files push oco past its token limit, which makes it chunk the diff
-/// and ask the model once per chunk (several messages joined together).
+/// A huge file would crowd out the rest of the change in the request.
 const PER_FILE_BYTES: usize = 12 * 1024;
 
 /// Patch bytes across all files the AI sees; the largest files are shortened
-/// until the total fits. Keeps the whole diff well under `MAX_INPUT_TOKENS`.
+/// until the total fits.
 const TOTAL_BYTES: usize = 48 * 1024;
 
 /// Lines kept from the start of a shortened new file (and of a modified file
 /// whose patch cannot be cut down to whole hunks).
 const KEEP_LINES: usize = 40;
 
-/// Token ceiling passed to oco as `OCO_TOKENS_MAX_INPUT`. Environment wins
-/// over `~/.opencommit`. It sits well above the token count of `TOTAL_BYTES`,
-/// so oco never takes its chunk-and-join path.
-const MAX_INPUT_TOKENS: u32 = 24_000;
+/// Most diff text sent to the model, in bytes. The rest is cut off with a
+/// marker saying so.
+const MAX_DIFF_BYTES: usize = 64 * 1024;
 
-/// Token ceiling for oco's ANSWER (`OCO_TOKENS_MAX_OUTPUT`), also pinned over
-/// `~/.opencommit` and set to oco's own default. It is not only the message
-/// budget: oco SUBTRACTS it from the input ceiling when it decides how much
-/// diff it may send, so a machine whose config asks for a big output limit
-/// silently gets a smaller diff budget — i.e. the chunk-and-join path, one
-/// message per chunk — and oco rejects values "much higher" than this default.
-const MAX_OUTPUT_TOKENS: u32 = 500;
-
-/// Path substrings oco drops from the diff itself. Files matching these never
-/// reach the model, so they cost nothing against the budgets.
-const OCO_EXCLUDED: &[&str] = &[
+/// Path substrings left out of the diff the AI reads. Files matching these
+/// never reach the model, so they cost nothing against the budgets.
+const EXCLUDED: &[&str] = &[
     ".lock", "-lock.", ".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif",
 ];
-
-const OPEN_COMMIT_MARKER: &str = "# ---------- [OpenCommit]";
-const FAILED_HEADER: &str = "# Failed to generate the commit message";
-const CANCEL_LINE: &str = "# To cancel";
-const INSTALL_HINT: &str =
-    "OpenCommit (oco) not found on PATH. Install it with: npm install -g opencommit";
 
 /// Map a tab id onto a file-name-safe token.
 fn sanitize(tab_id: &str) -> String {
@@ -146,7 +125,13 @@ pub struct Generated {
 /// Generate a commit message for the STAGED changes in `root` without
 /// committing. Err carries a one-line, user-facing reason.
 pub fn generate(root: &Path) -> Result<Generated, String> {
-    let cli = oco_cli_script()?;
+    let config = crate::ai_config::load();
+    if !config.is_configured() {
+        return Err(
+            "AI commit is not set up: open ⚙ Settings → AI commit and enter an API key and model."
+                .to_string(),
+        );
+    }
     let base = crate::rundir::dir("ai_commit");
     crate::rundir::ensure_private(&base).map_err(|e| format!("ai_commit directory: {e}"))?;
     let nanos = SystemTime::now()
@@ -155,162 +140,76 @@ pub fn generate(root: &Path) -> Result<Generated, String> {
         .unwrap_or(0);
     let work = base.join(format!("gen-{}-{nanos}", std::process::id()));
     std::fs::create_dir(&work).map_err(|e| format!("ai_commit temp directory: {e}"))?;
-    let result = run_curated(&work, &cli, root);
+    let result = run_curated(&work, &config, root);
     let _ = std::fs::remove_dir_all(&work);
     result
 }
 
-fn run_curated(work: &Path, cli: &Path, root: &Path) -> Result<Generated, String> {
+fn run_curated(work: &Path, config: &AiConfig, root: &Path) -> Result<Generated, String> {
     let curated = curate(root, work);
-    let message = run_hook(work, cli, root, curated.index.as_deref())?;
+    let mut diff = staged_diff(root, curated.index.as_deref())?;
+    if diff.trim().is_empty() {
+        // Everything staged is excluded (a lock file bump, images): the file
+        // list is still worth describing.
+        let stat = git(
+            root,
+            None,
+            &["diff", "--cached", "--no-ext-diff", "--no-color", "--stat"],
+            None,
+        )?;
+        diff = String::from_utf8_lossy(&stat).into_owned();
+    }
+    if diff.trim().is_empty() {
+        return Err("no staged changes to describe".to_string());
+    }
+    let message = crate::ai_client::commit_message(
+        config,
+        &cap_diff(&diff, MAX_DIFF_BYTES),
+        REQUEST_TIMEOUT,
+    )?;
     Ok(Generated {
         message,
         summarised: curated.notes,
     })
 }
 
-fn run_hook(work: &Path, cli: &Path, root: &Path, index: Option<&Path>) -> Result<String, String> {
-    let hooks = work.join("hooks");
-    std::fs::create_dir(&hooks).map_err(|e| format!("ai_commit hooks directory: {e}"))?;
-    let hook = hooks.join("prepare-commit-msg");
-    link_script(cli, &hook)?;
-    let msg = work.join("msg");
-    std::fs::write(&msg, "").map_err(|e| format!("ai_commit message file: {e}"))?;
-
-    let mut cmd = Command::new("node");
-    if let Some(index) = index {
-        // The curated index (see `curate`); oco's `git diff` reads it.
-        cmd.env("GIT_INDEX_FILE", index);
-    }
-    cmd.arg(&hook)
-        .arg(&msg)
-        .current_dir(root)
-        .env("GIT_CONFIG_COUNT", "1")
-        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
-        .env("GIT_CONFIG_VALUE_0", &hooks)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (key, value) in pinned_oco_env() {
-        cmd.env(key, value);
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err("Node.js (node) not found on PATH; OpenCommit needs it.".to_string());
-        }
-        Err(e) => return Err(format!("could not start OpenCommit: {e}")),
-    };
-    let stdout_handle = child.stdout.take().map(drain);
-    let stderr_handle = child.stderr.take().map(drain);
-
-    let deadline = Instant::now() + OCO_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    // The readers are detached: a grandchild may still hold the pipes.
-                    return Err("OpenCommit timed out after 120s.".to_string());
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    }
-    let stdout = stdout_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-
-    let content = std::fs::read_to_string(&msg).unwrap_or_default();
-    match parse_hook_message(&content)? {
-        Some(message) => Ok(message),
-        None => {
-            let out = String::from_utf8_lossy(&stdout);
-            let err = String::from_utf8_lossy(&stderr);
-            if out.trim().is_empty() && err.trim().is_empty() {
-                Err("OpenCommit produced no message".to_string())
-            } else {
-                Err(summarize_oco_failure(&out, &err))
-            }
-        }
-    }
+/// The staged diff the AI reads, minus the lock and generated files named in
+/// [`EXCLUDED`]. `index` selects the curated index when there is one.
+fn staged_diff(root: &Path, index: Option<&Path>) -> Result<String, String> {
+    let specs: Vec<String> = EXCLUDED
+        .iter()
+        .map(|s| format!(":(exclude)*{s}*"))
+        .collect();
+    let mut args = vec![
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--cached",
+        "--no-ext-diff",
+        "--no-color",
+        "-M",
+        "--",
+        ".",
+    ];
+    args.extend(specs.iter().map(String::as_str));
+    let out = git(root, index, &args, None)?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// The oco knobs the sidebar pins, whatever `~/.opencommit` says. Both token
-/// ceilings are here on purpose: `OCO_TOKENS_MAX_INPUT` is what stops oco from
-/// chunking the diff, and `OCO_TOKENS_MAX_OUTPUT` is subtracted from that
-/// budget, so a machine asking for a big output limit would shrink it right
-/// back. Everything else (provider, model, language, emoji, description) stays
-/// the user's configuration.
-fn pinned_oco_env() -> Vec<(&'static str, String)> {
-    vec![
-        ("OCO_GITPUSH", "false".to_string()),
-        ("OCO_TOKENS_MAX_INPUT", MAX_INPUT_TOKENS.to_string()),
-        ("OCO_TOKENS_MAX_OUTPUT", MAX_OUTPUT_TOKENS.to_string()),
-        ("NO_COLOR", "1".to_string()),
-        ("FORCE_COLOR", "0".to_string()),
-        ("GIT_TERMINAL_PROMPT", "0".to_string()),
-    ]
+/// `text` cut to at most `max` bytes on a character boundary, with a marker
+/// when anything was cut.
+fn cap_diff(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[diff truncated]", &text[..end])
 }
 
-/// Read what oco wrote into the hook's message file.
-///
-/// Commented output is `# <message>` followed by the OpenCommit banner; the
-/// uncommented form has the message and no banner. A failure carries the
-/// `Failed to generate` header, with the error text in the lines after the
-/// `To cancel` line. Empty output (nothing staged, or no API key) is `Ok(None)`.
-pub fn parse_hook_message(content: &str) -> Result<Option<String>, String> {
-    let lines: Vec<&str> = content.lines().collect();
-    let marker_at = lines.iter().position(|l| l.starts_with(OPEN_COMMIT_MARKER));
-    let (body, banner) = match marker_at {
-        Some(i) => (&lines[..i], &lines[i..]),
-        None => (&lines[..], &lines[lines.len()..]),
-    };
-
-    if banner.iter().any(|l| l.starts_with(FAILED_HEADER)) {
-        let after_cancel = banner
-            .iter()
-            .position(|l| l.starts_with(CANCEL_LINE))
-            .map(|i| &banner[i + 1..])
-            .unwrap_or(&[]);
-        let errors: Vec<&str> = after_cancel
-            .iter()
-            .filter_map(|l| l.strip_prefix('#'))
-            .map(|s| s.strip_prefix(' ').unwrap_or(s).trim())
-            .filter(|s| !s.is_empty())
-            .collect();
-        return Err(if errors.is_empty() {
-            "Failed to generate the commit message".to_string()
-        } else {
-            errors.join(" ")
-        });
-    }
-
-    let mut text: Vec<String> = body.iter().map(|l| l.to_string()).collect();
-    if let Some(first) = text.iter_mut().find(|l| !l.trim().is_empty())
-        && let Some(rest) = first.strip_prefix("# ")
-    {
-        *first = rest.to_string();
-    }
-    let joined = text.join("\n");
-    let trimmed = joined.trim();
-    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
-}
-
-/// What oco should read instead of the real index.
+/// What the AI should read instead of the real index.
 struct Curated {
     /// Temp index under the work dir, or `None` to read the real index.
     index: Option<PathBuf>,
@@ -407,7 +306,7 @@ fn curate_index(root: &Path, work: &Path) -> Result<Curated, String> {
         shrunk.push(Shrunk { file: i, shortened });
     }
 
-    // oco must never see an empty diff: the message would be a guess.
+    // The AI must never see an empty diff: the message would be a guess.
     if !has_diff(root, &temp)? {
         let pick = shrunk
             .iter()
@@ -743,8 +642,8 @@ fn path_from_git_line(rest: &str) -> Option<String> {
     None
 }
 
-fn oco_excluded(path: &str) -> bool {
-    OCO_EXCLUDED.iter().any(|s| path.contains(s))
+fn excluded(path: &str) -> bool {
+    EXCLUDED.iter().any(|s| path.contains(s))
 }
 
 /// Paths that are generated or vendored, whatever their size.
@@ -758,10 +657,10 @@ fn is_generated(path: &str) -> bool {
 }
 
 /// Indices (ascending) of the files to shorten for the AI. Binary and
-/// unparsable files are never shortened, and oco-excluded files are ignored.
+/// unparsable files are never shortened, and excluded files are ignored.
 fn choose_shrinks(files: &[FilePatch]) -> Vec<usize> {
     let candidates: Vec<usize> = (0..files.len())
-        .filter(|&i| !oco_excluded(&files[i].path))
+        .filter(|&i| !excluded(&files[i].path))
         .collect();
     let shrinkable = |i: usize| !files[i].binary && !files[i].unparsable;
 
@@ -841,163 +740,9 @@ fn shorten_blob(content: &[u8], keep: usize, max_bytes: usize) -> Vec<u8> {
     out
 }
 
-fn drain<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = reader.read_to_end(&mut buf);
-        buf
-    })
-}
-
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
-}
-
-/// The `cli.cjs` behind the `oco` on PATH (npm's symlink resolves to it).
-#[cfg(not(windows))]
-fn oco_cli_script() -> Result<PathBuf, String> {
-    let oco = find_on_path("oco").ok_or_else(|| INSTALL_HINT.to_string())?;
-    let real = std::fs::canonicalize(&oco)
-        .map_err(|e| format!("could not resolve {}: {e}", oco.display()))?;
-    match real.extension().and_then(|e| e.to_str()) {
-        Some("cjs" | "js") => Ok(real),
-        _ => Err(format!(
-            "unsupported OpenCommit install: {} (expected an npm install with a .cjs/.js CLI)",
-            real.display()
-        )),
-    }
-}
-
-/// npm installs `oco.cmd` next to `node_modules`. Best effort, untested live.
-#[cfg(windows)]
-fn oco_cli_script() -> Result<PathBuf, String> {
-    let shim = find_on_path("oco.cmd").ok_or_else(|| INSTALL_HINT.to_string())?;
-    let cli = shim
-        .parent()
-        .unwrap_or(Path::new(""))
-        .join("node_modules")
-        .join("opencommit")
-        .join("out")
-        .join("cli.cjs");
-    if cli.is_file() {
-        Ok(cli)
-    } else {
-        Err(format!(
-            "unsupported OpenCommit install: {} not found next to {}",
-            cli.display(),
-            shim.display()
-        ))
-    }
-}
-
-#[cfg(unix)]
-fn link_script(target: &Path, link: &Path) -> Result<(), String> {
-    std::os::unix::fs::symlink(target, link)
-        .map_err(|e| format!("could not link the OpenCommit hook: {e}"))
-}
-
-#[cfg(windows)]
-fn link_script(target: &Path, link: &Path) -> Result<(), String> {
-    std::os::windows::fs::symlink_file(target, link).map_err(|e| {
-        format!(
-            "could not create a symlink for the OpenCommit hook (Windows needs developer mode or symlink permission): {e}"
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Both ceilings are pinned over `~/.opencommit`; the output one matters
-    /// because oco subtracts it from the input budget, so an un-pinned value
-    /// re-opens the chunk-and-join path on that machine only.
-    #[test]
-    fn both_token_ceilings_are_pinned_over_the_user_config() {
-        let env = pinned_oco_env();
-        let get = |key: &str| {
-            env.iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.as_str())
-        };
-        assert_eq!(get("OCO_TOKENS_MAX_INPUT"), Some("24000"));
-        assert_eq!(get("OCO_TOKENS_MAX_OUTPUT"), Some("500"));
-        assert_eq!(get("OCO_GITPUSH"), Some("false"));
-        // Nothing that is the user's own choice may be overridden.
-        for key in [
-            "OCO_AI_PROVIDER",
-            "OCO_MODEL",
-            "OCO_LANGUAGE",
-            "OCO_EMOJI",
-            "OCO_DESCRIPTION",
-        ] {
-            assert_eq!(get(key), None, "{key} must stay the user's");
-        }
-    }
-
-    #[test]
-    fn commented_single_line_message() {
-        let content = "# feat(x): add thing\n\n# ---------- [OpenCommit] ---------- #\n# Remove the # above to use the message\n# To cancel the commit, delete everything\n\n";
-        assert_eq!(
-            parse_hook_message(content),
-            Ok(Some("feat(x): add thing".to_string()))
-        );
-    }
-
-    #[test]
-    fn commented_message_keeps_body() {
-        let content = "# fix: handle empty input\nAdds a guard for empty input.\n\n# ---------- [OpenCommit] ---------- #\n# Remove the # above\n# To cancel the commit\n\n";
-        assert_eq!(
-            parse_hook_message(content),
-            Ok(Some(
-                "fix: handle empty input\nAdds a guard for empty input.".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn uncommented_message() {
-        let content = "feat(x): subject\n\nbody line\n\n";
-        assert_eq!(
-            parse_hook_message(content),
-            Ok(Some("feat(x): subject\n\nbody line".to_string()))
-        );
-    }
-
-    #[test]
-    fn failure_with_error_lines() {
-        let content = "\n\n# ---------- [OpenCommit] ---------- #\n# Failed to generate the commit message.\n# To cancel the commit, delete everything\n# 401 Incorrect API key provided\n# check your key\n";
-        assert_eq!(
-            parse_hook_message(content),
-            Err("401 Incorrect API key provided check your key".to_string())
-        );
-    }
-
-    #[test]
-    fn failure_without_error_lines() {
-        let content = "\n\n# ---------- [OpenCommit] ---------- #\n# Failed to generate the commit message.\n# To cancel the commit, delete everything\n";
-        assert_eq!(
-            parse_hook_message(content),
-            Err("Failed to generate the commit message".to_string())
-        );
-    }
-
-    #[test]
-    fn empty_output_is_none() {
-        assert_eq!(parse_hook_message(""), Ok(None));
-        assert_eq!(parse_hook_message("  \n\n"), Ok(None));
-    }
-
-    #[test]
-    fn no_marker_uses_whole_text() {
-        assert_eq!(
-            parse_hook_message("# docs: update readme\n"),
-            Ok(Some("docs: update readme".to_string()))
-        );
-    }
-
     #[test]
     fn request_round_trip_is_fresh() {
         let text = "/repo/one\n1000\n";
@@ -1169,7 +914,7 @@ diff --git "a/tab\there" "b/tab\there"
     }
 
     #[test]
-    fn choose_shrinks_ignores_oco_excluded_files() {
+    fn choose_shrinks_ignores_excluded_files() {
         let files = vec![
             fp("Cargo.lock", 1_000_000),
             fp("package-lock.json", 1_000_000),
@@ -1177,7 +922,7 @@ diff --git "a/tab\there" "b/tab\there"
             fp("icon.png", 1_000_000),
             fp("a.rs", 10 * 1024),
         ];
-        // The huge excluded files are invisible to oco and cost no budget.
+        // The huge excluded files are invisible to the AI and cost no budget.
         assert!(choose_shrinks(&files).is_empty());
     }
 
@@ -1248,10 +993,11 @@ diff --git "a/tab\there" "b/tab\there"
         );
     }
 
-    /// Calls the configured AI provider and must not commit. Run it by hand with
+    /// Calls the configured AI provider and must not commit. It needs `ai.json`
+    /// (⚙ Settings → AI commit) with a key and model. Run it by hand with
     /// `HS_AI_COMMIT_E2E_REPO=<repo with staged changes> cargo test -- --ignored e2e_generate`.
     #[test]
-    #[ignore = "calls the configured OpenCommit provider"]
+    #[ignore = "calls the configured AI provider"]
     fn e2e_generate_does_not_commit() {
         let repo = std::env::var("HS_AI_COMMIT_E2E_REPO").expect("set HS_AI_COMMIT_E2E_REPO");
         let root = PathBuf::from(repo);

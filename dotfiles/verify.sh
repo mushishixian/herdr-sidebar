@@ -227,16 +227,6 @@ if command -v codebuddy >/dev/null 2>&1 || [ -d "$HOME/.codebuddy" ]; then
   fi
 fi
 
-# oco is the AI-commit provider; its key is never printed, only whether one is set.
-if command -v oco >/dev/null 2>&1; then
-  provider=$(sed -n 's/^OCO_AI_PROVIDER=//p' "$HOME/.opencommit" 2>/dev/null | tail -n1 || true)
-  if [ -n "$provider" ] && [ "$provider" != undefined ]; then
-    pass "oco has an AI provider configured"
-  else
-    note "oco has no AI provider (run oco setup; the AI commit key will fail)"
-  fi
-fi
-
 group "result"
 printf '  %d ok, %d warning(s), %d failure(s)\n' "$ok" "$warn" "$fail"
 if [ "$fail" -ne 0 ]; then

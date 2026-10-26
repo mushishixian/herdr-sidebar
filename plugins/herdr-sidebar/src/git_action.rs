@@ -266,7 +266,7 @@ fn undo_commit(git: &Git, repo_name: &str, tip: &str) {
 }
 
 /// Hand the repository to this tab's Source Control sidebar: it stages, asks
-/// OpenCommit for a message, fills the Message box and commits it shortly after.
+/// the AI for a message, fills the Message box and commits it shortly after.
 fn request_ai_commit(git: &Git, repo_name: &str, tip: &str) {
     let title = format!("AI Commit [{repo_name}]");
     let fail_title = format!("AI Commit Failed [{repo_name}]");
@@ -385,30 +385,6 @@ pub fn strip_ansi(s: &str) -> String {
         }
     }
     out
-}
-
-/// Turn OpenCommit's output into one line for a toast.
-pub fn summarize_oco_failure(stdout: &str, stderr: &str) -> String {
-    let combined = format!("{stdout}\n{stderr}");
-    if combined.contains("Welcome to OpenCommit") || combined.contains("ERR_TTY_INIT_FAILED") {
-        return "OpenCommit is not configured. Run `oco setup` in a terminal to choose an AI provider. Changes are left staged.".to_string();
-    }
-    if combined.contains("No changes detected") {
-        return "Nothing to commit.".to_string();
-    }
-
-    let cleaned = strip_ansi(&combined);
-    let last = cleaned
-        .lines()
-        .map(|line| {
-            line.trim_start_matches(|c: char| c.is_whitespace() || "│┌└├◇◆●○✖".contains(c))
-                .trim_end()
-        })
-        .rfind(|line| !line.is_empty());
-    match last {
-        Some(line) => format!("{line} Changes are left staged."),
-        None => "OpenCommit failed. Changes are left staged.".to_string(),
-    }
 }
 
 fn focused_cwd() -> Option<PathBuf> {
@@ -567,16 +543,6 @@ mod tests {
     }
 
     #[test]
-    fn oco_unconfigured_is_explained() {
-        let stdout =
-            "┌   Welcome to OpenCommit! \nnode:tty:97\n    throw new ERR_TTY_INIT_FAILED(ctx);\n";
-        assert_eq!(
-            summarize_oco_failure(stdout, ""),
-            "OpenCommit is not configured. Run `oco setup` in a terminal to choose an AI provider. Changes are left staged."
-        );
-    }
-
-    #[test]
     fn ai_commit_gives_focus_back_only_when_the_activation_took_it() {
         // The activation focused our sidebar pane: put the user back.
         assert_eq!(
@@ -591,31 +557,6 @@ mod tests {
         assert_eq!(focus_to_restore(Some("w1:p1"), "", true), None);
         // The user moved to a pane that is not ours: never override that.
         assert_eq!(focus_to_restore(Some("w1:p1"), "w1:p5", false), None);
-    }
-
-    #[test]
-    fn oco_no_changes_is_nothing_to_commit() {
-        assert_eq!(
-            summarize_oco_failure("No changes detected\n", ""),
-            "Nothing to commit."
-        );
-    }
-
-    #[test]
-    fn oco_generic_error_uses_last_meaningful_line() {
-        let stderr = "│\n└  ✖ 401 Incorrect API key provided\n";
-        assert_eq!(
-            summarize_oco_failure("", stderr),
-            "401 Incorrect API key provided Changes are left staged."
-        );
-    }
-
-    #[test]
-    fn oco_empty_output_has_fallback() {
-        assert_eq!(
-            summarize_oco_failure("│\n", ""),
-            "OpenCommit failed. Changes are left staged."
-        );
     }
 
     #[test]
