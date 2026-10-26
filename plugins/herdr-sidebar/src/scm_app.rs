@@ -36,8 +36,10 @@ use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::suggest;
 use herdr_sidebar::ui::{
     SelectAll, TitleAction, activity_button_style, activity_icons, branch_icon,
-    chrome_button_style, draw_activity_caps, draw_scrollbar, gear_icon, hits, hits_activity_button,
-    hits_collapse_button, hover_style, icon_style as ui_icon_style, keep_visible_scroll, palette,
+    chrome_button_style, draw_activity_caps, draw_hover_tooltip, draw_scrollbar, gear_icon, hits,
+    hits_activity_button,
+    hits_collapse_button, hover_style, hover_tooltip_visible, icon_style as ui_icon_style,
+    keep_visible_scroll, palette,
     selected_text_style, selection_style, set_color_theme, sibling_panes_of, sparkle_icon,
     status_color, title_action_spans, title_actions_visible, title_actions_width, truncate_to,
     within, wrap_footer_message, wrap_hints,
@@ -6710,6 +6712,32 @@ impl App {
                 }
             }
         }
+
+        // Hovering a changed file names its path: the row truncates, and the
+        // tail is what tells two `mod.rs` entries apart.
+        if let Some(path) = self.hovered.and_then(|index| self.hovered_path(index))
+            && let Some(mouse) = self.mouse_pos
+            && hover_tooltip_visible(self.last_mouse)
+        {
+            draw_hover_tooltip(frame, area, mouse, &path);
+        }
+    }
+
+    /// The repo-relative path of the file row under the cursor. A multi-repo
+    /// sidebar prefixes the repository, since two repos can hold the same path.
+    fn hovered_path(&self, index: usize) -> Option<String> {
+        let row = *self.rows.get(index)?;
+        let (repo, entry) = match row {
+            Row::Staged(r, i) => (r, self.repos.get(r)?.status.staged.get(i)?),
+            Row::Unstaged(r, i) => (r, self.repos.get(r)?.status.unstaged.get(i)?),
+            _ => return None,
+        };
+        let name = self.repos.get(repo)?.name.as_str();
+        Some(if self.multi() {
+            format!("{name}/{}", entry.path)
+        } else {
+            entry.path.clone()
+        })
     }
 
     fn prepare_list(&mut self, area: Rect) -> usize {

@@ -1074,6 +1074,16 @@ HACKING.md — budget time for that before promising a patched build.
   List AUTO-SCROLLS to keep its selection visible, which fights wheel-scrolling — both
   views therefore window their rows manually (selected/scroll/snap fields) and render
   a plain List of the visible slice.
+- Hovering a row shows its path in a one-line tooltip beside the cursor
+  (`ui::draw_hover_tooltip`). A tree row is only as wide as the pane, so a truncated name —
+  and two `mod.rs` files — cannot be told apart. Explorer rows relativize against the tree root;
+  SCM uses the repo-relative `FileEntry.path`, prefixed with the repository name when more than
+  one repo is shown. It is a floating `Clear`ed line under the cursor, flipped above it on the
+  pane's last row and slid left at the right edge (`ui::tooltip_rect`, pure + unit-tested), and
+  it keeps the path's TAIL (`ui::path_tail`) because the file name identifies the row. Explorer
+  shows it for every tree row (files and folders); SCM only for `Staged`/`Unstaged` file rows —
+  headers, message/commit widgets and the commit/branch drawers have no path to name.
+
 - A single left-click anywhere on an Explorer folder row expands/collapses it; the chevron is
   not the only mouse target. Suppress the second click on the folder name inside the 450ms
   double-click window so the first toggle is not immediately undone, while repeated explicit

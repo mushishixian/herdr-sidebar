@@ -506,6 +506,17 @@ pub fn title_actions_visible(last_mouse: Option<std::time::Instant>) -> bool {
     last_mouse.is_some_and(|at| at.elapsed() < TITLE_ACTIONS_LINGER)
 }
 
+/// How long the hover tooltip outlives the last mouse event. Terminals emit no
+/// "mouse left the pane" event, so the tooltip needs SOME expiry — but it must
+/// last longer than the title-action chips' 3 s, because a path is read while
+/// the mouse sits still.
+pub const HOVER_TOOLTIP_LINGER: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The hover approximation for the path tooltip (see `HOVER_TOOLTIP_LINGER`).
+pub fn hover_tooltip_visible(last_mouse: Option<std::time::Instant>) -> bool {
+    last_mouse.is_some_and(|at| at.elapsed() < HOVER_TOOLTIP_LINGER)
+}
+
 /// Theme-matched glyph for a title-bar action: VS Code's own codicons in the
 /// material theme (the Nerd Font ships the cod- set), VS16-free fallbacks
 /// otherwise.
@@ -700,6 +711,75 @@ pub fn truncate_to(s: String, max: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// The tail of a path that fits in `max` cells. A path too long for the
+/// tooltip keeps its last components — the file name is what identifies the
+/// row — and gets a leading ellipsis instead of a trailing one.
+pub fn path_tail(path: &str, max: usize) -> String {
+    if Span::raw(path).width() <= max {
+        return path.to_string();
+    }
+    if max < 2 {
+        return String::new();
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut width = 1; // the leading ellipsis
+    for c in path.chars().rev() {
+        let w = Span::raw(c.to_string().as_str()).width();
+        if width + w > max {
+            break;
+        }
+        tail.push(c);
+        width += w;
+    }
+    tail.reverse();
+    format!("…{}", tail.into_iter().collect::<String>())
+}
+
+/// Where a one-line hover tooltip goes: under the cursor, flipped above it when
+/// the pane's last row is in the way, and slid left so it stays inside `area`.
+pub fn tooltip_rect(area: Rect, mouse: (u16, u16), width: u16) -> Option<Rect> {
+    if area.width == 0 || area.height == 0 || width == 0 {
+        return None;
+    }
+    let width = width.min(area.width);
+    let x = mouse
+        .0
+        .min(area.x + area.width - width)
+        .max(area.x);
+    let below = mouse.1.saturating_add(1);
+    let y = if below < area.y + area.height {
+        below
+    } else {
+        mouse.1.saturating_sub(1)
+    };
+    let y = y.clamp(area.y, area.y + area.height - 1);
+    Some(Rect::new(x, y, width, 1))
+}
+
+/// Show `path` beside the cursor — the hover tooltip of the file and change
+/// lists, whose rows are too narrow for the whole path. Cleared first so the
+/// row underneath does not bleed through the box.
+pub fn draw_hover_tooltip(frame: &mut Frame, area: Rect, mouse: (u16, u16), path: &str) {
+    if path.is_empty() || area.width < 12 {
+        return;
+    }
+    // One cell of padding on each side, so the text never touches the edge.
+    let label = path_tail(path, area.width.saturating_sub(2) as usize);
+    let width = Span::raw(label.as_str()).width() as u16 + 2;
+    let Some(rect) = tooltip_rect(area, mouse, width) else {
+        return;
+    };
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(format!(" {label} ")).style(
+            Style::default()
+                .bg(palette().keycap_bg)
+                .fg(palette().keycap_fg),
+        ),
+        rect,
+    );
 }
 
 /// Widest a one-line input dialog gets in a sidebar pane. Kept below a wide
@@ -1343,6 +1423,68 @@ mod tests {
         assert_eq!(truncate_to("abc".into(), 1), "");
     }
 
+
+    #[test]
+    fn a_long_path_keeps_its_tail_for_the_tooltip() {
+        let path = "dotfiles/config/herdr/scripts/deep/thing.sh";
+        assert_eq!(path_tail("src/ui.rs", 20), "src/ui.rs");
+        let tail = path_tail(path, 12);
+        assert!(tail.starts_with('…'), "tail was {tail:?}");
+        assert!(tail.ends_with("thing.sh"), "tail was {tail:?}");
+        assert!(Span::raw(tail.as_str()).width() <= 12);
+        assert_eq!(path_tail(path, 1), "");
+    }
+
+    #[test]
+    fn the_tooltip_hugs_the_cursor_and_stays_inside_the_pane() {
+        let area = Rect::new(2, 3, 40, 10);
+        // Below the cursor, inside the pane.
+        assert_eq!(
+            tooltip_rect(area, (5, 4), 10),
+            Some(Rect::new(5, 5, 10, 1))
+        );
+        // A cursor near the right edge slides the box left.
+        assert_eq!(
+            tooltip_rect(area, (39, 4), 10),
+            Some(Rect::new(32, 5, 10, 1))
+        );
+        // On the last row it flips above the cursor.
+        assert_eq!(
+            tooltip_rect(area, (5, 12), 10),
+            Some(Rect::new(5, 11, 10, 1))
+        );
+        // Wider than the pane: the pane wins.
+        assert_eq!(
+            tooltip_rect(area, (0, 4), 100),
+            Some(Rect::new(2, 5, 40, 1))
+        );
+    }
+
+    #[test]
+    fn the_tooltip_outlives_a_still_mouse_longer_than_the_title_chips() {
+        let now = std::time::Instant::now();
+        assert!(hover_tooltip_visible(Some(now)));
+        assert!(!hover_tooltip_visible(None));
+        let stale = now - HOVER_TOOLTIP_LINGER - std::time::Duration::from_secs(1);
+        assert!(!hover_tooltip_visible(Some(stale)));
+        assert!(HOVER_TOOLTIP_LINGER > TITLE_ACTIONS_LINGER);
+    }
+
+    #[test]
+    fn the_tooltip_draws_the_path_beside_the_cursor() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_hover_tooltip(frame, area, (2, 2), "src/deep/file.rs");
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..40).map(|x| buffer[(x, 3)].symbol()).collect();
+        assert!(row.contains("src/deep/file.rs"), "row was {row:?}");
+    }
     #[test]
     fn title_action_zones_are_contiguous_and_match_width() {
         for theme in [IconTheme::Material, IconTheme::Emoji] {
