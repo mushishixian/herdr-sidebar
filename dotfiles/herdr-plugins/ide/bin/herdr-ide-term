@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # herdr-ide-term — VS Code's Ctrl+` for the IDE layout.
 #
-# The middle column shows Fresh ALONE. The Terminal lives in a background tab
-# of its own (the "parked" terminal: it keeps running, with its history and cwd)
-# until you ask for it:
+# The Terminal normally sits under Fresh. Ctrl+` collapses it into a background
+# tab of its own (the "parked" terminal: it keeps running, with its history and
+# cwd) and brings it back:
 #
 #   terminal in the IDE tab, focused -> park it in its background tab, focus Fresh
 #   terminal in the IDE tab, unfocused -> focus it

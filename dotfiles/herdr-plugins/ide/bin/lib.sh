@@ -3,8 +3,8 @@
 # The IDE layout is identified by pane labels, not ids, so it survives
 # herdr restarts:
 #   "Fresh"    – the editor pane (also carries a fresh_daemon metadata token)
-#   "Terminal" – the shell pane under the editor, or PARKED in its own background
-#                tab (see park_terminal) while the IDE tab shows Fresh alone
+#   "Terminal" – the shell pane under the editor (Ctrl+` may PARK it in its own
+#                background tab; see park_terminal)
 #   "Agent"    – the coding agent column on the right
 #   "Sidebar"  – owned by the herdr-sidebar plugin; never touched here
 

@@ -5,16 +5,17 @@
 #   ┌─────────┬──────────────────────┬───────────┐
 #   │ Sidebar │ Fresh (project       │ Agent     │
 #   │ explorer│ daemon)              │ (claude)  │
-#   │ search  │                      │           │
-#   │ git     │                      │           │
+#   │ search  ├──────────────────────┤           │
+#   │ git     │ Terminal             │           │
 #   └─────────┴──────────────────────┴───────────┘
 #
-# Fresh is alone in the middle column. The Terminal is built under it and then
-# PARKED in a background tab (label "terminal") until Ctrl+` brings it back
-# below Fresh (herdr-ide-term). The Sidebar is docked by the herdr-sidebar
+# The Terminal sits under Fresh and stays there: the layout never parks it.
+# Ctrl+` (herdr-ide-term) can still collapse it into a background tab labelled
+# "terminal" and bring it back. The Sidebar is docked by the herdr-sidebar
 # plugin on its own. Started from an agent pane, that agent becomes the right
 # column; started from a shell, the shell becomes the Terminal and a new agent
-# opens on the right. Running it again just focuses the editor.
+# opens on the right. Running it again focuses the editor and brings a parked
+# Terminal back.
 #
 # Agent command: first line of $(herdr plugin config-dir dotfiles-ide)/agent,
 # else $IDE_AGENT, else the first INSTALLED agent (pi before claude — claude is
@@ -34,6 +35,14 @@ existing=$(pane_with_label "$cur_tab" "$FRESH_LABEL")
 # the last line of this script's output — that is how fresh-open reaches an
 # editor its own search could not use.
 if [ -n "$existing" ] && fresh_editor_ok "$existing"; then
+  # Nothing is parked by default, so a Terminal still sitting in its background
+  # tab comes back under the editor here too.
+  if [ -z "$(pane_with_label "$cur_tab" "$TERM_LABEL")" ]; then
+    parked=$(parked_terminal "$cur_tab" "$cur_ws")
+    if [ -n "$parked" ]; then
+      unpark_terminal "$cur_tab" "$existing" "$parked" || warn "could not bring the terminal back"
+    fi
+  fi
   focus_pane "$existing"
   printf '%s\n' "$existing"
   exit 0
@@ -115,6 +124,5 @@ fi
 mark_fresh_pane "$editor" "$name"
 "$HERDR" pane run "$editor" "$(printf '%q %q' "$here/fresh-ide" "$root")" >/dev/null
 restore_sizes "$cur_tab" "$saved" || true
-park_terminal "$cur_tab" "$term" || warn "could not park the terminal"
 focus_pane "$editor"
 printf '%s\n' "$editor"

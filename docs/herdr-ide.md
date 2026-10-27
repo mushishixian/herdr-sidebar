@@ -10,20 +10,20 @@ plugins, configuration, and this fork of herdr-sidebar.
  Windows:  Windows Terminal (or WezTerm) + a Nerd Font, opening straight into WSL
  WSL:      zsh ─ herdr ─┬─ Sidebar   herdr-sidebar fork (this repo)
                         ├─ Fresh     editor, one daemon per project per workspace
-                        ├─ Terminal  shell, parked in a background tab until Ctrl+`
+                        ├─ Terminal  shell, under Fresh (Ctrl+` collapses it)
                         └─ Agent     claude, pinned on the right
 
    ┌─────────┬──────────────────────┬───────────┐
    │ Sidebar │ Fresh                │ Agent     │
    │ explorer│                      │ (claude)  │
-   │ search  │                      │           │
-   │ git     │                      │           │
+   │ search  ├──────────────────────┤           │
+   │ git     │ Terminal             │           │
    └─────────┴──────────────────────┴───────────┘
 ```
 
-Fresh is alone in the middle column. The Terminal is parked in a background tab labelled
-`terminal`: it keeps running, with its history and cwd, until **Ctrl+`** brings it back under Fresh.
-Pressing Ctrl+` again on the Terminal parks it.
+Fresh owns the top of the middle column and the Terminal sits under it. **Ctrl+`** collapses the
+Terminal into a background tab labelled `terminal` (it keeps running, with its history and cwd) and
+brings it back under Fresh; the layout itself never parks it.
 
 ## Where everything lives
 
@@ -187,7 +187,7 @@ moves the copy aside.
 
 | Key | Does |
 |---|---|
-| `ctrl+b i` | IDE layout for the current pane's project (focuses Fresh if already built) |
+| `ctrl+b i` | IDE layout for the current pane's project (focuses Fresh if already built, bringing a parked terminal back) |
 | ``ctrl+b ` `` | Toggle the terminal: focus it under Fresh, park it in its background tab, or bring it back (`dotfiles-ide.toggle-terminal`) |
 | `ctrl+b a`, `ctrl+alt+b`, `alt+f12` | Toggle the sidebar |
 | `ctrl+b f` | Quick Open in the sidebar |
@@ -529,15 +529,16 @@ Two things that surprise people:
   already has focus; with the Terminal parked it moves it back below Fresh at the remembered
   editor share; with none at all it opens a new one. Parking is the one place a Terminal leaves
   the middle column (see the next bullet).
-- **The Terminal parks out of the middle column.** `herdr-ide` builds the layout and then moves
-  the Terminal into a background tab labelled `terminal` (`lib.sh`'s `park_terminal`), so the
-  middle column is Fresh alone. The Terminal keeps running, with its history and cwd. The
-  contract with herdr-sidebar: the Terminal carries the metadata token `ide-parked-for=<IDE tab
-  id>` (source `dotfiles-ide`), stamped BEFORE the move, because the move fires `tab.created` and
-  the sidebar's ensure hook skips a tab whose panes all carry it; the token is removed with an
-  explicit JSON null when the Terminal comes back (`unpark_terminal`). Herdr drops metadata on a
-  server restart, so `parked_terminal` falls back to the Terminal that sits alone in a tab of the
-  same workspace. `save_sizes` never records an editor share while no Terminal is in the tab.
+- **The Terminal no longer parks on its own.** `herdr-ide` leaves it under Fresh, and only
+  Ctrl+` (`lib.sh`'s `park_terminal`) moves it into a background tab labelled `terminal`;
+  running `herdr-ide` again brings a parked one back. While parked it keeps running, with its
+  history and cwd. The contract with herdr-sidebar: the Terminal carries the metadata token
+  `ide-parked-for=<IDE tab id>` (source `dotfiles-ide`), stamped BEFORE the move, because the move
+  fires `tab.created` and the sidebar's ensure hook skips a tab whose panes all carry it; the
+  token is removed with an explicit JSON null when the Terminal comes back (`unpark_terminal`).
+  Herdr drops metadata on a server restart, so `parked_terminal` falls back to the Terminal that
+  sits alone in a tab of the same workspace. `save_sizes` never records an editor share while no
+  Terminal is in the tab.
 - **Pane sizes are remembered per project**, shared by all of its workspace
   daemons (the daemon name without its `-sN` suffix). herdr has no hookable resize
   event, so `bin/ide-save-sizes` runs on `pane.focused` / `tab.focused` and
