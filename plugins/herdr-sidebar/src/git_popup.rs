@@ -188,6 +188,7 @@ pub fn run(flag: Option<&str>) -> io::Result<()> {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => app.key(key),
                 Event::Mouse(mouse) => app.mouse(mouse),
+                Event::Resize(..) => crate::ui::repaint_after_resize(&mut terminal)?,
                 _ => {}
             }
         }
@@ -1251,6 +1252,7 @@ fn run_history() -> io::Result<()> {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => app.key(key),
                 Event::Mouse(mouse) => app.mouse(mouse),
+                Event::Resize(..) => crate::ui::repaint_after_resize(&mut terminal)?,
                 _ => {}
             }
         }

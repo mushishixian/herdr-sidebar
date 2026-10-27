@@ -164,8 +164,13 @@ fn run(
         if !event::poll(Duration::from_millis(150))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let key = match event::read()? {
+            Event::Key(key) => key,
+            Event::Resize(..) => {
+                crate::ui::repaint_after_resize(terminal)?;
+                continue;
+            }
+            _ => continue,
         };
         if key.kind != KeyEventKind::Press {
             continue;

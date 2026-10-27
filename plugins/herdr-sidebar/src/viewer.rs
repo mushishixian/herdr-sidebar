@@ -2539,7 +2539,12 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                         _ => {}
                     },
                 },
-                _ => {} // resize etc: redraw
+                Event::Resize(..) => {
+                    if let Err(e) = crate::ui::repaint_after_resize(&mut terminal) {
+                        break Err(e);
+                    }
+                }
+                _ => {} // focus etc: redraw
             }
         }
         if should_close {

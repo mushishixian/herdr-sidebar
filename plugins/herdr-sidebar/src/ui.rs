@@ -1018,6 +1018,17 @@ pub fn sibling_panes_of(pane_list_json: &str, my_pane_id: &str, other: View) -> 
         .collect()
 }
 
+/// Forces the next `draw` to repaint every cell. A resize can reflow the grid
+/// while ratatui still diffs against its stale back buffer, and a final size
+/// equal to the old one never triggers its own full repaint (a monitor move
+/// with a DPI change shrinks the pane and restores it in one burst).
+/// `resize` rather than `clear`: clear queries the cursor position, a
+/// terminal round trip in the middle of a resize burst.
+pub fn repaint_after_resize(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
+    let size = terminal.size()?;
+    terminal.resize(Rect::new(0, 0, size.width, size.height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -770,6 +770,16 @@ HACKING.md — budget time for that before promising a patched build.
   not pipeable output. Claude panes inside such a server stay pale until the server is
   restarted from a clean (non-agent) shell.
 
+- **Every `Event::Resize` must force a full repaint** (`ui::repaint_after_resize`, called from
+  every TUI loop: both sidebar views, the viewer, every popup, the font prompt). ratatui repaints
+  in full only when the size it reads at draw time differs from the last frame's. Dragging the
+  window to a monitor with another DPI shrinks the panes and restores them in one burst. herdr
+  reflows each pane's grid in between, but the final size equals the old one, so ratatui diffed
+  against a back buffer that no longer matched the screen, and the pane stayed on the old frame
+  (user-reported, two-monitor setup). The helper calls `Terminal::resize`, not `Terminal::clear`:
+  `clear` queries the cursor position, a terminal round trip on every resize event. Popups that
+  draw only behind a `needs_draw` flag must also set it on resize, or they ignore resizes
+  entirely.
 - Without keyboard-enhancement protocols (not enabled in herdr panes), **modifier+Enter is
   indistinguishable from plain Enter** in most Windows terminals — a "Ctrl+Enter" binding
   silently means "Enter". Design keymaps so unmodified keys suffice (the commit

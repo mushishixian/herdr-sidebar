@@ -599,6 +599,7 @@ fn run_explorer(
                 Event::Mouse(mouse) => app.on_mouse(mouse),
                 Event::Resize(width, _) => {
                     app.on_resize(width);
+                    herdr_sidebar::ui::repaint_after_resize(terminal)?;
                     None
                 }
                 Event::FocusLost => {
@@ -654,6 +655,7 @@ fn run_scm(
                 Event::Mouse(mouse) => app.on_mouse(mouse),
                 Event::Resize(width, _) => {
                     app.on_resize(width);
+                    herdr_sidebar::ui::repaint_after_resize(terminal)?;
                     None
                 }
                 Event::FocusLost => {

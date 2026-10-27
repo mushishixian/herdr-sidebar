@@ -130,6 +130,10 @@ pub fn run() -> io::Result<()> {
                         app.mouse(mouse);
                         needs_draw = true;
                     }
+                    Event::Resize(..) => {
+                        crate::ui::repaint_after_resize(&mut terminal)?;
+                        needs_draw = true;
+                    }
                     _ => {}
                 }
             }
