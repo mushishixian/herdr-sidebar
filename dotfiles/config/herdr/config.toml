@@ -81,9 +81,10 @@ delivery = "herdr"
 # ============================================================
 
 [keys]
-# 原 Zed: alt-f12 → workspace::ToggleBottomDock（开关终端面板）
-# Herdr 里一切皆终端，取「开关辅助面板 = 侧边栏」这个近似
-toggle_sidebar = ["prefix+b", "alt+f12"]
+# 原 Zed: alt-f12 → workspace::ToggleBottomDock（开关底部终端面板）
+# 现在这个键真的对应终端：alt+f12 绑给 dotfiles-ide.toggle-terminal（见下方 IDE 段）。
+# 侧栏保留 prefix+b / ctrl+alt+b 两个键。
+toggle_sidebar = "prefix+b"
 
 # 原 Zed: ctrl-f12 → outline::Toggle（大纲）
 # Herdr 没有代码大纲；取「会话大纲」= 会话导航器（列出每个 agent/pane、路径、分支）
@@ -288,6 +289,13 @@ key = "prefix+backtick"
 type = "plugin_action"
 command = "dotfiles-ide.toggle-terminal"
 description = "开关终端（Ctrl+`）"
+
+# ---- 同一个开关的直连和弦：原 Zed 的 alt-f12 = ToggleBottomDock ----
+[[keys.command]]
+key = "alt+f12"
+type = "plugin_action"
+command = "dotfiles-ide.toggle-terminal"
+description = "开关终端（Alt+F12）"
 
 # ── Sidebar (herdr-sidebar plugin) ─────────────────────────────────────
 

@@ -189,7 +189,8 @@ moves the copy aside.
 |---|---|
 | `ctrl+b i` | IDE layout for the current pane's project (focuses Fresh if already built, bringing a parked terminal back) |
 | ``ctrl+b ` `` | Toggle the terminal: focus it under Fresh, park it in its background tab, or bring it back (`dotfiles-ide.toggle-terminal`) |
-| `ctrl+b a`, `ctrl+alt+b`, `alt+f12` | Toggle the sidebar |
+| `alt+f12` | Same terminal toggle as ``ctrl+b ` `` (Zed's `ToggleBottomDock` chord) |
+| `ctrl+b a`, `ctrl+alt+b` | Toggle the sidebar |
 | `ctrl+b f` | Quick Open in the sidebar |
 | `ctrl+b /` | Search in files |
 | `ctrl+b d` | Source Control view |

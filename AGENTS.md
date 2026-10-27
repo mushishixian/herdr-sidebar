@@ -2308,7 +2308,8 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   `force-reset.sh` moved to `ctrl+alt+shift+f` and `herdr-file-viewer` to `ctrl+alt+v`.
   `ctrl+alt+s` and `ctrl+alt+f` BOTH open the search popup — the first is the user's own
   chord, the second the documented one. The Zed-derived bindings worth keeping are
-  `toggle_sidebar = ["prefix+b", "alt+f12"]`, `goto = ["prefix+g", "ctrl+f12"]`,
+  `toggle_sidebar = "prefix+b"`, `goto = ["prefix+g", "ctrl+f12"]`,
+  `alt+f12` → `dotfiles-ide.toggle-terminal` (Zed's ToggleBottomDock),
   `next_agent = "ctrl+alt+t"`, the `detach`/`close_pane` chord lists, `ctrl+w` →
   `jump-symbol.sh`, `alt+w` / `ctrl+alt+h` → lazygit popups, `ctrl+alt+g` →
   `tareqmlx.lazygit-viewer.branch-popup`, `ctrl+alt+b` → open-sidebar.
