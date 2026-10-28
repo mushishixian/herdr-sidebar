@@ -34,8 +34,8 @@ use crate::actions::{ClipboardWrite, copy_to_clipboard};
 use crate::diffview;
 use crate::git::{Branch, Git, LineCommit, MergeOutcome};
 use crate::ui::{
-    SelectAll, input_tail, keep_visible_scroll, palette, selected_text_style, selection_style,
-    truncate_to,
+    SelectAll, draw_confirm_dialog, hits, input_tail, keep_visible_scroll, palette,
+    selected_text_style, selection_style, truncate_to,
 };
 
 /// Set by the Fresh editor plugin: absolute path of the file to inspect.
@@ -235,6 +235,11 @@ struct App {
     scroll: usize,
     list_area: Rect,
     error: Option<String>,
+    /// A switch refused for local changes, waiting for the confirm dialog: the
+    /// retry stashes the modifications and restores them on the other branch.
+    confirm: Option<Branch>,
+    /// Yes/No buttons of the confirm dialog, for click hit-testing.
+    confirm_buttons: (Rect, Rect),
     /// Result of the last Ctrl+C copy of the input, shown in place of the hint.
     copy_notice: Option<(String, bool)>,
     screen: Screen,
@@ -258,6 +263,8 @@ impl App {
             scroll: 0,
             list_area: Rect::default(),
             error: None,
+            confirm: None,
+            confirm_buttons: (Rect::default(), Rect::default()),
             copy_notice: None,
             screen: Screen::Edit,
             done: false,
@@ -377,6 +384,17 @@ impl App {
     }
 
     fn edit_key(&mut self, key: KeyEvent, ctrl: bool) {
+        // The confirm dialog owns the keyboard: y/⏎ retries with a stash, any
+        // other key (Esc included) drops back to the list.
+        if let Some(branch) = self.confirm.take() {
+            if matches!(
+                key.code,
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y')
+            ) {
+                self.switch_stashing(branch);
+            }
+            return;
+        }
         let rows = if matches!(self.op, Op::Rename | Op::New) {
             0
         } else {
@@ -447,6 +465,19 @@ impl App {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             // A click is a focus move: drop an armed Ctrl+A.
             self.select_all.disarm();
+        }
+        // The dialog answers on Yes only: a click anywhere else cancels it.
+        if self.confirm.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let (yes, _no) = self.confirm_buttons;
+                match self.confirm.take() {
+                    Some(branch) if hits(yes, mouse.column, mouse.row) => {
+                        self.switch_stashing(branch);
+                    }
+                    _ => {}
+                }
+            }
+            return;
         }
         if !matches!(self.screen, Screen::Edit) || matches!(self.op, Op::Rename | Op::New) {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -545,11 +576,32 @@ impl App {
                         self.toast = Some(("Switched branch".into(), now));
                         self.done = true;
                     }
+                    // Local changes block the switch: ask in a dialog instead
+                    // of dropping a bare git error on the user.
+                    Err(error) if crate::git::checkout_blocked_by_local_changes(&error) => {
+                        self.error = None;
+                        self.confirm = Some(branch);
+                    }
                     Err(error) => self.error = Some(error),
                 }
             }
             (Op::Merge, Row::Branch(branch)) => self.merge(&branch),
             _ => {}
+        }
+    }
+
+    /// The confirmed retry of a switch that local changes blocked: stash the
+    /// modifications, switch, put them back.
+    fn switch_stashing(&mut self, branch: Branch) {
+        let Some(git) = self.git.clone() else {
+            return;
+        };
+        match git.checkout_branch_stashing(&branch) {
+            Ok(message) => {
+                self.toast = Some(("Switched branch".into(), message));
+                self.done = true;
+            }
+            Err(error) => self.error = Some(error),
         }
     }
 
@@ -796,6 +848,16 @@ impl App {
             );
         } else {
             frame.render_widget(List::new(items), list);
+        }
+
+        // The stash question is a real dialog over the list, not a footer line:
+        // it is the one answer the popup must not swallow by accident.
+        if let Some(branch) = &self.confirm {
+            let message = format!(
+                "Switch to {} and stash the local changes?\nThey come back on the other branch.",
+                branch.name
+            );
+            self.confirm_buttons = draw_confirm_dialog(frame, "Local changes", &message, None);
         }
     }
 }

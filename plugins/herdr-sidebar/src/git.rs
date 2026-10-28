@@ -1125,6 +1125,52 @@ impl Git {
         run_in(&self.root, &args).map(drop)
     }
 
+    /// Checkout that survives a dirty worktree the way the pickers offer it:
+    /// stash the local modifications (untracked files included), switch, then
+    /// put them back with `stash pop`. Nothing is discarded — when the pop
+    /// conflicts the stash entry stays on the list. Returns the line to show.
+    pub fn checkout_branch_stashing(&self, branch: &Branch) -> Result<String, String> {
+        let stashed = !run_in(
+            &self.root,
+            &[
+                "stash",
+                "push",
+                "--include-untracked",
+                "--message",
+                "herdr-sidebar: local changes across a branch switch",
+            ],
+        )?
+        .contains("No local changes to save");
+        let args = if branch.remote {
+            vec![
+                "checkout",
+                "--track",
+                "--end-of-options",
+                branch.name.as_str(),
+            ]
+        } else {
+            vec!["checkout", "--end-of-options", branch.name.as_str()]
+        };
+        if let Err(error) = run_in(&self.root, &args) {
+            // The switch never happened: put the work back rather than leave it
+            // parked in a stash the user did not ask for.
+            if stashed {
+                let _ = run_in(&self.root, &["stash", "pop"]);
+            }
+            return Err(error);
+        }
+        if !stashed {
+            return Ok(format!("switched to {}", branch.name));
+        }
+        Ok(match run_in(&self.root, &["stash", "pop"]) {
+            Ok(_) => format!("switched to {} · local changes restored", branch.name),
+            Err(_) => format!(
+                "switched to {} · local changes kept in the stash (pop conflicted)",
+                branch.name
+            ),
+        })
+    }
+
     pub fn remotes(&self) -> Result<Vec<String>, String> {
         let out = run_in(&self.root, &["remote", "-v"])?;
         // `remote -v` lists fetch and push separately; one line per remote reads better.
@@ -1562,6 +1608,14 @@ fn read_all(mut reader: impl Read) -> Result<Vec<u8>, String> {
         .read_to_end(&mut bytes)
         .map_err(|e| format!("git output: {e}"))?;
     Ok(bytes)
+}
+
+/// Whether `error` is git refusing a checkout only because local modifications
+/// would be overwritten. `command_result` keeps the first non-empty stderr line,
+/// which is that `error:` line for both the tracked and the untracked variant.
+pub fn checkout_blocked_by_local_changes(error: &str) -> bool {
+    error.contains("would be overwritten by")
+        || error.contains("Please commit your changes or stash them")
 }
 
 fn command_result(status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8>) -> Result<String, String> {
@@ -2573,6 +2627,56 @@ mod tests {
         })
         .unwrap();
         assert_eq!(git.status().unwrap().branch, "remote-topic");
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    #[test]
+    fn checkout_refusals_for_local_changes_are_recognised() {
+        assert!(checkout_blocked_by_local_changes(
+            "error: Your local changes to the following files would be overwritten by checkout:"
+        ));
+        assert!(checkout_blocked_by_local_changes(
+            "error: The following untracked working tree files would be overwritten by checkout:"
+        ));
+        assert!(checkout_blocked_by_local_changes(
+            "error: Your local changes to the following files would be overwritten by merge:"
+        ));
+        assert!(!checkout_blocked_by_local_changes(
+            "error: pathspec 'nope' did not match any file(s) known to git"
+        ));
+    }
+
+    #[test]
+    fn checkout_stashing_switches_and_keeps_the_local_edit() {
+        let git = repo_with_head("checkout-stashing");
+        let original = git.status().unwrap().branch;
+        // The same file with a different body on each branch: a local edit of it
+        // is exactly what makes a plain checkout refuse.
+        commit_file(&git, "shared.txt", "base\n", "base");
+        run_in(&git.root, &["checkout", "-q", "-b", "topic"]).unwrap();
+        commit_file(&git, "shared.txt", "topic\n", "topic");
+        run_in(&git.root, &["checkout", "-q", &original]).unwrap();
+        std::fs::write(git.root.join("shared.txt"), "local edit\n").unwrap();
+
+        let topic = Branch {
+            name: "topic".into(),
+            current: false,
+            remote: false,
+        };
+        let refused = git.checkout_branch(&topic).unwrap_err();
+        assert!(checkout_blocked_by_local_changes(&refused), "{refused}");
+
+        let message = git.checkout_branch_stashing(&topic).unwrap();
+        assert_eq!(git.status().unwrap().branch, "topic");
+        assert!(message.starts_with("switched to topic"), "{message}");
+        // The pop conflicts here (the file differs between the branches), so the
+        // edit has to survive in the stash instead of vanishing.
+        let file = std::fs::read_to_string(git.root.join("shared.txt")).unwrap();
+        let stash = run_in(&git.root, &["stash", "list"]).unwrap();
+        assert!(
+            file == "local edit\n" || stash.contains("herdr-sidebar"),
+            "the edit must survive in the file or in the stash: file={file:?} stash={stash:?}"
+        );
         let _ = std::fs::remove_dir_all(&git.root);
     }
 

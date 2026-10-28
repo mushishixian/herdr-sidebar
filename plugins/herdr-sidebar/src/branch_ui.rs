@@ -8,8 +8,8 @@ use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use crate::git::{Branch, Git, Status};
 use crate::icons::IconTheme;
 use crate::ui::{
-    SelectAll, branch_icon, hits, hover_style, input_tail, keep_visible_scroll, palette,
-    selected_text_style, selection_style, truncate_to,
+    SelectAll, branch_icon, draw_confirm_dialog, hits, hover_style, input_tail,
+    keep_visible_scroll, palette, selected_text_style, selection_style, truncate_to,
 };
 
 const SYNC_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
@@ -30,6 +30,9 @@ pub enum PickerAction {
     None,
     Close,
     Checkout(Branch),
+    /// The checkout was refused because of local changes and the user confirmed
+    /// the stash-first retry (`arm_stash`).
+    CheckoutStashing(Branch),
     Create(String),
 }
 
@@ -48,6 +51,11 @@ pub struct BranchPicker {
     naming: Option<String>,
     /// Ctrl+A on the name field: the next edit replaces the whole name.
     naming_select_all: SelectAll,
+    /// A checkout refused for local changes, waiting for the user to confirm
+    /// that the modifications may be stashed and restored around the switch.
+    confirm: Option<Branch>,
+    /// Yes/No buttons of the confirm dialog, for click hit-testing.
+    confirm_buttons: (Rect, Rect),
 }
 
 impl BranchPicker {
@@ -68,7 +76,15 @@ impl BranchPicker {
             rect: Rect::default(),
             naming: None,
             naming_select_all: SelectAll::default(),
+            confirm: None,
+            confirm_buttons: (Rect::default(), Rect::default()),
         })
+    }
+
+    /// Ask before retrying a checkout that git refused for local changes: the
+    /// caller keeps the picker open and arms the question.
+    pub fn arm_stash(&mut self, branch: Branch) {
+        self.confirm = Some(branch);
     }
 
     fn row_count(&self) -> usize {
@@ -142,6 +158,17 @@ impl BranchPicker {
             };
         }
 
+        // The stash question owns the keyboard: ⏎/y retries with a stash,
+        // anything else (Esc included) drops back to the list.
+        if let Some(branch) = self.confirm.take() {
+            return match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    PickerAction::CheckoutStashing(branch)
+                }
+                _ => PickerAction::None,
+            };
+        }
+
         match key.code {
             KeyCode::Esc => PickerAction::Close,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -180,6 +207,26 @@ impl BranchPicker {
                 {
                     self.naming = None;
                     PickerAction::Close
+                }
+                _ => PickerAction::None,
+            };
+        }
+
+        // The dialog answers on Yes only: a click anywhere else (No included)
+        // cancels the question and leaves the list open.
+        if self.confirm.is_some() {
+            let (yes, _no) = self.confirm_buttons;
+            return match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if hits(yes, mouse.column, mouse.row) {
+                        match self.confirm.take() {
+                            Some(branch) => PickerAction::CheckoutStashing(branch),
+                            None => PickerAction::None,
+                        }
+                    } else {
+                        self.confirm = None;
+                        PickerAction::None
+                    }
                 }
                 _ => PickerAction::None,
             };
@@ -348,6 +395,13 @@ impl BranchPicker {
             ),
             popup,
         );
+        if let Some(branch) = &self.confirm {
+            let message = format!(
+                "Switch to {} and stash the local changes?\nThey come back on the other branch.",
+                branch.name
+            );
+            self.confirm_buttons = draw_confirm_dialog(frame, "Local changes", &message, None);
+        }
     }
 }
 

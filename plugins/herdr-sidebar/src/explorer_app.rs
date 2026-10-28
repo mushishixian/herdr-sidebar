@@ -2325,12 +2325,33 @@ impl App {
             // Resume a Search overlay parked under the picker (else → tree).
             PickerAction::Close => self.overlay = self.suspended_search.take(),
             PickerAction::Checkout(branch) => {
-                let Some(Overlay::BranchPicker(picker)) = self.overlay.take() else {
+                let Some(Overlay::BranchPicker(mut picker)) = self.overlay.take() else {
                     return;
                 };
                 match picker.git.checkout_branch(&branch) {
                     Ok(()) => {
                         self.notice = Some(format!("switched to {}", branch.name));
+                        self.refresh_tree();
+                    }
+                    // Local changes block the switch: keep the list open with
+                    // the question on its bottom row instead of dropping the
+                    // picker and a bare git error on the user.
+                    Err(error) if herdr_sidebar::git::checkout_blocked_by_local_changes(&error) => {
+                        picker.arm_stash(branch);
+                        self.overlay = Some(Overlay::BranchPicker(picker));
+                        return;
+                    }
+                    Err(error) => self.notice = Some(error),
+                }
+                self.overlay = self.suspended_search.take();
+            }
+            PickerAction::CheckoutStashing(branch) => {
+                let Some(Overlay::BranchPicker(picker)) = self.overlay.take() else {
+                    return;
+                };
+                match picker.git.checkout_branch_stashing(&branch) {
+                    Ok(message) => {
+                        self.notice = Some(message);
                         self.refresh_tree();
                     }
                     Err(error) => self.notice = Some(error),

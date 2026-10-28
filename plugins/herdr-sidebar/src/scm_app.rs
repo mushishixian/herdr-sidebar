@@ -3744,12 +3744,31 @@ impl App {
             PickerAction::None => {}
             PickerAction::Close => self.overlay = None,
             PickerAction::Checkout(branch) => {
-                let Some(Overlay::BranchPicker(picker)) = self.overlay.take() else {
+                let Some(Overlay::BranchPicker(mut picker)) = self.overlay.take() else {
                     return;
                 };
                 match picker.git.checkout_branch(&branch) {
                     Ok(()) => {
                         self.flash = Some((format!("switched to {}", branch.name), false));
+                        self.refresh();
+                    }
+                    // Local changes block the switch: keep the list open with
+                    // the question on its bottom row instead of dropping the
+                    // picker and a bare git error on the user.
+                    Err(error) if herdr_sidebar::git::checkout_blocked_by_local_changes(&error) => {
+                        picker.arm_stash(branch);
+                        self.overlay = Some(Overlay::BranchPicker(picker));
+                    }
+                    Err(error) => self.flash = Some((error, true)),
+                }
+            }
+            PickerAction::CheckoutStashing(branch) => {
+                let Some(Overlay::BranchPicker(picker)) = self.overlay.take() else {
+                    return;
+                };
+                match picker.git.checkout_branch_stashing(&branch) {
+                    Ok(message) => {
+                        self.flash = Some((message, false));
                         self.refresh();
                     }
                     Err(error) => self.flash = Some((error, true)),

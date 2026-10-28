@@ -70,6 +70,8 @@ working panes back manually. Third-party TUIs are not yet verified with takeover
 - Stage, unstage, discard, commit, inspect diffs, and sync with the upstream.
 - Click the branch name—in the panel header, a repository row, or the Git footer—to
   switch branches, create one with **New branch…**, or track a remote branch.
+  When local changes block the switch, the picker offers to stash them, switch, and
+  restore them instead of refusing outright.
   Deleting an unmerged branch requires a separate force-delete confirmation.
 - Toggle changed files between list and folder tree with `t`, the view button, or Settings.
   In tree view, use `←→` to fold folders and `m` to stage or unstage a folder.

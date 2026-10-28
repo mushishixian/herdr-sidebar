@@ -1495,6 +1495,12 @@ button only fires on the hovered row (a tap folds instead); keyboard parity is
 ←/→ fold and `m` for a Stage/Unstage Folder menu.
 The branch picker supports New branch (#77); branch deletion first uses `-d`
 and asks separately before `-D` (#78). Keep `--` before branch names in both paths.
+A checkout git refuses for local changes (`Git::blocked_by_local_changes`) is not just
+reported: the picker stays open under a "Local changes" confirm dialog
+(`ui::draw_confirm_dialog`, y/⏎ or its Yes button; the switch popup shows the same dialog) and
+the confirmed retry runs `Git::checkout_branch_stashing` — `stash push -u`, checkout,
+`stash pop`. Nothing is discarded: when the pop conflicts the edit stays in the stash and the
+message says so.
 - Branch popups are ONE op registry: `Op` in `src/git_popup.rs` (switch / new / rename /
   merge / history), each with an `entrypoint()` that MUST equal its `[[panes]]` id in
   `herdr-plugin.toml`. `--git-popup-open <op>` resolves the focused pane's cwd, passes it in
