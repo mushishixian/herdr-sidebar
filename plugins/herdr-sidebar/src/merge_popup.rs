@@ -50,6 +50,10 @@ const GUTTER: usize = 6;
 const HSTEP: usize = 8;
 const WHEEL_STEP: isize = 3;
 const UNDO_LIMIT: usize = 200;
+/// The popup's size as a share of the terminal: nearly the whole screen, so
+/// the Incoming / Current / Result panes have room.
+const POPUP_WIDTH: &str = "98%";
+const POPUP_HEIGHT: &str = "96%";
 
 // ── Action side: request Herdr to spawn the popup pane ──────────────────
 
@@ -62,7 +66,7 @@ pub fn open() -> io::Result<()> {
         .map(|root| vec![(MERGE_ROOT_ENV, root)])
         .unwrap_or_default();
     retry_while_busy(
-        || request_popup_pane_with_env(ENTRYPOINT, "90%", "85%", &extra),
+        || request_popup_pane_with_env(ENTRYPOINT, POPUP_WIDTH, POPUP_HEIGHT, &extra),
         BUSY_STEP,
         BUSY_LIMIT,
     )
@@ -80,7 +84,7 @@ pub fn open_file(file: &Path) -> io::Result<()> {
         (MERGE_ROOT_ENV, root.as_str()),
     ];
     retry_while_busy(
-        || request_popup_pane_with_env(ENTRYPOINT, "90%", "85%", &extra),
+        || request_popup_pane_with_env(ENTRYPOINT, POPUP_WIDTH, POPUP_HEIGHT, &extra),
         BUSY_STEP,
         BUSY_LIMIT,
     )
@@ -832,7 +836,7 @@ impl App {
             KeyCode::Down if alt => self.next_conflict(true),
             KeyCode::Up if alt => self.next_conflict(false),
             KeyCode::Char(c) if !ctrl && !alt => self.plain_key(c),
-            KeyCode::Enter => self.complete(),
+            KeyCode::Enter => self.complete_file(false),
             KeyCode::Up => self.scroll(Target::Both, -1),
             KeyCode::Down => self.scroll(Target::Both, 1),
             KeyCode::PageUp => self.scroll(Target::Both, -self.page()),
@@ -877,12 +881,25 @@ impl App {
         }
     }
 
+    /// Ctrl+S and `s`. With every conflict in the file resolved this finishes
+    /// the file (save, `git add`, close when it was the last one); otherwise it
+    /// saves the partial choices.
     fn save_key(&mut self) {
-        if self.dirty() {
+        if self.ready_to_finish() {
+            self.complete_file(true);
+        } else if self.dirty() {
             self.save();
         } else {
             self.flash("no changes to save", false);
         }
+    }
+
+    /// An open editor with no conflicts left, and either conflict blocks to
+    /// finish or unsaved choices to write.
+    fn ready_to_finish(&self) -> bool {
+        self.editor().is_some_and(|ed| {
+            ed.doc.unresolved_count() == 0 && (ed.doc.conflict_count() > 0 || ed.doc.is_dirty())
+        })
     }
 
     fn reload_key(&mut self) {
@@ -930,6 +947,9 @@ impl App {
             return;
         };
         match (confirm, answer) {
+            (Confirm::Leave(Then::Close), Answer::Yes) if self.ready_to_finish() => {
+                self.complete_file(true);
+            }
             (Confirm::Leave(then), Answer::Yes) => {
                 if self.save() {
                     self.perform(then);
@@ -978,8 +998,10 @@ impl App {
         }
     }
 
-    /// Enter: mark the file resolved, after saving any choices.
-    fn complete(&mut self) {
+    /// Enter, and Ctrl+S on a fully resolved file: mark the file resolved, after
+    /// saving any choices. `close_when_done` closes the popup when this was the
+    /// last conflicted file; Enter shows the Done notice instead.
+    fn complete_file(&mut self, close_when_done: bool) {
         let unresolved = self.editor().map(|ed| ed.doc.unresolved_count());
         match (&self.body, unresolved) {
             (_, Some(left)) if left > 0 => {
@@ -1016,15 +1038,16 @@ impl App {
         match git.mark_resolved(&rel) {
             Ok(()) => {
                 let message = format!("✓ {} marked resolved", file_name(&rel));
-                self.advance(&rel, message);
+                self.advance(&rel, message, close_when_done);
             }
             Err(err) => self.flash(format!("Couldn't mark {rel} resolved: {err}"), true),
         }
     }
 
     /// After a file is resolved or removed: move to the next conflicted file,
-    /// or to the done screen when none is left.
-    fn advance(&mut self, resolved: &str, message: String) {
+    /// or to the done screen when none is left (closing the popup instead when
+    /// `close_when_done`).
+    fn advance(&mut self, resolved: &str, message: String, close_when_done: bool) {
         let Some(git) = self.git.as_ref() else {
             return;
         };
@@ -1035,6 +1058,14 @@ impl App {
                 return;
             }
         };
+        if paths.is_empty() && close_when_done {
+            toast(
+                "Merge conflicts resolved",
+                "Commit the merge in Source Control.",
+            );
+            self.done = true;
+            return;
+        }
         if paths.is_empty() {
             self.files.clear();
             self.body = Body::Notice {
@@ -1074,7 +1105,7 @@ impl App {
         match git.mark_resolved(&rel) {
             Ok(()) => {
                 let message = format!("✓ kept {}", file_name(&rel));
-                self.advance(&rel, message);
+                self.advance(&rel, message, false);
             }
             Err(err) => self.flash(format!("Couldn't keep {rel}: {err}"), true),
         }
@@ -1088,7 +1119,7 @@ impl App {
         match git.remove_conflicted(&rel) {
             Ok(()) => {
                 let message = format!("✓ deleted {}", file_name(&rel));
-                self.advance(&rel, message);
+                self.advance(&rel, message, false);
             }
             Err(err) => self.flash(format!("Couldn't delete {rel}: {err}"), true),
         }
@@ -1386,7 +1417,7 @@ const NORMAL_HINTS: &[(&str, &str)] = &[
     ("b", "both"),
     ("n/p", "next/prev"),
     ("⏎", "complete"),
-    ("s", "save"),
+    ("^S", "save · finish"),
     ("e", "editor"),
     ("?", "more"),
     ("esc", "close"),
@@ -1405,7 +1436,7 @@ const HELP_HINTS: &[(&str, &str)] = &[
     ("↑↓ pgup pgdn g G", "scroll"),
     ("← → 0", "sideways"),
     ("u", "undo"),
-    ("s", "save"),
+    ("s / ^S", "save (finishes a resolved file)"),
     ("r", "reload"),
     ("⏎", "complete merge"),
     ("tab", "next file"),
@@ -2347,5 +2378,103 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(app.done);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The repository with `b.txt` already marked resolved, so `a.txt` is the
+    /// only conflicted file left.
+    fn single_file_app(name: &str) -> (App, Scratch) {
+        let (git, scratch) = conflict_repo(name);
+        assert!(git.mark_resolved("b.txt").is_ok(), "b.txt marked resolved");
+        (App::open(git, None, None), scratch)
+    }
+
+    fn ctrl(app: &mut App, c: char) {
+        app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+    }
+
+    fn enter(app: &mut App) {
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    fn conflicted(app: &App) -> Vec<String> {
+        app.git.as_ref().unwrap().conflicted_paths().unwrap()
+    }
+
+    #[test]
+    fn ctrl_s_finishes_the_last_file_and_closes() {
+        let (mut app, _scratch) = single_file_app("ctrl-s-last");
+        let git_root = app.root.clone();
+        key(&mut app, 'C');
+        ctrl(&mut app, 's');
+        assert_eq!(
+            std::fs::read_to_string(git_root.join("a.txt")).unwrap(),
+            OURS
+        );
+        assert!(conflicted(&app).is_empty());
+        assert!(app.done);
+    }
+
+    #[test]
+    fn ctrl_s_on_a_file_with_more_to_do_opens_the_next_one() {
+        let (mut app, _scratch) = app_for("ctrl-s-next");
+        key(&mut app, 'C');
+        ctrl(&mut app, 's');
+        assert!(!app.done);
+        assert_eq!(app.rel, "b.txt");
+        assert!(!conflicted(&app).contains(&"a.txt".to_string()));
+    }
+
+    #[test]
+    fn ctrl_s_with_conflicts_left_saves_the_partial_choices_only() {
+        let (mut app, _scratch) = app_for("ctrl-s-partial");
+        key(&mut app, 'c');
+        ctrl(&mut app, 's');
+        assert!(!app.done);
+        assert_eq!(app.rel, "a.txt");
+        assert_eq!(
+            editor(&app).doc.conflict_count(),
+            1,
+            "one block left on disk"
+        );
+        assert!(!editor(&app).doc.is_dirty());
+        assert!(conflicted(&app).contains(&"a.txt".to_string()));
+    }
+
+    #[test]
+    fn escape_then_yes_finishes_a_resolved_file_on_the_close_prompt() {
+        let (mut app, _scratch) = single_file_app("close-yes");
+        key(&mut app, 'C');
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.confirm, Some(Confirm::Leave(Then::Close))));
+        key(&mut app, 'y');
+        assert!(conflicted(&app).is_empty());
+        assert!(app.done);
+    }
+
+    #[test]
+    fn close_prompt_yes_with_conflicts_left_saves_and_closes() {
+        let (mut app, _scratch) = app_for("close-partial");
+        key(&mut app, 'c');
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        key(&mut app, 'y');
+        assert!(app.done);
+        assert!(conflicted(&app).contains(&"a.txt".to_string()));
+    }
+
+    #[test]
+    fn enter_on_the_last_file_still_shows_the_done_notice() {
+        let (mut app, _scratch) = single_file_app("enter-done");
+        key(&mut app, 'C');
+        enter(&mut app);
+        assert!(!app.done, "the done notice waits for a key");
+        assert!(matches!(
+            app.body,
+            Body::Notice {
+                close_on_key: true,
+                ..
+            }
+        ));
+        key(&mut app, ' ');
+        assert!(app.done);
     }
 }

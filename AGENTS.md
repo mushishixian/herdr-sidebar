@@ -2254,7 +2254,7 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
 
 ### Merge editor popup (Ctrl+Alt+U)
 
-- Entry points: `--merge-popup` (pane `[[panes]] id = "merge-editor"`, placement `popup`, 90%x85%,
+- Entry points: `--merge-popup` (pane `[[panes]] id = "merge-editor"`, placement `popup`, 98%x96%,
   `src/merge_popup.rs::run`; `ENTRYPOINT = "merge-editor"` must equal that id) and `--merge-popup-open`
   (action `merge-editor`, Windows twin `merge-editor-windows` through `herdr-sidebar-ensure.exe`, and
   `announce_flag` maps it for the toast). `merge_popup::open()` opens the focused pane's repository;
@@ -2273,6 +2273,9 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   overwritten), and writes atomically through `content_search::write_atomically`. Enter completes: save,
   `git add` (`Git::mark_resolved`), next conflicted file. `k` / `d` keep / delete a conflict whose side
   was deleted (`mark_resolved` / `remove_conflicted`). Esc with unsaved choices asks first.
+  Ctrl+S (or `s`) on a file with every conflict resolved saves, `git add`s it and closes the popup when it was
+  the last conflicted file (otherwise it opens the next one); answering Yes to the close prompt does the same.
+  Enter still shows the "All conflicts resolved" screen (`complete_file(close_when_done)`, `save_key`).
 - **Herdr runs one popup per session**, so `open()` retries `ui_busy` for 3 s (`retry_while_busy`).
   That is what lets the branch merge popup hand off: its conflict screen's `r` (unix only; the Windows
   text is unchanged) closes that popup and starts `--merge-popup-open` as a DETACHED child

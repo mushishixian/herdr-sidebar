@@ -77,8 +77,8 @@ async function git_merge_editor(): Promise<void> {
       "--plugin", HERDR_PLUGIN,
       "--entrypoint", HERDR_ENTRYPOINT,
       "--placement", "popup",
-      "--width", "90%",
-      "--height", "85%",
+      "--width", "98%",
+      "--height", "96%",
       "--env", `HERDR_SIDEBAR_SPAWN_CWD=${dir}`,
       "--env", `HERDR_SIDEBAR_MERGE_FILE=${filePath}`,
     ];
