@@ -45,6 +45,11 @@ const IDLE_POLL: Duration = Duration::from_millis(250);
 const DISK_POLL: Duration = Duration::from_secs(1);
 /// Below this width the Incoming/Current panes are hidden and only Result shows.
 const NARROW_WIDTH: u16 = 72;
+/// Percent of the body the Incoming/Current compare panes take; Result gets
+/// the rest. The comparison is what you read, so it gets the larger share.
+const TOP_SHARE: u16 = 65;
+/// Rows Result keeps (its header included) however short the popup is.
+const RESULT_MIN_HEIGHT: u16 = 4;
 /// Line-number gutter: five digits and a separating space.
 const GUTTER: usize = 6;
 const HSTEP: usize = 8;
@@ -1456,7 +1461,9 @@ fn draw_editor(
 ) -> Panes {
     let wide = area.width >= NARROW_WIDTH && area.height >= 7;
     let top_h = if wide {
-        (area.height * 45 / 100).max(3)
+        (area.height * TOP_SHARE / 100)
+            .min(area.height.saturating_sub(RESULT_MIN_HEIGHT))
+            .max(3)
     } else {
         0
     };
