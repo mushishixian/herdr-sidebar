@@ -502,6 +502,20 @@ Two things that surprise people:
   after a restart reported `custom editor failed: …/fresh-open exited with exit
   status: 1` (its `die "could not start the IDE editor"`) while the pane showed
   an empty prompt.
+- **After a restart the IDE comes back on its own.** `bin/ide-heal` is a hook on
+  `workspace.focused`, `tab.focused` and `pane.focused`. herdr emits no event when it
+  restores panes, so the first focus of a space is the trigger, and only the FOCUSED
+  workspace is touched. A `Fresh` pane with no `fresh_daemon` token gets its editor back in
+  place (`heal_fresh_pane` in `lib.sh`, the code `herdr-ide` also uses for corpses). An
+  `Agent` pane with no `ide_role=agent` token that herdr did not resume itself (no `agent` /
+  `agent_session` in `pane list`) runs its agent again (`heal_agent_pane`): `claude` and `pi`
+  with `--continue`, `codex` as `codex resume --last`, others unchanged. The continue form is
+  used only when no other pane runs that agent in the same directory. `ide_role=agent` is set
+  when the Agent column is built and lives for one server run, so an agent quit in that run is
+  left alone. An Agent pane herdr resumed only gets the token. `fresh_daemon` is reported
+  BEFORE the `Fresh` label, so a labelled pane without it means a dead editor. Fresh's own
+  restore can be stale, so `plugins/session_memory.ts` (see *Fresh plugins*) records the open
+  files and `bin/fresh-session-restore` reopens them. `bin/ide-heal --dry-run` prints the plan.
 - `bin/herdr-ide` (action `layout`) splits the current tab into the layout
   above. Started from an agent pane, that agent becomes the right column; from
   a shell, the shell becomes the Terminal and a new agent opens (agent command:
@@ -720,6 +734,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | *uncommitted* | **Hover a row to see its path** | A file/change row is only as wide as the pane, so a truncated name (or one of several `mod.rs`) had no way to be identified. Hovering now draws a one-line tooltip beside the cursor with the path — Explorer relative to the tree root, SCM repo-relative (repository-prefixed when several repos are shown) — flipped above the cursor on the pane's last row and slid left at the right edge; a long path keeps its tail. Only file rows answer: SCM headers, message/commit widgets and drawers do not. |
 | *uncommitted* | **A rule separates Find from Replace** | The two inputs sat directly on top of each other and read as one block; a full blank line then looked as tall as a whole field, and a half-block `▀` bar looked like a rendering glitch (all user-reported). The spacer row now draws a dim solid `─` rule at the width of the inputs, so there is a visible separator without blank space; the Replace row, status, divider and list keep their one-row offset, and the rule row is not a click target. |
 | *uncommitted* | **AI commit without OpenCommit** | `ctrl+shift+a` and the ✧ button now call an OpenAI-compatible chat-completions API directly (`src/ai_client.rs`, through `curl` with the key on stdin, never in argv). The provider is entered in the sidebar itself: `s` → **AI commit…** opens a page with API URL, API key (shown masked), Model and Test connection (`src/ai_settings.rs`, in both views' Settings), saved to `<state dir>/ai.json` with mode 0600. The curated diff is unchanged; lock files and images are left out, and a lockfile-only change sends the `--stat` summary. The installer no longer installs `oco`/Node for this, and `verify.sh` no longer checks `~/.opencommit`. |
+| *uncommitted* | **The IDE comes back after a herdr restart** | `bin/ide-heal` (hook on `workspace.focused`, `tab.focused`, `pane.focused`) restarts a restored space's Fresh editor (`heal_fresh_pane`) and Agent (`heal_agent_pane`: `claude`/`pi` with `--continue`, `codex resume --last`). `fresh_daemon` and `ide_role=agent` tokens separate a dead pane from one never set up. `session_memory.ts` records the open files and `fresh-session-restore` reopens them, since Fresh saves its workspace only on a clean quit. |
 
 **AI commit** (`ctrl+shift+a`): the action does not commit. It writes a per-tab
 request (`src/ai_commit.rs`, under the sidebar's private runtime dir) for the focused
@@ -861,6 +876,16 @@ built-in command, so the command itself is not repeated there).
   the next unresolved block. When a file is clean it is saved, and the next file from
   `git diff --diff-filter=U` opens at its first conflict.
   The action line above each block ends with `Merge editor (Ctrl+Alt+U)`, the way to the 3-way popup.
+- **`session_memory.ts`**: records the real file buffers and the active one on `after_file_open`,
+  `buffer_activated`, `after_file_save` and `buffer_closed`, and writes only when the list changes
+  (no timers). Fresh writes its own workspace file only on a clean quit, so a killed daemon restores
+  a stale list (one project's was a week old). The record is `$FRESH_IDE_SESSION_FILE`, exported by
+  `fresh-ide` as `$STATE/fresh-session/<workspace id>-<daemon>.json` (herdr only). When the daemon is
+  down and the record is non-empty, `fresh-ide` starts `bin/fresh-session-restore NAME FILE` detached:
+  it waits up to 15 s for the daemon, reopens the files with `fresh --cmd daemon open-file`, and opens
+  the active one last. Cursor positions come from Fresh's own per-file state. It never writes an empty
+  list, because a starting daemon reports no files until they are reopened. An editor started before
+  this change has no `FRESH_IDE_SESSION_FILE` and records nothing until `dotfiles-ide.restart-fresh`.
 
 ## Updating
 
@@ -1015,6 +1040,10 @@ Two things break that loop, both worth knowing:
   (`herdr plugin action invoke herdr-sidebar.redeploy`).
 - Agent shells set `NO_COLOR=1`; a herdr server started from one renders
   monochrome. Start herdr from a normal shell.
+- **Fresh saves its workspace only on a clean quit.** A daemon that gets SIGTERM or SIGKILL saves
+  nothing, and `restore_previous_session` then brings back whatever list was saved last, possibly
+  weeks old. `session_memory.ts` keeps its own record (*Fresh plugins*); do not rely on Fresh's
+  restore after a crash.
 
 ## Troubleshooting
 
@@ -1026,6 +1055,7 @@ Two things break that loop, both worth knowing:
 | Spaces rail shows no state for CodeBuddy (`·` instead of `◐`/`○`) | its hooks must be installed AND codebuddy restarted (it snapshots settings at startup): `jq -r '.hooks \| keys[]' ~/.codebuddy/settings.json` should list SessionStart, UserPromptSubmit, PreToolUse, Stop, PermissionRequest, Notification and SessionEnd, each pointing at `~/.codebuddy/hooks/herdr-agent-state.sh` (rerun `dotfiles/install.sh` to restore them). `herdr pane list` shows `agent: codebuddy` once a hook has reported |
 | No toast when an agent blocks or finishes | the feature lives in the sidebar (rebuild + redeploy: `herdr plugin action invoke herdr-sidebar.redeploy`), and at least one sidebar must run in that herdr session. It is quiet BY DESIGN for the focused pane, for the first beat after a sidebar starts (existing states are only primed, not replayed), and while a state does not change. An agent herdr never detects needs its hook to report `agent`/`display_agent` — a CodeBuddy pane with no `agent` in `herdr pane list` has no name to put in the toast |
 | After a herdr restart (or a reboot) the IDE is empty shells and a file click reports `fresh-open` exiting 1 | `herdr pane list` shows the `Fresh` pane with **no** `fresh_daemon` token: herdr restored it without metadata and nothing runs in it. Press `ctrl+b i` (or click a file again) — `herdr-ide` heals that pane in place, so no rebuild and no lost layout. `fresh-restart` deliberately skips tokenless panes |
+| After reopening herdr a space's Fresh or Agent pane is a bare prompt | Nothing heals until that space is focused: click into it. `bin/ide-heal --dry-run` shows what it would do (`fresh PANE` / `agent PANE` / `stamp PANE`). An agent you quit in the same server run is not restarted, since its pane keeps `ide_role=agent`. An editor started before the session memory existed remembers no files until `dotfiles-ide.restart-fresh` |
 | a tab called `terminal` appeared | That is the parked Terminal (see *IDE layout*), not a leak. Ctrl+` from the IDE's Fresh pane brings it back under Fresh and the parking tab closes; Ctrl+` on the Terminal parks it again. After a herdr restart the parked tab can get a sidebar docked into it, because the restored tab has lost its `ide-parked-for` token: close that sidebar, or press Ctrl+` from the IDE tab, which finds the Terminal by its label |
 | A Fresh key does nothing | `fresh --cmd config show \| grep selection_` (config linked?), `ls -la ~/.config/fresh/plugins`, restart the daemon |
 | Fresh burns CPU while unfocused, a daemon sits at 15-25 % | `ps -eo pid,pcpu,args \| grep 'fresh-editor/fresh --server'`, then sample `/proc/<pid>/stat` twice for the live number. Two known causes: a plugin recursing into its own command (*Gotchas*), and a stray daemon with no pane attached — `fresh --cmd daemon list`, `fresh --cmd daemon kill <name>`. Baseline is ~2-3 % per editor daemon (plugins + LSP + timers). `tail -200 ~/.local/state/fresh/logs/fresh-server-<pid>.log` names the looping handler |

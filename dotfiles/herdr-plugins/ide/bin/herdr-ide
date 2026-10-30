@@ -57,13 +57,7 @@ fi
 # already built": herdr-ide exited 0 with no output and fresh-open then
 # reported "could not start the IDE editor", exit 1.)
 if [ -n "$existing" ]; then
-  cwd=$(pane_field "$existing" foreground_cwd)
-  [ -n "$cwd" ] || cwd=$(pane_field "$existing" cwd)
-  [ -n "$cwd" ] || cwd=${HERDR_STARTUP_CWD:-$PWD}
-  root=$(project_root "${1:-$cwd}")
-  name=$(ide_daemon_for "$root" "$cur_ws")
-  mark_fresh_pane "$existing" "$name"
-  "$HERDR" pane run "$existing" "$(printf '%q %q' "$here/fresh-ide" "$root")" >/dev/null
+  heal_fresh_pane "$existing" "$cur_ws" "${1:-}"
   focus_pane "$existing"
   printf '%s\n' "$existing"
   exit 0
@@ -94,6 +88,7 @@ split() { # pane direction ratio -> new pane id
 if [ -n "$anchor_agent" ]; then
   # An agent is already running here: it becomes the right column.
   agent=$anchor
+  mark_agent_pane "$agent"
   # No hook runs in an agent that is already going, so nothing clears this
   # title when that agent exits (run ide-agent-title --clear PANE to do it).
   "$here/ide-agent-title" "$agent" "$anchor_agent"
@@ -111,6 +106,7 @@ else
   if [ "$agent_cmd" != none ]; then
     agent=$(split "$term" right "$(agent_ratio_for "$term" "$saved")")
     [ -n "$agent" ] || die "pane split failed"
+    mark_agent_pane "$agent"
     # The hook titles this pane for the command and clears the title when the
     # agent exits; the first line is not hooked yet, so title it directly.
     "$HERDR" pane run "$agent" ". $(printf '%q' "$here/../shell/agent-title.zsh"); $agent_cmd" >/dev/null

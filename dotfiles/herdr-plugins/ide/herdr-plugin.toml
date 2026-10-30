@@ -66,3 +66,18 @@ command = ["./bin/fresh-pause"]
 [[events]]
 on = "tab.focused"
 command = ["./bin/fresh-pause"]
+
+# After a herdr restart every IDE pane comes back as a bare shell and nothing
+# emits an event for it. The first focus of a workspace heals its dead Fresh
+# editor and restarts its Agent column (unless herdr resumed that agent itself).
+[[events]]
+on = "workspace.focused"
+command = ["./bin/ide-heal"]
+
+[[events]]
+on = "tab.focused"
+command = ["./bin/ide-heal"]
+
+[[events]]
+on = "pane.focused"
+command = ["./bin/ide-heal"]

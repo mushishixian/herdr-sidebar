@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# fresh-session-restore NAME FILE — reopen the files recorded in FILE in daemon NAME.
+#
+# FILE is written by config/fresh/plugins/session_memory.ts, because Fresh only
+# saves its own workspace on a clean quit. fresh-ide starts this once per run,
+# detached, when the daemon is down and FILE is not empty. It waits for the
+# daemon, reopens the files (the active one last, so it ends up focused) and
+# exits. Prints nothing and always exits 0.
+set -uo pipefail
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+name=${1:-}
+file=${2:-}
+[ -n "$name" ] && [ -s "$file" ] || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+
+# Read the record before waiting, so nothing the new daemon does can change it.
+data=$(cat -- "$file" 2>/dev/null) || exit 0
+jq -e 'type == "object"' <<<"$data" >/dev/null 2>&1 || exit 0
+active=$(jq -r 'if (.active | type) == "string" then .active else empty end' <<<"$data" 2>/dev/null) || active=""
+mapfile -t files < <(jq -r 'if (.files | type) == "array" then .files[] | strings else empty end' <<<"$data" 2>/dev/null)
+
+deadline=$((SECONDS + 15))
+until daemon_alive "$name"; do
+  [ "$SECONDS" -ge "$deadline" ] && exit 0
+  sleep 0.2
+done
+
+fresh_resume "$name"
+for p in "${files[@]}"; do
+  [ -n "$p" ] && [ "$p" != "$active" ] || continue
+  if [ -f "$p" ]; then
+    timeout 10 fresh --cmd daemon open-file "$name" "$p" </dev/null >/dev/null 2>&1 || true
+  fi
+done
+if [ -n "$active" ] && [ -f "$active" ]; then
+  timeout 10 fresh --cmd daemon open-file "$name" "$active" </dev/null >/dev/null 2>&1 || true
+fi
+exit 0

@@ -21,6 +21,9 @@ if [ -n "${HERDR_PANE_ID:-}" ] && in_herdr; then
   name=$(ide_daemon_for "$root" "$cur_ws")
   mark_fresh_pane "$HERDR_PANE_ID" "$name" || true
   host_pane=$HERDR_PANE_ID
+  # Open-file record per workspace + project, written by session_memory.ts.
+  session_file="$STATE/fresh-session/${cur_ws}-$(daemon_name "$root").json"
+  mkdir -p "$(dirname "$session_file")" 2>/dev/null || true
 else
   name=$(daemon_name "$root")
 fi
@@ -48,6 +51,10 @@ push_kitty() {
 export FRESH_IDE_DAEMON="$name"
 # The daemon inherits this, so Fresh plugins find fresh-to-agent wherever the repo is checked out.
 export DOTFILES_IDE_BIN="$bin_dir"
+# session_memory.ts records the open files here; the daemon inherits it. Herdr only.
+if [ -n "$host_pane" ]; then
+  export FRESH_IDE_SESSION_FILE="$session_file"
+fi
 
 # Outside herdr there is no pane to host previews in: plain attach, as before.
 if [ -z "$host_pane" ]; then
@@ -155,6 +162,14 @@ trap 'exit 143' TERM
 watch_requests &
 watcher=$!
 stamp_host
+
+# A daemon that is down (herdr restart, reboot) comes back with the files it had
+# open. Started once per run, detached; the first `fresh -a` below creates the daemon
+# and the restorer waits for it.
+if ! daemon_alive "$name" && [ -s "$session_file" ]; then
+  "$bin_dir/fresh-session-restore" "$name" "$session_file" </dev/null >/dev/null 2>&1 &
+  disown
+fi
 
 while :; do
   # A request that arrived while no client was running.

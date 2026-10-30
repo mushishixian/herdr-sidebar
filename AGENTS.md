@@ -2428,7 +2428,20 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   every path since `fresh-open` reads it as its last line. Regression symptom, bit the maintainer
   live: the first file click after a restart showed `custom editor failed: …/fresh-open exited with
   exit status: 1` while the pane showed an empty prompt. `fresh-restart` still skips tokenless panes
-  by design.
+  by design. The heal is `bin/ide-heal`, a hook on `workspace.focused`, `tab.focused` and
+  `pane.focused` (`dotfiles/herdr-plugins/ide/herdr-plugin.toml`). herdr emits no event at restore, so
+  the first focus of a space is the trigger, and only the focused workspace is touched. Token order is
+  what makes it safe: `mark_fresh_pane` reports `fresh_daemon` BEFORE renaming to `Fresh`, and
+  `mark_agent_pane` sets `ide_role=agent` before the `Agent` label, so a labelled pane without its
+  token can only be a dead one. A restart wipes the tokens; a pane that still carries `ide_role` was
+  set up in this server run, so an agent the user quit is never restarted. An Agent pane herdr resumes
+  itself (`[session] resume_agents_on_restore`, `agent_session` in `pane.list`) is only stamped.
+  Fresh's own restore is not reliable: it writes its workspace file only on a clean quit, so a
+  SIGKILLed daemon restores a stale list. `plugins/session_memory.ts` records the real file buffers
+  (`after_file_open`, `buffer_activated`, `after_file_save`, `buffer_closed`) and
+  `bin/fresh-session-restore` reopens them when the daemon is down. The plugin writes with
+  `editor.replaceFile` (`writeFile` refuses an existing path) and never writes an empty list: a
+  starting daemon reports no files until they are reopened, so that would erase the record on every start.
 
 ## Herdr workspace
 

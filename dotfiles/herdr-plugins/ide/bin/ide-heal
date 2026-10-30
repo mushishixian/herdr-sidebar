@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# ide-heal [--dry-run] — workspace.focused / tab.focused / pane.focused hook:
+# bring back the IDE panes of the focused workspace after a herdr restart.
+#
+# herdr restores a session as bare shells. Labels (Fresh, Terminal, Agent)
+# survive, the metadata tokens and the running programs do not, and nothing
+# emits an event at restore. So the first focus event after a restart is the
+# only chance to act. For the focused workspace this relaunches:
+#   Fresh  with no fresh_daemon token: its editor (fresh-ide, in the same pane)
+#   Agent  with no ide_role token and no agent herdr resumed: the agent again,
+#          continuing the last conversation for claude, pi and codex
+# An Agent pane herdr resumed (agent or agent_session set) is only stamped, so
+# herdr's own resume stays in charge and the pane is not touched again. A pane
+# with ide_role=agent was set up in this server run and is never touched.
+#
+# Always silent and exit 0: this is a hook. Without a focused pane, or when
+# `herdr pane list` fails, nothing changes. Nothing is ever focused here.
+#
+# --dry-run prints the plan (fresh PANE / agent PANE / stamp PANE) and changes
+# nothing. Its test input IDE_HEAL_PANES_JSON (a file that replaces
+# `herdr pane list`) is honoured only in that mode.
+set -uo pipefail
+here=$(dirname "$(readlink -f "$0")")
+. "$here/lib.sh"
+
+dry=0
+[ "${1:-}" = --dry-run ] && dry=1
+
+# Pane list (JSON) on stdout. Non-zero when herdr cannot answer.
+pane_snapshot() {
+  if [ "$dry" = 1 ] && [ -n "${IDE_HEAL_PANES_JSON:-}" ]; then
+    cat "$IDE_HEAL_PANES_JSON"
+    return 0
+  fi
+  "$HERDR" pane list 2>/dev/null
+}
+
+# The workspace of the focused pane, read from the pane list on stdin. Empty
+# when no pane is focused or the JSON is unreadable.
+focused_workspace() {
+  jq -r 'first(.result.panes[]? | select(.focused == true) | .workspace_id) // empty' 2>/dev/null
+}
+
+# The plan, as "VERB PANE" lines, from the pane list on stdin. Pure: no herdr
+# call. Prints nothing when no pane is focused, because then nothing may change.
+#   fresh PANE  a Fresh pane with no fresh_daemon token: its editor is dead
+#   agent PANE  an Agent pane with no ide_role token that herdr did not resume
+#   stamp PANE  an Agent pane herdr resumed: only mark it, herdr runs it
+ide_heal_plan() {
+  local panes ws
+  panes=$(cat)
+  ws=$(focused_workspace <<<"$panes")
+  [ -n "$ws" ] || return 0
+  jq -r --arg ws "$ws" --arg fl "$FRESH_LABEL" --arg al "$AGENT_LABEL" '
+    .result.panes[]? | select(.workspace_id == $ws) as $p
+    | if $p.label == $fl then
+        (if ($p.tokens.fresh_daemon // "") == "" then "fresh \($p.pane_id)" else empty end)
+      elif $p.label == $al then
+        if ($p.tokens.ide_role // "") == "agent" then empty
+        elif ($p.agent != null or $p.agent_session != null) then "stamp \($p.pane_id)"
+        else "agent \($p.pane_id)" end
+      else empty end' <<<"$panes" 2>/dev/null || return 0
+}
+
+if [ "$dry" = 0 ]; then
+  # Hook events come in bursts, so runs are serialised. A run that cannot get
+  # the lock in 5 s gives up, and the next focus event decides again.
+  mkdir -p "$STATE" 2>/dev/null || exit 0
+  exec 9>"$STATE/ide-heal.lock" || exit 0
+  flock -w 5 9 || exit 0
+  # Hooks are silent: herdr-side output and errors go nowhere.
+  exec >/dev/null 2>&1
+fi
+
+# Read after the lock, so a run that waited sees the state the previous run left.
+panes=$(pane_snapshot) || exit 0
+plan=$(ide_heal_plan <<<"$panes") || exit 0
+if [ "$dry" = 1 ]; then
+  [ -n "$plan" ] && printf '%s\n' "$plan"
+  exit 0
+fi
+
+ws=$(focused_workspace <<<"$panes")
+while read -r verb pane; do
+  [ -n "$pane" ] || continue
+  case $verb in
+    fresh) heal_fresh_pane "$pane" "$ws" ;;
+    agent) heal_agent_pane "$pane" ;;
+    stamp) mark_agent_pane "$pane" ;;
+  esac
+done <<<"$plan"
+exit 0

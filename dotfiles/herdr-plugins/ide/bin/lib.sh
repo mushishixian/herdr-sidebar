@@ -334,11 +334,77 @@ clear_parked_token() { # pane
 }
 
 mark_fresh_pane() { # pane daemon
-  "$HERDR" pane rename "$1" "$FRESH_LABEL" >/dev/null
+  # The token goes BEFORE the label: a pane labelled Fresh without a fresh_daemon
+  # token is what ide-heal treats as a dead editor, so it must never exist.
   "$HERDR" pane report-metadata "$1" --source "$TOKEN_SOURCE" --token "fresh_daemon=$2" >/dev/null
+  "$HERDR" pane rename "$1" "$FRESH_LABEL" >/dev/null
   # Right-click goes to Fresh's own context menu, not herdr's pane menu
   # (right-clicking the pane border still opens herdr's).
   "$HERDR" pane input "$1" --right-click pane >/dev/null
+}
+
+# Mark Agent pane $1 as set up by this IDE in the current server run. The
+# ide_role token is wiped by a herdr restart, which is how ide-heal tells a
+# restored Agent (no token: restart it) from one the user quit on purpose.
+# Call it BEFORE the Agent label is applied, for the same reason as above.
+mark_agent_pane() { # pane
+  "$HERDR" pane report-metadata "$1" --source "$TOKEN_SOURCE" --token ide_role=agent >/dev/null
+}
+
+# Relaunch the editor in dead Fresh pane $1 (workspace $2) in place. $3 is an
+# optional project directory. Never focuses anything.
+heal_fresh_pane() { # pane ws [dir]
+  local pane=$1 ws=$2 dir=${3:-} cwd root name
+  cwd=$(pane_field "$pane" foreground_cwd)
+  [ -n "$cwd" ] || cwd=$(pane_field "$pane" cwd)
+  [ -n "$cwd" ] || cwd=${HERDR_STARTUP_CWD:-$PWD}
+  root=$(project_root "${dir:-$cwd}")
+  name=$(ide_daemon_for "$root" "$ws")
+  mark_fresh_pane "$pane" "$name"
+  "$HERDR" pane run "$pane" "$(printf '%q %q' "$(dirname "${BASH_SOURCE[0]}")/fresh-ide" "$root")" >/dev/null
+}
+
+# The command to run again in a restored Agent pane. Claude and pi continue
+# their last conversation with --continue; codex takes `resume --last` and keeps
+# the remaining arguments. Anything else runs unchanged.
+agent_resume_command() { # cmd
+  local cmd=$1 first rest
+  read -r first rest <<<"$cmd"
+  case $first in
+    claude | pi)
+      printf '%s --continue\n' "$cmd" ;;
+    codex)
+      if [ -n "$rest" ]; then
+        printf 'codex resume --last %s\n' "$rest"
+      else
+        printf 'codex resume --last\n'
+      fi ;;
+    *)
+      printf '%s\n' "$cmd" ;;
+  esac
+}
+
+# Restart the agent in restored Agent pane $1. Resumes the last conversation
+# only when no OTHER pane runs the same agent in the same directory, otherwise
+# two panes would continue one conversation. Marks the pane first, then types
+# the command (the same way herdr-ide starts a new agent).
+heal_agent_pane() { # pane
+  local pane=$1 cmd first panes conflict runcmd libdir
+  cmd=$(agent_command)
+  [ "$cmd" = none ] && return 0
+  first=${cmd%% *}
+  panes=$("$HERDR" pane list 2>/dev/null) || panes=''
+  conflict=$(jq -r --arg p "$pane" --arg a "$first" '
+    (first(.result.panes[]? | select(.pane_id == $p)) // {}) as $me
+    | ([$me.cwd, $me.foreground_cwd] | map(select(. != null and . != ""))) as $mine
+    | [.result.panes[]? | select(.pane_id != $p and .agent == $a)
+        | select(([.cwd, .foreground_cwd] | map(select(. != null and . != ""))) as $theirs
+            | any($theirs[]; . as $t | any($mine[]; . == $t)))] | length' <<<"$panes" 2>/dev/null) || conflict=1
+  if [ "$conflict" = 0 ]; then runcmd=$(agent_resume_command "$cmd"); else runcmd=$cmd; fi
+  libdir=$(dirname "${BASH_SOURCE[0]}")
+  mark_agent_pane "$pane"
+  "$HERDR" pane run "$pane" ". $(printf '%q' "$libdir/../shell/agent-title.zsh"); $runcmd" >/dev/null
+  "$libdir/ide-agent-title" "$pane" "$cmd"
 }
 
 # New editor pane above the terminal pane $1, rooted at $2, taking $3 of the
