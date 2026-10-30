@@ -172,6 +172,7 @@ pub fn save(config: &AiConfig) -> Result<(), String> {
         let _ = std::fs::remove_file(&temp);
         return Err(format!("could not save AI settings: {e}"));
     }
+
     Ok(())
 }
 

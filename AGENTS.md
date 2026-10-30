@@ -1303,7 +1303,10 @@ HACKING.md — budget time for that before promising a patched build.
   lands on the file; a conflicted (`!`) row goes to the merge editor popup instead (`open_entry`). A deleted entry has
   nothing on disk and keeps `open_diff`; the menu's `Open Diff` / `Open Diff Preview` always mean the
   diff, and drawer refs (commits/stashes/branches) are unaffected. `doc_key_for_row` returns `None`
-  for a file row now, because a click no longer opens a diff document to pin.
+  for a file row now, because a click no longer opens a diff document to pin. The hover row carries a
+  `±` button directly right of `↗` (`FileHoverAction::Diff` → `open_diff_viewer`): one click on a
+  changed row shows the read-only diff WITHOUT going through `open_entry`, so a configured editor no
+  longer stands between you and the change. Staged rows read `↗ ± −`, unstaged `↗ ± ↶ +`.
   A row that owns no action — a section header, a repository header, the commit box — used to
   swallow `o`/`m` silently, which reads as a broken key: `section_row_hint` flashes what to do.
 - **The Branches drawer tells local branches from remote-tracking refs.** `git branch -a` lists

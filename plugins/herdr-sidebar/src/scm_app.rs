@@ -1088,6 +1088,7 @@ impl ChangesHeaderAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FileHoverAction {
     Open,
+    Diff,
     Discard,
     Stage,
     Unstage,
@@ -1097,6 +1098,7 @@ impl FileHoverAction {
     fn glyph(self) -> &'static str {
         match self {
             Self::Open => "↗",
+            Self::Diff => "±",
             Self::Discard => "↶",
             Self::Stage => "+",
             Self::Unstage => "−",
@@ -1106,6 +1108,7 @@ impl FileHoverAction {
     fn footer_hint(self) -> &'static str {
         match self {
             Self::Open => "↗ Open in Editor",
+            Self::Diff => "± Diff Preview",
             Self::Discard => "↶ Discard Changes",
             Self::Stage => "+ Stage Changes",
             Self::Unstage => "− Unstage Changes",
@@ -2984,7 +2987,8 @@ impl App {
                 }
                 // Clicking a changed file shows its diff, like VS Code — except
                 // a conflicted one, which opens in the merge editor to be resolved.
-                // Hover actions open, discard, stage, or unstage that exact entry.
+                // Hover actions open, preview the diff, discard, stage, or
+                // unstage that exact entry.
                 Row::Staged(r, i) => {
                     self.focus = Focus::List;
                     self.select(index);
@@ -2998,6 +3002,7 @@ impl App {
                             .flatten()
                         {
                             Some(FileHoverAction::Open) => self.open_entry(r, &entry, true),
+                            Some(FileHoverAction::Diff) => self.open_diff_viewer(r, &entry, true),
                             Some(FileHoverAction::Unstage) => {
                                 if let Err(error) = self.repos[r].git.unstage(&entry) {
                                     self.flash = Some((error, true));
@@ -3024,6 +3029,7 @@ impl App {
                             .flatten()
                         {
                             Some(FileHoverAction::Open) => self.open_entry(r, &entry, false),
+                            Some(FileHoverAction::Diff) => self.open_diff_viewer(r, &entry, false),
                             Some(FileHoverAction::Discard) => {
                                 self.overlay = Some(Overlay::ConfirmDiscard { repo: r, entry });
                             }
@@ -7118,9 +7124,14 @@ fn changes_header_action_at(x: u16, width: u16, count: usize) -> Option<ChangesH
 }
 
 fn file_hover_actions(staged: bool) -> &'static [FileHoverAction] {
-    const STAGED: &[FileHoverAction] = &[FileHoverAction::Open, FileHoverAction::Unstage];
+    const STAGED: &[FileHoverAction] = &[
+        FileHoverAction::Open,
+        FileHoverAction::Diff,
+        FileHoverAction::Unstage,
+    ];
     const UNSTAGED: &[FileHoverAction] = &[
         FileHoverAction::Open,
+        FileHoverAction::Diff,
         FileHoverAction::Discard,
         FileHoverAction::Stage,
     ];
@@ -7835,36 +7846,44 @@ mod tests {
     #[test]
     fn file_hover_actions_match_their_rendered_columns() {
         assert_eq!(file_hover_action_start(18, false, 1), None);
-        assert_eq!(file_hover_action_start(30, false, 1), Some(19));
+        assert_eq!(file_hover_action_start(30, false, 1), Some(16));
         assert_eq!(
-            file_hover_action_at(19, 30, false, 1),
+            file_hover_action_at(16, 30, false, 1),
             Some(FileHoverAction::Open)
         );
         assert_eq!(
-            file_hover_action_at(23, 30, false, 1),
+            file_hover_action_at(19, 30, false, 1),
+            Some(FileHoverAction::Diff)
+        );
+        assert_eq!(
+            file_hover_action_at(22, 30, false, 1),
             Some(FileHoverAction::Discard)
         );
         assert_eq!(
-            file_hover_action_at(27, 30, false, 1),
+            file_hover_action_at(25, 30, false, 1),
             Some(FileHoverAction::Stage)
         );
         assert_eq!(file_hover_action_at(28, 30, false, 1), None);
 
-        assert_eq!(file_hover_action_start(30, true, 1), Some(22));
+        assert_eq!(file_hover_action_start(30, true, 1), Some(19));
         assert_eq!(
-            file_hover_action_at(22, 30, true, 1),
+            file_hover_action_at(19, 30, true, 1),
             Some(FileHoverAction::Open)
         );
         assert_eq!(
-            file_hover_action_at(26, 30, true, 1),
+            file_hover_action_at(22, 30, true, 1),
+            Some(FileHoverAction::Diff)
+        );
+        assert_eq!(
+            file_hover_action_at(25, 30, true, 1),
             Some(FileHoverAction::Unstage)
         );
 
         // A conflicted row's marker is two cells wide (`!2`), so the buttons
         // shift one column left with it.
-        assert_eq!(file_hover_action_start(30, false, 2), Some(18));
+        assert_eq!(file_hover_action_start(30, false, 2), Some(15));
         assert_eq!(
-            file_hover_action_at(18, 30, false, 2),
+            file_hover_action_at(15, 30, false, 2),
             Some(FileHoverAction::Open)
         );
     }
@@ -8005,6 +8024,7 @@ mod tests {
     #[test]
     fn file_hover_actions_describe_their_footer_tooltips() {
         assert_eq!(FileHoverAction::Open.footer_hint(), "↗ Open in Editor");
+        assert_eq!(FileHoverAction::Diff.footer_hint(), "± Diff Preview");
         assert_eq!(FileHoverAction::Discard.footer_hint(), "↶ Discard Changes");
         assert_eq!(FileHoverAction::Stage.footer_hint(), "+ Stage Changes");
         assert_eq!(FileHoverAction::Unstage.footer_hint(), "− Unstage Changes");
