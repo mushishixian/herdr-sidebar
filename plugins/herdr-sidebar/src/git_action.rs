@@ -310,11 +310,7 @@ fn focused_pane_id() -> Option<String> {
 /// Focus is only given back when the activation itself took it: the user may
 /// have moved on in the meantime, and a pane that is not ours must never be
 /// overridden. Pure, so the decision is testable without a herdr server.
-pub fn focus_to_restore(
-    before: Option<&str>,
-    now: &str,
-    now_is_sidebar: bool,
-) -> Option<String> {
+pub fn focus_to_restore(before: Option<&str>, now: &str, now_is_sidebar: bool) -> Option<String> {
     let before = before.filter(|pane| !pane.is_empty())?;
     if now.is_empty() || now == before || !now_is_sidebar {
         return None;
@@ -328,9 +324,11 @@ fn restore_focus(before: Option<String>) {
         return;
     };
     let now = crate::launch::server_focused_pane_id(&list);
-    let Some(pane) =
-        focus_to_restore(before.as_deref(), &now, crate::launch::pane_has_token(&list, &now))
-    else {
+    let Some(pane) = focus_to_restore(
+        before.as_deref(),
+        &now,
+        crate::launch::pane_has_token(&list, &now),
+    ) else {
         return;
     };
     let _ = crate::ipc::call_text("pane.focus", serde_json::json!({ "pane_id": pane }));

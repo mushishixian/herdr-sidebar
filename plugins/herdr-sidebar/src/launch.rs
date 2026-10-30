@@ -492,8 +492,8 @@ fn sibling_cwds(pane_list_json: &str, my_pane_id: &str) -> Vec<SiblingCwd> {
         .iter()
         .filter(|p| {
             let in_my_tab = p.tab_id.as_deref() == my_tab;
-            let parked_for_me = my_tab.is_some()
-                && p.tokens.get(PARKED_TOKEN).and_then(|v| v.as_str()) == my_tab;
+            let parked_for_me =
+                my_tab.is_some() && p.tokens.get(PARKED_TOKEN).and_then(|v| v.as_str()) == my_tab;
             (in_my_tab || parked_for_me)
                 && p.pane_id.as_deref() != Some(my_pane_id)
                 && !p.is_explorer()
@@ -2041,7 +2041,11 @@ mod tests {
             )
         };
         // Tab scope: the whole tab is parked.
-        let all = pane_list(&format!("{},{}", parked("w1:p1", "w1:t2"), parked("w1:p2", "w1:t2")));
+        let all = pane_list(&format!(
+            "{},{}",
+            parked("w1:p1", "w1:t2"),
+            parked("w1:p2", "w1:t2")
+        ));
         assert!(in_parking_tab(&all, "w1:t2"));
         // Workspace scope: the focused pane decides the tab.
         let focused = pane_list(
@@ -2057,9 +2061,8 @@ mod tests {
         ));
         assert!(!in_parking_tab(&mixed, "w1:t2"));
         // An empty token value does not count as parked.
-        let empty_value = pane_list(
-            r#"{"pane_id":"w1:p1","tab_id":"w1:t2","tokens":{"ide-parked-for":""}}"#,
-        );
+        let empty_value =
+            pane_list(r#"{"pane_id":"w1:p1","tab_id":"w1:t2","tokens":{"ide-parked-for":""}}"#);
         assert!(!in_parking_tab(&empty_value, "w1:t2"));
         // Garbage, empty lists and unknown scopes are never a parking tab.
         for hostile in ["", "garbage", "null", r#"{"result":{"panes":[]}}"#] {

@@ -52,6 +52,7 @@ pub fn announce_flag(flag: &str, arg: Option<&str>) {
         ("--search-popup-open", _) => ("search-popup", "Search in files"),
         ("--replace-popup-open", _) => ("replace-popup", "Replace in files"),
         ("--symbol-popup-open", _) => ("symbol-popup", "Go to symbol"),
+        ("--merge-popup-open", _) => ("merge-editor", "Resolve merge conflicts"),
         ("--git-popup-open", Some("switch")) => ("git-switch-branch", "Switch branch"),
         ("--git-popup-open", Some("rename")) => ("git-rename-branch", "Rename branch"),
         ("--git-popup-open", Some("merge")) => ("git-merge-branch", "Merge into current branch"),

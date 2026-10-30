@@ -574,7 +574,10 @@ fn replace_in_file(
     Ok(count)
 }
 
-fn write_atomically(path: &Path, contents: &str) -> Result<(), String> {
+/// Replace `path` with `contents` through a sibling temp file and a rename, so
+/// a crash or a full disk leaves the original intact. The original's permissions
+/// are copied over. Shared by the search/replace popup and the merge editor.
+pub fn write_atomically(path: &Path, contents: &str) -> Result<(), String> {
     let dir = path
         .parent()
         .ok_or_else(|| "no parent directory".to_string())?;

@@ -686,8 +686,11 @@ mod tests {
         })
         .to_string();
         let transcript_file = temp_path("child-transcript");
-        std::fs::write(&transcript_file, [HEADER, DISPATCH, &started, SETTLED].join("\n"))
-            .expect("write transcript fixture");
+        std::fs::write(
+            &transcript_file,
+            [HEADER, DISPATCH, &started, SETTLED].join("\n"),
+        )
+        .expect("write transcript fixture");
         let pane = PiPane {
             pane_id: "p1".to_string(),
             session_path: Some(transcript_file.display().to_string()),
@@ -962,7 +965,10 @@ mod tests {
         assert!(std::fs::metadata(&path).expect("stat").len() > MAX_READ_BYTES as u64);
         let result = read_transcript(&path).expect("read fixture");
         std::fs::remove_file(&path).ok();
-        assert!(result.busy(|_| false), "the tail's last record is a toolUse turn");
+        assert!(
+            result.busy(|_| false),
+            "the tail's last record is a toolUse turn"
+        );
         assert!(result.running.is_empty());
     }
 

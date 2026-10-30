@@ -65,6 +65,14 @@ pub struct Palette {
     /// Advisory text (the editor's "experimental" tag, the font installer's
     /// manual command) — `Yellow` is illegible on a light background.
     pub warning: Color,
+    /// The 3-way merge editor (`merge_popup`): Current / Incoming / Base row
+    /// tints, their header bands, and the header text drawn on those bands.
+    pub merge_current_bg: Color,
+    pub merge_incoming_bg: Color,
+    pub merge_base_bg: Color,
+    pub merge_current_header_bg: Color,
+    pub merge_incoming_header_bg: Color,
+    pub merge_header_fg: Color,
 }
 
 // VS Code's dark-theme git decoration colors, shared by the Source Control
@@ -106,6 +114,13 @@ const VSCODE_PALETTE: Palette = Palette {
     diff_del_mark: Color::Rgb(0xd1, 0x6d, 0x76),
     diff_add_mark: Color::Rgb(0x8c, 0xc9, 0x8f),
     warning: Color::Yellow,
+    // VS Code's merge-editor colors, pre-blended (RGB for the same reason as the diff tints).
+    merge_current_bg: Color::Rgb(0x25, 0x40, 0x3b),
+    merge_incoming_bg: Color::Rgb(0x25, 0x39, 0x4b),
+    merge_base_bg: Color::Rgb(0x33, 0x33, 0x33),
+    merge_current_header_bg: Color::Rgb(0x2f, 0x73, 0x66),
+    merge_incoming_header_bg: Color::Rgb(0x2f, 0x62, 0x8e),
+    merge_header_fg: Color::Rgb(0xff, 0xff, 0xff),
 };
 
 // The same vocabulary drawn for a LIGHT terminal background: VS Code Light+
@@ -151,6 +166,13 @@ const LIGHT_PALETTE: Palette = Palette {
     diff_del_mark: Color::Rgb(0xb3, 0x1d, 0x28),
     diff_add_mark: Color::Rgb(0x1a, 0x7f, 0x37),
     warning: Color::Rgb(0x9a, 0x67, 0x00),
+    // The merge-editor tints drawn for white.
+    merge_current_bg: Color::Rgb(0xd9, 0xf4, 0xef),
+    merge_incoming_bg: Color::Rgb(0xd9, 0xed, 0xff),
+    merge_base_bg: Color::Rgb(0xec, 0xec, 0xec),
+    merge_current_header_bg: Color::Rgb(0xa0, 0xe4, 0xd7),
+    merge_incoming_header_bg: Color::Rgb(0xa0, 0xd3, 0xff),
+    merge_header_fg: Color::Rgb(0x1f, 0x1f, 0x1f),
 };
 
 const TERMINAL_PALETTE: Palette = Palette {
@@ -191,6 +213,13 @@ const TERMINAL_PALETTE: Palette = Palette {
     diff_del_mark: Color::Rgb(0xd1, 0x6d, 0x76),
     diff_add_mark: Color::Rgb(0x8c, 0xc9, 0x8f),
     warning: Color::Yellow,
+    // The merge-editor tints stay RGB, as the diff tints do.
+    merge_current_bg: Color::Rgb(0x25, 0x40, 0x3b),
+    merge_incoming_bg: Color::Rgb(0x25, 0x39, 0x4b),
+    merge_base_bg: Color::Rgb(0x33, 0x33, 0x33),
+    merge_current_header_bg: Color::Rgb(0x2f, 0x73, 0x66),
+    merge_incoming_header_bg: Color::Rgb(0x2f, 0x62, 0x8e),
+    merge_header_fg: Color::Rgb(0xff, 0xff, 0xff),
 };
 
 /// 0 = vscode, 1 = terminal, 2 = light. The numbering is historical: this used
@@ -744,10 +773,7 @@ pub fn tooltip_rect(area: Rect, mouse: (u16, u16), width: u16) -> Option<Rect> {
         return None;
     }
     let width = width.min(area.width);
-    let x = mouse
-        .0
-        .min(area.x + area.width - width)
-        .max(area.x);
+    let x = mouse.0.min(area.x + area.width - width).max(area.x);
     let below = mouse.1.saturating_add(1);
     let y = if below < area.y + area.height {
         below
@@ -1190,6 +1216,7 @@ mod tests {
             light.warning,
             light.diff_del_mark,
             light.diff_add_mark,
+            light.merge_header_fg,
         ] {
             assert!(luma(fg) < 0.55, "foreground {fg:?} is too pale on white");
         }
@@ -1210,6 +1237,11 @@ mod tests {
             light.muted_button_bg,
             light.button_bg,
             light.button_focus_bg,
+            light.merge_current_bg,
+            light.merge_incoming_bg,
+            light.merge_base_bg,
+            light.merge_current_header_bg,
+            light.merge_incoming_header_bg,
         ] {
             assert!(luma(bg) > 0.6, "background {bg:?} is too dark for white");
         }
@@ -1434,7 +1466,6 @@ mod tests {
         assert_eq!(truncate_to("abc".into(), 1), "");
     }
 
-
     #[test]
     fn a_long_path_keeps_its_tail_for_the_tooltip() {
         let path = "dotfiles/config/herdr/scripts/deep/thing.sh";
@@ -1450,10 +1481,7 @@ mod tests {
     fn the_tooltip_hugs_the_cursor_and_stays_inside_the_pane() {
         let area = Rect::new(2, 3, 40, 10);
         // Below the cursor, inside the pane.
-        assert_eq!(
-            tooltip_rect(area, (5, 4), 10),
-            Some(Rect::new(5, 5, 10, 1))
-        );
+        assert_eq!(tooltip_rect(area, (5, 4), 10), Some(Rect::new(5, 5, 10, 1)));
         // A cursor near the right edge slides the box left.
         assert_eq!(
             tooltip_rect(area, (39, 4), 10),

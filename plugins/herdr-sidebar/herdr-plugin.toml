@@ -122,6 +122,14 @@ title = "Go to symbol"
 placement = "popup"
 command = ["./target/release/herdr-sidebar", "--symbol-popup"]
 platforms = ["linux", "macos"]
+# Merge editor (Ctrl+Alt+U): VS Code-style 3-way resolver for conflicted files
+# (`merge_popup`). Popup placement, reused by the Source Control `!` rows.
+[[panes]]
+id = "merge-editor"
+title = "Merge editor"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--merge-popup"]
+platforms = ["linux", "macos"]
 
 
 [[actions]]
@@ -150,6 +158,20 @@ platforms = ["windows"]
 title = "Go to symbol (popup)"
 description = "Popup: fuzzy-search a project-wide symbol list (heuristic, no LSP) and open the definition."
 command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--symbol-popup-open"]
+
+[[actions]]
+id = "merge-editor"
+platforms = ["linux", "macos"]
+title = "Resolve merge conflicts (popup)"
+description = "Popup: resolve git merge conflicts in a 3-way editor (Incoming, Current, Result)."
+command = ["./target/release/herdr-sidebar", "--merge-popup-open"]
+
+[[actions]]
+id = "merge-editor-windows"
+platforms = ["windows"]
+title = "Resolve merge conflicts (popup)"
+description = "Popup: resolve git merge conflicts in a 3-way editor (Incoming, Current, Result)."
+command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--merge-popup-open"]
 
 
 [[actions]]

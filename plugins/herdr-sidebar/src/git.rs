@@ -1105,6 +1105,62 @@ impl Git {
         run_in(&self.root, &["merge", "--abort"]).map(drop)
     }
 
+    /// Repo-relative paths git still lists as unmerged (`--diff-filter=U`),
+    /// sorted and deduped. `-z` keeps paths with spaces or odd bytes intact.
+    pub fn conflicted_paths(&self) -> Result<Vec<String>, String> {
+        let out = run_in(
+            &self.root,
+            &["diff", "--name-only", "--diff-filter=U", "-z", "--"],
+        )?;
+        let mut paths: Vec<String> = out
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    /// Which sides of an unmerged path exist, read from its index stages. The
+    /// merge editor uses this to say what happened instead of showing an
+    /// empty side. Any git failure reads as [`ConflictKind::Other`].
+    pub fn conflict_kind(&self, rel: &str) -> ConflictKind {
+        let Ok(out) = run_in(&self.root, &["ls-files", "-u", "-z", "--", rel]) else {
+            return ConflictKind::Other;
+        };
+        let mut stages = [false; 4];
+        for entry in out.split('\0').filter(|entry| !entry.is_empty()) {
+            // `<mode> <object> <stage>\t<path>`.
+            let stage = entry
+                .split('\t')
+                .next()
+                .and_then(|meta| meta.split(' ').nth(2))
+                .and_then(|stage| stage.parse::<usize>().ok());
+            if let Some(slot) = stage.and_then(|stage| stages.get_mut(stage)) {
+                *slot = true;
+            }
+        }
+        match (stages[1], stages[2], stages[3]) {
+            (true, true, true) => ConflictKind::BothModified,
+            (false, true, true) => ConflictKind::BothAdded,
+            (true, false, true) => ConflictKind::DeletedByUs,
+            (true, true, false) => ConflictKind::DeletedByThem,
+            _ => ConflictKind::Other,
+        }
+    }
+
+    /// Stage a resolved path (`git add --`). Git then drops its unmerged
+    /// entries for it, which is how a resolution is recorded.
+    pub fn mark_resolved(&self, rel: &str) -> Result<(), String> {
+        run_in(&self.root, &["add", "--", rel]).map(drop)
+    }
+
+    /// Resolve a modify/delete conflict by removing the file (`git rm --`).
+    pub fn remove_conflicted(&self, rel: &str) -> Result<(), String> {
+        run_in(&self.root, &["rm", "--quiet", "--", rel]).map(drop)
+    }
+
     /// Checkout one picker entry. Remote refs become ordinary local tracking
     /// branches, matching editor branch pickers rather than leaving a detached
     /// HEAD. Dirty-worktree failures are returned unchanged; nothing is forced.
@@ -1245,6 +1301,21 @@ pub struct Reworded {
     /// The original commit is on a remote-tracking branch, so a remote needs a
     /// force-push to match the rewritten history.
     pub pushed: bool,
+}
+
+/// How a path is unmerged, from the index stages git keeps for it. The merge
+/// editor shows a different message for a deletion than for a text conflict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictKind {
+    /// Both sides changed the file (stages 1, 2 and 3).
+    BothModified,
+    /// Both sides added the file with no common ancestor (stages 2 and 3).
+    BothAdded,
+    /// Ours deleted it while theirs changed it (stages 1 and 3).
+    DeletedByUs,
+    /// Theirs deleted it while ours changed it (stages 1 and 2).
+    DeletedByThem,
+    Other,
 }
 
 /// What [`Git::undo_last_commit`] removed; `hash` is 7 characters.
@@ -2833,6 +2904,56 @@ mod tests {
         run_in(&git.root, &["config", "user.name", "t"]).unwrap();
         run_in(&git.root, &["config", "user.email", "t@t.dev"]).unwrap();
         git
+    }
+
+    /// A real merge that conflicts on `a.txt` (both modified) and on `b.txt`
+    /// (ours edited it, theirs deleted it).
+    fn repo_with_conflicts(name: &str) -> Git {
+        let git = repo_with_identity(name);
+        commit_file(&git, "a.txt", "base\n", "base a");
+        commit_file(&git, "b.txt", "base\n", "base b");
+        run_in(&git.root, &["checkout", "-q", "-b", "side"]).unwrap();
+        commit_file(&git, "a.txt", "theirs\n", "side a");
+        run_in(&git.root, &["rm", "-q", "b.txt"]).unwrap();
+        run_in(
+            &git.root,
+            &[
+                "-c",
+                "user.email=t@t.dev",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "side b",
+            ],
+        )
+        .unwrap();
+        run_in(&git.root, &["checkout", "-q", "-"]).unwrap();
+        commit_file(&git, "a.txt", "ours\n", "main a");
+        commit_file(&git, "b.txt", "ours edit\n", "main b");
+        // The merge is expected to stop with conflicts, so its exit is ignored.
+        let _ = run_in(&git.root, &["merge", "-q", "--no-edit", "side"]);
+        git
+    }
+
+    /// Unmerged paths come from git itself, and the stage numbers classify them.
+    #[test]
+    fn conflicted_paths_and_kinds_come_from_index_stages() {
+        let git = repo_with_conflicts("conflicts");
+        assert!(git.merge_in_progress());
+        assert_eq!(git.conflicted_paths().unwrap(), ["a.txt", "b.txt"]);
+        assert_eq!(git.conflict_kind("a.txt"), ConflictKind::BothModified);
+        assert_eq!(git.conflict_kind("b.txt"), ConflictKind::DeletedByThem);
+        assert_eq!(git.conflict_kind("untouched.txt"), ConflictKind::Other);
+
+        git.mark_resolved("a.txt").unwrap();
+        assert_eq!(git.conflicted_paths().unwrap(), ["b.txt"]);
+        assert_eq!(git.conflict_kind("a.txt"), ConflictKind::Other);
+
+        git.remove_conflicted("b.txt").unwrap();
+        assert!(git.conflicted_paths().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&git.root);
     }
 
     /// Like `commit_file`, but with a fixed foreign author and date, so a test can

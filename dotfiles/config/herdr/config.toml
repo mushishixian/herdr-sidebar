@@ -190,6 +190,16 @@ type = "plugin_action"
 command = "herdr-sidebar.git-new-branch"
 description = "git: 新建分支（从 HEAD 拉出并切过去）"
 
+# ---- 合并冲突：VS Code 式三栏合并编辑器（插件弹窗，Incoming 左 / Current 右 / Result 下）----
+# Source Control 里的冲突行（!）按 o、点击或悬停 ↗ 也会进同一个编辑器；这个键是不在
+# Source Control 时的入口。键位不用 ctrl+alt+m：没有 kitty 键盘协议时 Ctrl+M 就是回车
+# （CR），Ctrl+Alt+M 可能被当成 Alt+Enter；ctrl+alt+u 没有这个歧义。
+[[keys.command]]
+key = "ctrl+alt+u"
+type = "plugin_action"
+command = "herdr-sidebar.merge-editor"
+description = "解决合并冲突 · VS Code 式三栏合并编辑器（Ctrl+Alt+U）"
+
 # ---- 全功能档：lazygit 的分支面板（space 切 / M 合并进当前 / R 重命名 / n 新建 / d 删除）----
 # 三个专用弹窗干细活；要翻面板、看 reflog、干上面三件以外的事就走这个。
 # 跟 alt+w（整个 lazygit）、ctrl+alt+h（lazygit log）是一家人。

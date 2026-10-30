@@ -37,12 +37,11 @@ use herdr_sidebar::suggest;
 use herdr_sidebar::ui::{
     SelectAll, TitleAction, activity_button_style, activity_icons, branch_icon,
     chrome_button_style, draw_activity_caps, draw_hover_tooltip, draw_scrollbar, gear_icon, hits,
-    hits_activity_button,
-    hits_collapse_button, hover_style, hover_tooltip_visible, icon_style as ui_icon_style,
-    keep_visible_scroll, palette,
-    selected_text_style, selection_style, set_color_theme, sibling_panes_of, sparkle_icon,
-    status_color, title_action_spans, title_actions_visible, title_actions_width, truncate_to,
-    within, wrap_footer_message, wrap_hints,
+    hits_activity_button, hits_collapse_button, hover_style, hover_tooltip_visible,
+    icon_style as ui_icon_style, keep_visible_scroll, palette, selected_text_style,
+    selection_style, set_color_theme, sibling_panes_of, sparkle_icon, status_color,
+    title_action_spans, title_actions_visible, title_actions_width, truncate_to, within,
+    wrap_footer_message, wrap_hints,
 };
 
 /// How many log lines the history-ish drawers fetch.
@@ -89,10 +88,11 @@ fn sync_is_primary(status: &Status) -> bool {
 
 /// The default action on a changed file (click, `o`, the hover `↗`) hands the
 /// FILE to the editor — that is what "go to the change" means when you are about
-/// to work on it, and for a conflicted (`!`) entry Fresh's inline merge resolver
-/// (Alt+C / Alt+I / Alt+M, Alt+D next) is the only thing that can resolve it.
-/// A DELETED entry has no file left on disk, so it keeps its read-only diff, and
-/// the menu's "Open Diff" / "Open Diff Preview" still mean the diff.
+/// to work on it. A conflicted (`!`) file goes to the merge editor popup instead
+/// (`open_entry`), and "Open File in Editor" still reaches the raw file in Fresh
+/// (where its inline Alt+C / Alt+I / Alt+M resolver also works). A DELETED entry
+/// has no file left on disk, so it keeps its read-only diff, and the menu's
+/// "Open Diff" / "Open Diff Preview" still mean the diff.
 fn opens_in_editor(entry: &FileEntry) -> bool {
     entry.letter != 'D'
 }
@@ -1034,6 +1034,8 @@ enum MenuAction {
     OpenDiffPreview,
     /// Hand the file itself to the configured editor (Fresh), not its diff.
     OpenInEditor,
+    /// A conflicted (`!`) file in the merge editor popup (`open_entry`).
+    ResolveConflicts,
     StageOrUnstage,
     Discard,
     CopyPath,
@@ -1109,6 +1111,54 @@ impl FileHoverAction {
             Self::Unstage => "− Unstage Changes",
         }
     }
+}
+
+/// The file-row actions of the context menu, before the pane section. A
+/// conflicted (`!`) row leads with the merge editor; "Open File in Editor"
+/// still hands the raw file to the editor.
+fn file_menu_entries(letter: char, staged: bool) -> Vec<MenuEntry> {
+    let mut entries = Vec::new();
+    if letter == '!' {
+        entries.push(MenuEntry::Action(
+            MenuAction::ResolveConflicts,
+            "Resolve in Merge Editor",
+        ));
+    }
+    entries.extend([
+        MenuEntry::Action(MenuAction::OpenDiff, "Open Diff"),
+        MenuEntry::Action(MenuAction::OpenDiffPreview, "Open Diff Preview"),
+    ]);
+    // A deleted file has nothing left on disk to hand to the shell, and the
+    // diff already covers it — so both of these are for existing files only.
+    if letter != 'D' {
+        entries.push(MenuEntry::Action(
+            MenuAction::OpenInEditor,
+            "Open File in Editor",
+        ));
+        entries.push(MenuEntry::Action(
+            MenuAction::OpenExternal,
+            "Open with Default App",
+        ));
+    }
+    entries.push(MenuEntry::Action(
+        MenuAction::StageOrUnstage,
+        if staged {
+            "Unstage Changes"
+        } else {
+            "Stage Changes"
+        },
+    ));
+    if !staged {
+        entries.push(MenuEntry::Action(MenuAction::Discard, "Discard Changes…"));
+    }
+    entries.extend([
+        MenuEntry::Separator,
+        MenuEntry::Action(MenuAction::CopyPath, "Copy Path"),
+        MenuEntry::Action(MenuAction::CopyRelativePath, "Copy Relative Path"),
+        MenuEntry::Separator,
+        MenuEntry::Action(MenuAction::Reveal, "Reveal in File Explorer"),
+    ]);
+    entries
 }
 
 #[derive(Clone, Copy)]
@@ -2933,7 +2983,7 @@ impl App {
                     }
                 }
                 // Clicking a changed file shows its diff, like VS Code — except
-                // a conflicted one, which opens in the editor to be resolved.
+                // a conflicted one, which opens in the merge editor to be resolved.
                 // Hover actions open, discard, stage, or unstage that exact entry.
                 Row::Staged(r, i) => {
                     self.focus = Focus::List;
@@ -3226,40 +3276,7 @@ impl App {
             _ => return, // section headers have no menu
         };
         let Some(entry) = entry.cloned() else { return };
-        let mut entries = vec![
-            MenuEntry::Action(MenuAction::OpenDiff, "Open Diff"),
-            MenuEntry::Action(MenuAction::OpenDiffPreview, "Open Diff Preview"),
-        ];
-        // A deleted file has nothing left on disk to hand to the shell, and the
-        // diff already covers it — so both of these are for existing files only.
-        if entry.letter != 'D' {
-            entries.push(MenuEntry::Action(
-                MenuAction::OpenInEditor,
-                "Open File in Editor",
-            ));
-            entries.push(MenuEntry::Action(
-                MenuAction::OpenExternal,
-                "Open with Default App",
-            ));
-        }
-        entries.push(MenuEntry::Action(
-            MenuAction::StageOrUnstage,
-            if staged {
-                "Unstage Changes"
-            } else {
-                "Stage Changes"
-            },
-        ));
-        if !staged {
-            entries.push(MenuEntry::Action(MenuAction::Discard, "Discard Changes…"));
-        }
-        entries.extend([
-            MenuEntry::Separator,
-            MenuEntry::Action(MenuAction::CopyPath, "Copy Path"),
-            MenuEntry::Action(MenuAction::CopyRelativePath, "Copy Relative Path"),
-            MenuEntry::Separator,
-            MenuEntry::Action(MenuAction::Reveal, "Reveal in File Explorer"),
-        ]);
+        let mut entries = file_menu_entries(entry.letter, staged);
         entries.extend(self.pane_menu_section());
         self.overlay = Some(Overlay::Menu {
             x,
@@ -4404,6 +4421,7 @@ impl App {
             }
             MenuAction::OpenDiff => self.open_diff(repo, &entry, staged),
             MenuAction::OpenDiffPreview => self.open_diff_viewer(repo, &entry, staged),
+            MenuAction::ResolveConflicts => self.open_entry(repo, &entry, staged),
             // `o` and a click on a changed row show the diff (read-only); this is
             // the explicit "take me to the file" that hands it to the editor.
             MenuAction::OpenInEditor => {
@@ -4803,8 +4821,8 @@ impl App {
     /// `HERDR_SIDEBAR_OPEN_DIFF=1`; otherwise, or when the editor cannot be
     /// launched, the diff goes to the preview pane.
     /// The default action on a changed file (click, hover "open", `o`). A
-    /// conflicted file opens in the editor so Fresh's inline merge resolver can
-    /// take over; anything else shows the read-only diff preview.
+    /// conflicted file opens in the merge editor popup; anything else shows the
+    /// read-only diff preview.
     fn open_entry(&mut self, repo: usize, entry: &FileEntry, staged: bool) {
         if !opens_in_editor(entry) {
             self.open_diff(repo, entry, staged);
@@ -4819,6 +4837,14 @@ impl App {
         // file to resolve in the editor, so that case keeps the diff.
         if !file.exists() {
             self.open_diff(repo, entry, staged);
+            return;
+        }
+        // A conflicted file is resolved in the merge editor popup, not opened
+        // raw: the popup owns the file until it is completed or closed.
+        if entry.letter == '!' {
+            if let Err(error) = herdr_sidebar::merge_popup::open_file(&file) {
+                self.flash = Some((format!("merge editor: {error}"), true));
+            }
             return;
         }
         if let Err(error) = herdr_sidebar::file_popup::open_file_in_workspace(
@@ -4838,7 +4864,7 @@ impl App {
     /// had to be closed again (user-reported). Opening a FILE - tree click, Quick
     /// Open, a search hit - still goes to the editor when one is configured.
     /// A conflicted entry never reaches here from a click or `o` (see
-    /// `open_entry`): it opens in the editor so Fresh can resolve the merge.
+    /// `open_entry`): it opens in the merge editor popup instead.
     fn open_diff(&mut self, repo: usize, entry: &FileEntry, staged: bool) {
         self.open_diff_viewer(repo, entry, staged);
     }
@@ -5072,7 +5098,7 @@ impl App {
     }
 
     /// `o` on the selected file row: the same routing a click uses, so a
-    /// conflicted file opens in the editor and everything else as a diff.
+    /// conflicted file opens in the merge editor and everything else as a diff.
     fn open_selected_entry(&mut self) {
         let Some(&row) = self.selected.and_then(|i| self.rows.get(i)) else {
             return;
@@ -5821,6 +5847,18 @@ impl App {
         self.row_hit(mouse_row).map(|(index, _)| index)
     }
 
+    /// The status letter of a file row, if the row still exists.
+    fn file_letter(&self, repo: usize, staged: bool, index: usize) -> Option<char> {
+        let entry = self.repos.get(repo).and_then(|r| {
+            if staged {
+                r.status.staged.get(index)
+            } else {
+                r.status.unstaged.get(index)
+            }
+        });
+        entry.map(|entry| entry.letter)
+    }
+
     fn hovered_action_hint(&self) -> Option<&'static str> {
         let index = self.hovered?;
         let x = self.mouse_pos?.0;
@@ -5853,14 +5891,14 @@ impl App {
                 true,
                 self.marker_width_of(repo, true, i),
             )
-            .map(FileHoverAction::footer_hint),
+            .map(|action| file_row_footer(action, self.file_letter(repo, true, i))),
             Row::Unstaged(repo, i) => file_hover_action_at(
                 x,
                 self.last_width,
                 false,
                 self.marker_width_of(repo, false, i),
             )
-            .map(FileHoverAction::footer_hint),
+            .map(|action| file_row_footer(action, self.file_letter(repo, false, i))),
             _ => None,
         }
     }
@@ -7099,6 +7137,15 @@ fn file_hover_action_start(width: u16, staged: bool, marker_width: u16) -> Optio
         .then_some(width - actions_width - 1 - marker_width)
 }
 
+/// Footer text for a file row's hover action. On a conflicted (`!`) row the
+/// `↗` opens the merge editor, so the text says that instead of "Open in Editor".
+fn file_row_footer(action: FileHoverAction, letter: Option<char>) -> &'static str {
+    match (action, letter) {
+        (FileHoverAction::Open, Some('!')) => "↗ Resolve in Merge Editor",
+        (action, _) => action.footer_hint(),
+    }
+}
+
 fn file_hover_action_at(
     x: u16,
     width: u16,
@@ -7921,6 +7968,38 @@ mod tests {
             FieldKey::Nothing
         );
         assert_eq!(altgr, "abc");
+    }
+
+    #[test]
+    fn conflicted_rows_lead_their_menu_and_footer_with_the_merge_editor() {
+        let labels = |letter: char, staged: bool| -> Vec<&'static str> {
+            file_menu_entries(letter, staged)
+                .iter()
+                .filter_map(|entry| match entry {
+                    MenuEntry::Action(_, label) => Some(*label),
+                    MenuEntry::Separator => None,
+                })
+                .collect()
+        };
+        let conflicted = labels('!', false);
+        assert_eq!(conflicted[0], "Resolve in Merge Editor");
+        assert!(conflicted.contains(&"Open File in Editor"));
+        let modified = labels('M', false);
+        assert!(!modified.contains(&"Resolve in Merge Editor"));
+        assert_eq!(modified[0], "Open Diff");
+
+        assert_eq!(
+            file_row_footer(FileHoverAction::Open, Some('!')),
+            "↗ Resolve in Merge Editor"
+        );
+        assert_eq!(
+            file_row_footer(FileHoverAction::Open, Some('M')),
+            "↗ Open in Editor"
+        );
+        assert_eq!(
+            file_row_footer(FileHoverAction::Discard, Some('!')),
+            "↶ Discard Changes"
+        );
     }
 
     #[test]

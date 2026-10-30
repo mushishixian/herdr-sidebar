@@ -1193,10 +1193,11 @@ HACKING.md — budget time for that before promising a patched build.
   search hit — still goes to the editor, and that launch closes the tab's inline preview first
   (`actions::spawn_inline_editor` → `viewer::close_in_tab`) so the two do not stack.
   **The one exception is a conflicted (`!`) entry**: `open_entry` (scm_app, the click /
-  hover-open / `o` router) sends it to `file_popup::open_file_in_workspace` — the editor —
-  because a diff cannot resolve anything, while Fresh's inline resolver is what does
-  (Alt+C / Alt+I / Alt+M). A conflict that is a pure deletion has no file to open and keeps
-  the diff; the context menu's explicit "Open Diff" still means diff.
+  hover-open / `o` router) sends it to `merge_popup::open_file` — the 3-way merge editor
+  popup, because a diff cannot resolve anything (see *Merge editor popup (Ctrl+Alt+U)*).
+  The menu's "Open File in Editor" still hands the raw file to Fresh, where the inline
+  resolver (Alt+C / Alt+I / Alt+M) works. A conflict that is a pure deletion has no file to
+  open and keeps the diff; the context menu's explicit "Open Diff" still means diff.
   **A conflicted row's marker counts what is left**: `status_marker` (`scm_app`)
   renders `!N` while N `<<<<<<<` blocks remain and `✓` once none do — git still says
   `UU` until the file is staged, so without the count a resolved file would look
@@ -1298,8 +1299,8 @@ HACKING.md — budget time for that before promising a patched build.
   gitlinks — and then describes the staged diff.
 - **A changed row opens the FILE in the editor; only a deletion keeps its diff.** `o`, a click and
   the hover `↗` ("↗ Open in Editor") go through `open_entry` → `opens_in_editor` (everything except
-  `D`) → `file_popup::open_file_in_workspace`, the same path a tree click uses, so a conflicted (`!`)
-  row still lands in Fresh's resolver and a modified one lands on the file. A deleted entry has
+  `D`) → `file_popup::open_file_in_workspace`, the same path a tree click uses, so a modified one
+  lands on the file; a conflicted (`!`) row goes to the merge editor popup instead (`open_entry`). A deleted entry has
   nothing on disk and keeps `open_diff`; the menu's `Open Diff` / `Open Diff Preview` always mean the
   diff, and drawer refs (commits/stashes/branches) are unaffected. `doc_key_for_row` returns `None`
   for a file row now, because a click no longer opens a diff document to pin.
@@ -1693,9 +1694,8 @@ It replaced the original pane-ID-keyed park/restore implementation; the optional
 
 - A changed file's DIFF (the context menu's Open Diff / Open Diff Preview, and any deleted row)
   shows its colored `git diff` in a preview tab, the same way the explorer opens
-  files — except a conflicted (`!`) row, which a click or `o` opens in the editor so
-  Fresh's inline merge resolver (Alt+C / Alt+I / Alt+M) can resolve it; the diff is
-  still reachable from the context menu. The control file carries typed requests (`file/<path>` /
+  files — except a conflicted (`!`) row, which a click or `o` opens in the merge editor popup
+  (`ctrl+alt+u`'s editor); the diff is still reachable from the context menu. The control file carries typed requests (`file/<path>` /
   `diff/<root>/<rel>/<kind>`, tab-separated), diffs render VS Code-style via the
   in-crate `diffview.rs` — OUR parse of plain `git diff` (dual old/new gutters,
   full-width red/green row tints, darker word-level tint on paired changed lines,
@@ -2251,6 +2251,41 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   (`⇄` outside Material), and its buttons never use `muted_button_*`: the terminal theme's muted fill is
   ANSI Black, invisible on a dark terminal (the user could not find the Replace entry). Disabled buttons
   use `keycap_bg`; enabled ones `button_bg`.
+
+### Merge editor popup (Ctrl+Alt+U)
+
+- Entry points: `--merge-popup` (pane `[[panes]] id = "merge-editor"`, placement `popup`, 90%x85%,
+  `src/merge_popup.rs::run`; `ENTRYPOINT = "merge-editor"` must equal that id) and `--merge-popup-open`
+  (action `merge-editor`, Windows twin `merge-editor-windows` through `herdr-sidebar-ensure.exe`, and
+  `announce_flag` maps it for the toast). `merge_popup::open()` opens the focused pane's repository;
+  `merge_popup::open_file(&Path)` opens one file from Source Control's `!` rows. Env:
+  `HERDR_SIDEBAR_MERGE_FILE` (the file to open first; Fresh's `git_merge_editor.ts` sets it with
+  `HERDR_SIDEBAR_SPAWN_CWD`) and `HERDR_SIDEBAR_MERGE_ROOT` (the repository root, forwarded by
+  `open`/`open_file`). The TUI is `src/merge_popup.rs`; the model is `src/merge_conflict.rs`.
+- Model: `merge_conflict` parses the working-tree file LOSSLESSLY into common text, conflict blocks (the
+  current and incoming sides, plus the base when `diff3` wrote one) and the raw marker lines, so an
+  unresolved file round-trips byte for byte. Incoming, Current and Result are ALIGNED views of the same
+  blocks (filler rows keep the panes level; a header band carries each conflict's checkboxes/buttons).
+  Each pane numbers its own rows from 1: Result's numbers are the lines the saved file will have, raw
+  marker rows included. `MergeDoc::first_line_of` gives the ORIGINAL file's line, which is what `e`
+  (open in editor) uses.
+- Save refuses when the bytes on disk differ from the baseline read at open (a changed file is never
+  overwritten), and writes atomically through `content_search::write_atomically`. Enter completes: save,
+  `git add` (`Git::mark_resolved`), next conflicted file. `k` / `d` keep / delete a conflict whose side
+  was deleted (`mark_resolved` / `remove_conflicted`). Esc with unsaved choices asks first.
+- **Herdr runs one popup per session**, so `open()` retries `ui_busy` for 3 s (`retry_while_busy`).
+  That is what lets the branch merge popup hand off: its conflict screen's `r` (unix only; the Windows
+  text is unchanged) closes that popup and starts `--merge-popup-open` as a DETACHED child
+  (`process_group(0)`, not waited on, `HERDR_PANE_ID` set to the caller pane from
+  `HERDR_CALLER_PANE_ID`, else REMOVED — the git popups get no caller env, and the inherited id is the
+  popup itself, gone by the time the child asks). The child retries until the old popup is gone. A spawn error stays on the
+  screen; `a` still aborts the merge.
+- **`ctrl+alt+m` is avoided on purpose** (not tested live): in legacy key encoding Ctrl+M is CR, so
+  Ctrl+Alt+M can arrive as Alt+Enter. `ctrl+alt+u` (`config.toml`) has no such twin.
+- Tests: `merge_conflict` covers the parse, resolve and save rules; `merge_popup` tests drive a scratch
+  repository with a real merge (`conflict_repo`), including the gutter numbering, the filler hatch and
+  the `N files left` title. `scm_app`'s `file_menu_entries` puts "Resolve in Merge Editor" first on a
+  `!` row, and `file_row_footer` says the same for the hover `↗`.
 
 ### Go to symbol popup (Ctrl+Alt+Q) — heuristic, deliberately not LSP
 

@@ -89,7 +89,22 @@ pub fn request_popup_pane_with_env(
             "env": env,
         }),
     )
-    .map(drop)
+    .and_then(|reply| reply_error(&reply).map_or(Ok(()), |error| Err(io::Error::other(error))))
+}
+
+/// herdr answers a refused request with `{"error":{"code","message"}}` on an
+/// otherwise successful round trip, so the transport alone reports success.
+/// `code: message` for such a reply, `None` otherwise. The merge editor's
+/// hand-off waits on `ui_busy` (one popup per session) through this.
+fn reply_error(reply: &str) -> Option<String> {
+    let reply: serde_json::Value = serde_json::from_str(crate::launch::strip_bom(reply)).ok()?;
+    let error = reply.get("error")?;
+    let code = error
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("error");
+    let message = error.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    Some(format!("{code}: {message}"))
 }
 
 fn focused_pane_id() -> Option<String> {
@@ -582,6 +597,18 @@ pub fn open_file_in_workspace(
 mod tests {
     use super::*;
     use ratatui::Terminal;
+
+    #[test]
+    fn a_refused_popup_request_is_an_error() {
+        let busy =
+            r#"{"error":{"code":"ui_busy","message":"a popup pane is already open"},"id":"x"}"#;
+        assert_eq!(
+            reply_error(busy).as_deref(),
+            Some("ui_busy: a popup pane is already open")
+        );
+        assert_eq!(reply_error(r#"{"id":"x","result":{"type":"ok"}}"#), None);
+        assert_eq!(reply_error("not json"), None);
+    }
     use ratatui::backend::TestBackend;
 
     #[test]

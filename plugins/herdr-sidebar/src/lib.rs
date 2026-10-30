@@ -27,6 +27,8 @@ pub mod gitdeco;
 pub mod icons;
 pub mod ipc;
 pub mod launch;
+pub mod merge_conflict;
+pub mod merge_popup;
 pub mod pane_menu;
 pub mod pi_state;
 pub mod rundir;

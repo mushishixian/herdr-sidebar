@@ -35,13 +35,11 @@ use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::tree::{Row, Tree};
 use herdr_sidebar::ui::{
     SelectAll, TitleAction, activity_button_style, activity_icons, chrome_button_style,
-    draw_activity_caps, draw_hover_tooltip, draw_scrollbar, gear_icon, hits,
-    hits_activity_button,
+    draw_activity_caps, draw_hover_tooltip, draw_scrollbar, gear_icon, hits, hits_activity_button,
     hits_collapse_button, hover_style, hover_tooltip_visible, icon_style as ui_icon_style,
-    input_tail,
-    keep_visible_scroll, palette, selected_text_style, selection_style, set_color_theme,
-    sibling_panes_of, status_color, title_action_icon, title_action_spans, title_actions_visible,
-    title_actions_width, truncate_to, wrap_footer_message, wrap_hints,
+    input_tail, keep_visible_scroll, palette, selected_text_style, selection_style,
+    set_color_theme, sibling_panes_of, status_color, title_action_icon, title_action_spans,
+    title_actions_visible, title_actions_width, truncate_to, wrap_footer_message, wrap_hints,
 };
 
 use herdr_sidebar::state::Exit;

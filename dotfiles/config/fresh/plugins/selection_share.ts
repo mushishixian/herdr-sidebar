@@ -740,6 +740,7 @@ function conflictLensText(): string {
     part("Accept Incoming", "conflict_accept_incoming"),
     part("Accept Both", "conflict_accept_both"),
     part("Next", "conflict_next"),
+    "Merge editor (Ctrl+Alt+U)",
   ].join(" │ ");
 }
 

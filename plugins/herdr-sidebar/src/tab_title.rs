@@ -115,10 +115,7 @@ pub fn branch_label_for_tab(tab_id: &str) -> Option<String> {
 /// Is `current` a label this reporter is allowed to replace? The generated
 /// position ("1") is still herdr's, not a human's.
 fn ours(current: &str, desired: &str, applied: Option<&str>) -> bool {
-    current == desired
-        || current == "1"
-        || current == FIRST_TAB_LABEL
-        || applied == Some(current)
+    current == desired || current == "1" || current == FIRST_TAB_LABEL || applied == Some(current)
 }
 
 /// `tab.list` JSON → every first tab (`number == 1`) with its id, workspace and

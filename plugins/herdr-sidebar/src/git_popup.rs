@@ -158,6 +158,43 @@ fn notify(title: &str, body: &str) {
 
 // ── popup side ──────────────────────────────────────────────────────────
 
+/// Start the merge editor popup in its own process group, without waiting.
+/// The caller pane is this popup's `HERDR_CALLER_PANE_ID` when it has one: the
+/// child takes it as `HERDR_PANE_ID`, which is where `plugin.pane.open` anchors
+/// the popup.
+#[cfg(unix)]
+fn spawn_merge_editor(git: Option<&Git>) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let root = git
+        .map(|git| git.root().to_path_buf())
+        .ok_or_else(|| io::Error::other("no repository"))?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("--merge-popup-open")
+        .env(crate::merge_popup::MERGE_ROOT_ENV, root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    if let Some(caller) = std::env::var("HERDR_CALLER_PANE_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
+    {
+        command.env("HERDR_PANE_ID", caller);
+    } else {
+        // Our own HERDR_PANE_ID is this popup, which is gone by the time the
+        // child asks herdr for a pane: anchor nothing rather than a dead pane.
+        command.env_remove("HERDR_PANE_ID");
+    }
+    command.spawn().map(|_child| ())
+}
+
+#[cfg(not(unix))]
+fn spawn_merge_editor(_git: Option<&Git>) -> io::Result<()> {
+    Err(io::Error::other("the merge editor is unix only"))
+}
+
 pub fn run(flag: Option<&str>) -> io::Result<()> {
     let op = flag
         .and_then(Op::from_flag)
@@ -373,8 +410,11 @@ impl App {
         self.copy_notice = None;
         match &self.screen {
             Screen::Message { conflicts, .. } => {
-                if *conflicts && key.code == KeyCode::Char('a') {
+                let conflicts = *conflicts;
+                if conflicts && key.code == KeyCode::Char('a') {
                     self.abort_merge();
+                } else if conflicts && cfg!(unix) && key.code == KeyCode::Char('r') {
+                    self.open_merge_editor();
                 } else {
                     self.done = true;
                 }
@@ -641,9 +681,11 @@ impl App {
                         .map(|file| Line::from(format!("  {file}"))),
                 );
                 lines.push(Line::default());
-                lines.push(Line::from(
-                    "Resolve them in the editor, then stage and commit in Source Control.",
-                ));
+                lines.push(Line::from(if cfg!(unix) {
+                    "Press r to resolve them in the merge editor, a to abort the merge."
+                } else {
+                    "Resolve them in the editor, then stage and commit in Source Control."
+                }));
                 self.message(lines, true);
             }
             Err(error) => {
@@ -663,6 +705,25 @@ impl App {
             )),
         };
         self.message(vec![line], false);
+    }
+
+    /// `r` on the conflict screen: hand the merge to the merge editor popup.
+    /// Herdr runs one popup per session and THIS popup holds it, so the editor
+    /// is started by a detached child (`--merge-popup-open`) that retries
+    /// `ui_busy` while this popup closes. The child is never waited on.
+    fn open_merge_editor(&mut self) {
+        match spawn_merge_editor(self.git.as_ref()) {
+            Ok(()) => self.done = true,
+            Err(error) => {
+                if let Screen::Message { lines, .. } = &mut self.screen {
+                    lines.push(Line::default());
+                    lines.push(Line::from(Span::styled(
+                        format!("merge editor failed to start: {error}"),
+                        Style::default().fg(palette().deleted),
+                    )));
+                }
+            }
+        }
     }
 
     // ── view ────────────────────────────────────────────────────────────
@@ -719,7 +780,9 @@ impl App {
         match &self.screen {
             Screen::Message { lines, conflicts } => {
                 frame.render_widget(Paragraph::new(lines.clone()), text);
-                let hint = if *conflicts {
+                let hint = if *conflicts && cfg!(unix) {
+                    " a abort merge · r merge editor · any other key: close"
+                } else if *conflicts {
                     " a abort merge · any other key: close and resolve"
                 } else {
                     " any key to close"

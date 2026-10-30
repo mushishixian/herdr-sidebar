@@ -198,6 +198,7 @@ moves the copy aside.
 | `ctrl+alt+s`, `ctrl+alt+f` | Search in files popup (file contents, live preview; opens at the matching line; opens with the Replace row showing; ▾ folds it) |
 | `ctrl+alt+e` | Replace in files popup (the same search popup, which opens with the Replace row showing: Ctrl+R replaces the selected item, Alt+Enter replaces all, after a y/N prompt) |
 | `ctrl+alt+q` | Go to symbol popup: fuzzy list of the project's definitions, Enter opens one at its line (heuristic index — see below) |
+| `ctrl+alt+u` | Resolve merge conflicts: the 3-way merge editor popup (Incoming / Current / Result) for the focused repository's conflicted files (see *Merge editor* below) |
 | `ctrl+w` | The older fzf "jump to symbol" script (`scripts/jump-symbol.sh`, rg + PHP-focused) beside the plugin popup |
 | `ctrl+alt+c` | Git: switch branch (popup; type a new name to create) |
 | `ctrl+alt+n` | Git: new branch — name prompt (popup), branched from HEAD and switched to |
@@ -254,6 +255,26 @@ Use Fresh's `alt+shift+q` (LSP definition under the cursor) or `alt+shift+w`
 (references) when accuracy matters, and this popup when you only remember the
 name and the file.
 
+**Ctrl+Alt+U** is the merge editor: a VS Code-style 3-way view of the repository's
+conflicted files, in a popup (`--merge-popup`, 90%×85%). Incoming is on the left and
+Current on the right, one shared scroll, and Result sits below them. Each conflict has a
+header row: the top panes carry `[x] Accept Incoming` / `[x] Accept Current` checkboxes,
+Result carries the buttons (Accept Current, Accept Incoming, Accept Both, then Reset once a
+side is chosen). Clicks and keys do the same things. Keys: `c` current, `i` incoming, `b`
+both (current then incoming), `B` both the other way, `a` base, `x` reset, `C` / `I` every
+conflict current / incoming, `n` / `p` next / previous conflict, `u` undo, `s` save, `r`
+reload from disk, `⏎` complete, `Tab` next conflicted file, `k` / `d` keep / delete for a
+deleted side, `e` open the raw file in the editor, `?` more keys, `esc` close (unsaved
+choices ask first). **Enter completes**: it saves, `git add`s the file and moves to the next
+conflicted file, and it refuses while any conflict is unresolved. The save refuses to write
+if the file changed on disk since the popup read it, and writes atomically.
+
+It opens from a conflicted (`!`) row in Source Control (a click, `o`, the hover `↗`, or the
+row's menu "Resolve in Merge Editor"), from `ctrl+alt+u`, from the merge conflict screen of
+the branch merge popup (`r` there, which closes that popup and hands off), and from Fresh's
+**Git: Resolve in Merge Editor** command. Herdr runs one popup at a time, so the editor
+retries for a few seconds while the popup that opened it closes.
+
 **Shortcut toasts:** every custom shortcut (herdr and Fresh) shows a small
 toast with its name and key, e.g. "Switch branch / Ctrl+Alt+C", as a reminder.
 The key is looked up live from the config files, so rebinding needs no code
@@ -302,7 +323,8 @@ Alt+N/P find-selection, and Alt+Shift+N/P sidebar sections, so they were not
 reused. In a file without conflicts the conflict keys only show "No merge
 conflicts in this file".
 
-**Resolving merge conflicts.** Two resolvers exist. The inline one (this
+**Resolving merge conflicts.** The main resolver is the merge editor popup (`ctrl+alt+u`,
+above). Fresh's own resolvers stay available inside the editor. The inline one (this
 config, `plugins/selection_share.ts`, "Inline merge conflicts") works in the
 normal buffer like VS Code: each block is tinted (current green, incoming blue,
 diff3 base grey), an action line sits above each `<<<<<<<`, and the keys above
@@ -313,9 +335,10 @@ and commit when none remain. Fresh's built-in **Merge: Start Resolution**
 (`merge_conflict.ts`) is the alternative: a three-panel view (ours, theirs,
 editable result). Both coexist; the inline resolver never clears the built-in
 one's decorations. **A conflicted (`!`) file clicked in Source Control — or opened
-with `o` — goes straight to the editor**, not to its diff: the diff only says "this
-file conflicts", while the inline resolver is what resolves it. (Every other changed
-file keeps the read-only diff preview.) A conflict that is a pure deletion has no
+with `o` — opens in the merge editor popup**, not its diff: the diff only says "this
+file conflicts". The row's menu still has "Open File in Editor", which opens the raw
+file in Fresh, where the inline resolver (Alt+C / Alt+I / Alt+M) works. (Every other
+changed file keeps the read-only diff preview.) A conflict that is a pure deletion has no
 file to open, so it falls back to the diff.
 
 **The Source Control row counts what is left.** A conflicted file's marker is
@@ -673,6 +696,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 | *uncommitted* | **Conflicted rows count what is left** | The marker of a conflicted (`!`) file is `!N` (`count_conflict_blocks` in `git.rs`: `<<<<<<<` lines, 4 MiB cap) and becomes a green `✓` when the last block is gone — git keeps reporting `UU` until the file is staged, so this is the only way the list can show "resolved". Counts are re-read on the focused 2 s refresh (`refresh_conflict_counts`) and the list rebuilds only when one changed; an unreadable file keeps the plain `!`. The marker's width feeds `file_hover_action_start`, so the hover buttons stay aligned under `!12`. |
 | *uncommitted* | **The editor replaces the preview instead of stacking** | Opening a file with an editor configured used to leave the tab's inline preview pane beside the fresh editor, so a diff then a file click ended with two content panes. `actions::spawn_inline_editor` now closes that preview through the viewer's own close request (`viewer::close_in_tab`) before launching the editor: an unsaved preview buffer still prompts, and the tab keeps ONE content pane. |
 | *uncommitted* | **Search results open in the editor** | The Search view and Quick Open forced the built-in preview (`open_preview_at`) even with a custom editor configured; they now go through `explorer_app::open_file` → `file_popup::open_file_in_workspace`, i.e. the same routing a tree click uses (Fresh at the hit's line, else the preview). Media goes to the editor too (the media exception was dropped later), and the preview path keeps the double-click pin bookkeeping. |
+| *uncommitted* | **Merge editor popup (Ctrl+Alt+U)** | `--merge-popup-open` (action `merge-editor`, `ctrl+alt+u`; Windows twin `merge-editor-windows`) opens the pane `--merge-popup` (90%×85%, `src/merge_popup.rs`) over the model in `src/merge_conflict.rs`: a lossless parse of the conflict markers, Incoming / Current / Result views aligned by conflict, and a save that refuses changed bytes and writes atomically (`content_search::write_atomically`). Source Control's `!` rows open it through `merge_popup::open_file`; the branch merge popup's conflict screen hands off with `r` (a detached child, unix only); Fresh's `git_merge_editor.ts` runs the same entrypoint with `HERDR_SIDEBAR_MERGE_FILE`. |
 | *uncommitted* | **Merge popup merges on one key** | The `--git-popup merge` branch list used to ask "Merge X into Y?" on a second screen (`Screen::ConfirmMerge`); picking a branch now merges immediately, and the result/conflict message screen (with `a` for `merge --abort`) is unchanged. `Git::merge_branch` still passes `--no-edit` and never forces. |
 | *uncommitted* | **Commit button offers a pull; both oco token ceilings pinned** | When the branch is behind its upstream AND something is staged, ✓ Commit reads `✓ Commit · N↓` and asks "Pull first?" (`y` = `git pull`, then commit; anything else commits at once); a failed pull never commits. The AI-commit path never asks. **Pulls always merge** (`PULL_ARGS` is `["pull", "--no-edit", "--no-rebase"]`, the `git-pull` action adds the same flag, and the dotfiles gitconfig now ships `pull.rebase = false`): an earlier version obeyed the config, so this machine's `pull.rebase=true` made a staged pull fail with `cannot pull with rebase: Your index contains uncommitted changes.` — defaulting to merge removes that trap (user-requested); a rebase is opt-in per pull. Sync Changes (`S`/⇅) is the same plain `pull` then `push`. `OCO_TOKENS_MAX_OUTPUT=500` is now pinned next to `OCO_TOKENS_MAX_INPUT=24000`, since oco subtracts it from the input budget. |
 | *uncommitted* | **New branch popup** | `--git-popup[-open] new` (`Op::New`, `ctrl+alt+n`): an input-only popup that creates the branch from HEAD and switches to it (`git switch -c`, name judged by `git check-ref-format --branch`, no stash/force), with the error in the footer instead of a toast. Manifest pane `git-new-branch`, action `git-new-branch`. |
@@ -807,6 +831,10 @@ built-in command, so the command itself is not repeated there).
 
 ### Fresh plugins (`dotfiles/config/fresh/plugins`)
 
+- **`git_merge_editor.ts`**: `Git: Resolve in Merge Editor` (Selection menu and command palette; no key
+  here, the key is `ctrl+alt+u` in herdr). It runs `herdr plugin pane open --plugin herdr-sidebar
+  --entrypoint merge-editor --placement popup` with `HERDR_SIDEBAR_MERGE_FILE` set to the active
+  buffer's path. A modified buffer gets a status warning: the merge editor reads the SAVED file.
 - **`git_line_history.ts`**: takes the selection's line range (a selection ending
   at column 0 of a later line excludes that line) and runs
   `herdr plugin pane open --plugin herdr-sidebar --entrypoint git-line-history
@@ -829,6 +857,7 @@ built-in command, so the command itself is not repeated there).
   modify, debounced 150 ms. Accepting a side is a deleteRange + insertText, then the cursor auto-jumps to
   the next unresolved block. When a file is clean it is saved, and the next file from
   `git diff --diff-filter=U` opens at its first conflict.
+  The action line above each block ends with `Merge editor (Ctrl+Alt+U)`, the way to the 3-way popup.
 
 ## Updating
 
@@ -1009,6 +1038,7 @@ Two things break that loop, both worth knowing:
 | `ctrl+alt+f` / `ctrl+alt+e` does nothing | `herdr plugin action list \| grep -E 'search-popup\|replace-popup'`; `herdr server reload-config` |
 | `ctrl+alt+q` lists nothing or misses a symbol | the index is heuristic: only extensions in `symbol_search.rs`'s `LANGUAGES` table are scanned, files over 1 MiB, hidden and gitignored paths are skipped, and the list caps at 5000 symbols (the footer says `index capped`). A language that is missing there, or a symbol defined by a macro, needs the LSP instead: `alt+shift+q` |
 | `ctrl+alt+q` does nothing at all | two live-verified causes, in order: (1) a popup from an earlier attempt is still running — herdr reuses one popup per entrypoint, so the key silently starts nothing (`pkill -f -- "--symbol[-]popup"`, note the bracket or the pattern kills the shell typing it); (2) herdr is not reading the config you edited — `ls -la ~/.config/herdr/config.toml` must point at the file containing the binding (`herdr server reload-config` reports `applied` either way), and `herdr config check` should say `ok` |
+| `ctrl+alt+u` does nothing | a merge-editor popup from an earlier attempt is still running: herdr reuses one popup per entrypoint, so the key silently starts nothing (`pkill -f -- "--merge[-]popup"`; the bracket keeps the pattern from matching the shell that runs it). Otherwise `herdr plugin action list \| grep merge-editor` must list it, and `herdr server reload-config` then `herdr config check` should say `ok`. Outside a repository with conflicts the popup just says so. |
 | A picture opens as garbage in Fresh | pictures open in the sidebar preview since the media-routing change; rebuild and redeploy the sidebar (`dotfiles/herdr-sidebar/build.sh`) if an old build is still running. The explicit "Open in Editor" menu item still sends it to Fresh |
 | A file opens in another workspace's Fresh | fixed: `fresh-open` only uses this workspace's editor; check the Fresh pane's `fresh_daemon` token with `herdr pane list` |
 | AI commit is slow | the whole curated diff goes in ONE request; a slow model/gateway is the usual cause — pick a faster model in ⚙ Settings → AI commit |
