@@ -99,6 +99,16 @@ placement = "popup"
 command = ["./target/release/herdr-sidebar", "--file-popup"]
 platforms = ["linux", "macos"]
 
+# Settings (⚙ / `s` in the sidebar): the ⚙ page as a floating popup instead of
+# the narrow pane box. Opened only by a sidebar (no action); the sidebar falls
+# back to its in-pane modal when this popup cannot open.
+[[panes]]
+id = "settings"
+title = "Settings"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--settings-popup"]
+platforms = ["linux", "macos"]
+
 # Content search (Ctrl+Alt+F): a session-modal popup with a live preview.
 [[panes]]
 id = "search-popup"

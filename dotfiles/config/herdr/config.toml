@@ -12,7 +12,7 @@ onboarding = false
 [theme]
 # Follow the host terminal's palette (set Dark+ there). `auto_switch` is off:
 # the theme below always wins.
-name = "vesper"
+name = "kanagawa"
 auto_switch = false
 
 [terminal]
@@ -28,7 +28,7 @@ confirm_close = false
 # 左上角 agent 状态：symbols 用静态字形区分（◐ working / × blocked / ✓ done /
 # ○ idle / · unknown）；"dots" 全都画 ●，只有颜色不同，看不出在干活。
 # 当前沿用 dots（本机既有行为）；想要一眼看出忙闲就把下面这行改成 "symbols"。
-status_indicators = "dots"
+status_indicators = "symbols"
 
 # The agent list under the spaces. There is NO key that removes this section:
 # `rows = []` degrades to one line per agent holding just the state dot (verified
@@ -61,7 +61,7 @@ rows = [
 # notification service, so it disappears). "herdr" draws the toast inside herdr,
 # bottom-right, on every platform - so AI commit / pull / push failures are
 # always visible.
-delivery = "herdr"
+delivery = "system"
 
 # ============================================================
 # 键位

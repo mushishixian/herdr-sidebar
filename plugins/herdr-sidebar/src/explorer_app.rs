@@ -15,7 +15,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 
 use herdr_sidebar::actions::{self, MenuAction, MenuEntry};
-use herdr_sidebar::ai_settings::{self, AiPageAction, AiSettingsPage};
 use herdr_sidebar::branch_ui::{BranchPicker, FooterZones, PickerAction, draw_git_footer};
 use herdr_sidebar::content_search::{
     CONTENT_SEARCH_MATCH_LIMIT, ContentHit, SearchOptions, collect_content_hits,
@@ -34,14 +33,16 @@ use herdr_sidebar::pane_menu::{self, PaneAction};
 use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::tree::{Row, Tree};
 use herdr_sidebar::ui::{
-    SelectAll, TitleAction, activity_button_style, activity_icons, chrome_button_style,
+    SelectAll, TextKey, TitleAction, activity_button_style, activity_icons, chrome_button_style,
     draw_activity_caps, draw_hover_tooltip, draw_scrollbar, gear_icon, hits, hits_activity_button,
     hits_collapse_button, hover_style, hover_tooltip_visible, icon_style as ui_icon_style,
-    input_tail, keep_visible_scroll, palette, selected_text_style, selection_style,
-    set_color_theme, sibling_panes_of, status_color, title_action_icon, title_action_spans,
-    title_actions_visible, title_actions_width, truncate_to, wrap_footer_message, wrap_hints,
+    input_tail, palette, selected_text_style, selection_style, set_color_theme, sibling_panes_of,
+    status_color, text_input_key, title_action_icon, title_action_spans, title_actions_visible,
+    title_actions_width, truncate_to, wrap_footer_message, wrap_hints,
 };
 
+use herdr_sidebar::settings_page::{Outcome, Setting, SettingsHost, SettingsPage};
+use herdr_sidebar::settings_popup::{self, CallerContext, Request};
 use herdr_sidebar::state::Exit;
 
 const MY_VIEW: View = View::Explorer;
@@ -75,9 +76,6 @@ fn ignored_scan_due(backoff_until: Option<std::time::Instant>, now: std::time::I
 /// Handle for resizing our own pane through the herdr socket API.
 struct PaneCtl {
     pane_id: String,
-    /// The pane's tab, so a split ratio can be set on the whole tab rather than
-    /// on whichever pane happens to be focused.
-    tab_id: Option<String>,
 }
 
 impl PaneCtl {
@@ -85,12 +83,7 @@ impl PaneCtl {
         let pane_id = std::env::var("HERDR_PANE_ID")
             .ok()
             .filter(|id| !id.is_empty())?;
-        Some(Self {
-            pane_id,
-            tab_id: std::env::var("HERDR_TAB_ID")
-                .ok()
-                .filter(|id| !id.is_empty()),
-        })
+        Some(Self { pane_id })
     }
 
     /// Report identity tokens: always our own (so the ensure logic recognizes
@@ -169,80 +162,6 @@ impl PaneCtl {
         )
         .ok()
     }
-
-    /// Rows the bottom pane of this tab's editor/terminal column occupies right
-    /// now — the seed for the first `←`/`→` on an "auto" Terminal height.
-    fn terminal_rows_now(&self) -> Option<u16> {
-        let layout = self.layout()?;
-        let (_, ratio, height) = herdr_sidebar::launch::foreign_down_split(&layout, &self.pane_id)?;
-        let rows = (1.0 - ratio) * height as f64;
-        Some(rows.round().max(0.0) as u16)
-    }
-
-    /// Size this tab's editor/terminal split so its BOTTOM pane is `rows` rows
-    /// tall. False when the tab has no such split (nothing to size), so the
-    /// caller can say so instead of looking like it worked.
-    fn set_terminal_rows(&self, rows: u16) -> bool {
-        let Ok(layout) = herdr_sidebar::ipc::call_text(
-            "pane.layout",
-            serde_json::json!({ "pane_id": self.pane_id }),
-        ) else {
-            return false;
-        };
-        let Some((path, _ratio, height)) =
-            herdr_sidebar::launch::foreign_down_split(&layout, &self.pane_id)
-        else {
-            return false;
-        };
-        self.apply_split_ratio(path, herdr_sidebar::launch::ratio_for_rows(rows, height))
-    }
-
-    /// Columns the Agent column of this tab occupies right now — the seed for
-    /// the first `←`/`→` on an "auto" Agent width.
-    fn agent_cols_now(&self) -> Option<u16> {
-        let layout = self.layout()?;
-        let (_, ratio, width) = herdr_sidebar::launch::foreign_right_split(&layout, &self.pane_id)?;
-        let cols = (1.0 - ratio) * width as f64;
-        Some(cols.round().max(0.0) as u16)
-    }
-
-    /// Size this tab's Agent column so it is `cols` columns wide. False when the
-    /// tab has no such split (nothing to size), so the caller can say so
-    /// instead of looking like it worked.
-    fn set_agent_cols(&self, cols: u16) -> bool {
-        let Ok(layout) = herdr_sidebar::ipc::call_text(
-            "pane.layout",
-            serde_json::json!({ "pane_id": self.pane_id }),
-        ) else {
-            return false;
-        };
-        let Some((path, _ratio, width)) =
-            herdr_sidebar::launch::foreign_right_split(&layout, &self.pane_id)
-        else {
-            return false;
-        };
-        self.apply_split_ratio(path, herdr_sidebar::launch::ratio_for_cols(cols, width))
-    }
-
-    /// Set one of this tab's splits to `ratio`. False when the host refused it
-    /// (call_text returns the reply line even for an error response).
-    fn apply_split_ratio(&self, path: Vec<bool>, ratio: f64) -> bool {
-        let mut params = serde_json::json!({ "path": path, "ratio": ratio });
-        // Prefer the tab form; a launch that did not tell us its tab still
-        // resolves the same tab from the pane.
-        match &self.tab_id {
-            Some(tab) => params["tab_id"] = serde_json::Value::String(tab.clone()),
-            None => params["pane_id"] = serde_json::Value::String(self.pane_id.clone()),
-        }
-        match herdr_sidebar::ipc::call_text("layout.set_split_ratio", params) {
-            Ok(reply) => {
-                serde_json::from_str::<serde_json::Value>(reply.trim_start_matches('\u{feff}'))
-                    .map(|value| value.get("error").is_none())
-                    .unwrap_or(false)
-            }
-            Err(_) => false,
-        }
-    }
 }
 
 /// Where the tree body was drawn last frame, for mouse hit-testing.
@@ -262,7 +181,6 @@ enum PromptKind {
     /// Re-root the whole sidebar at a typed path (absolute, relative to the
     /// current root, or ~-prefixed).
     ChangeFolder,
-    CustomEditor,
     /// The name for our own herdr pane (the pane menu's "Rename pane…").
     PaneRename,
 }
@@ -271,9 +189,6 @@ enum PromptKind {
 /// delete confirmation. While one is open it owns keyboard and mouse input.
 enum Overlay {
     BranchPicker(BranchPicker),
-    /// The AI commit page (API URL / key / model, connection test), opened from
-    /// the Settings modal.
-    AiSettings(AiSettingsPage),
     Menu {
         /// Click position the popup anchors to.
         x: u16,
@@ -296,12 +211,8 @@ enum Overlay {
         path: PathBuf,
         is_dir: bool,
     },
-    /// The ⚙ settings modal: mouse-toggleable panel settings.
-    Settings {
-        selected: usize,
-        rect: Rect,
-        scroll: usize,
-    },
+    /// The ⚙ settings modal (shared with Source Control, see `settings_page`).
+    Settings(SettingsPage),
     QuickOpen {
         query: String,
         files: std::sync::Arc<Vec<QuickFile>>,
@@ -354,44 +265,6 @@ struct ContentSearchResult {
     truncated: bool,
     error: Option<String>,
 }
-
-/// One row of the Settings modal.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Setting {
-    Version,
-    Update,
-    UnifiedSidebar,
-    DockRight,
-    SidebarWidth,
-    /// Default height, in rows, of the bottom pane of the IDE layout's
-    /// editor/terminal column.
-    TerminalHeight,
-    /// Default width, in columns, of the IDE layout's rightmost Agent column.
-    AgentWidth,
-    IconTheme,
-    ColorTheme,
-    PreviewPlacement,
-    CustomEditorCommand,
-    CustomEditorClick,
-    CustomEditorInline,
-    AutoOpen,
-    StrictToggle,
-    FocusOnOpen,
-    FollowCwd,
-    HiddenFiles,
-    Hotkeys,
-    GitDecorations,
-    GitFooter,
-    /// Ask before deleting a file or folder from the Explorer.
-    ConfirmDelete,
-    /// Opens the AI commit page; the value is the configured model.
-    AiCommit,
-    Folder,
-}
-
-/// (setting, label, current value, enabled) — disabled rows render dimmed and
-/// don't toggle.
-type SettingRow = (Setting, &'static str, String, bool);
 
 pub struct App {
     tree: Tree,
@@ -568,6 +441,7 @@ impl App {
         cwd_follower: std::rc::Rc<std::cell::RefCell<herdr_sidebar::launch::CwdFollower>>,
     ) -> Self {
         let mut tree = Tree::new(root);
+        tree.show_hidden = sidebar::load_state().show_hidden;
         // Mirror the tree the user was already looking at. Idle ticks keep
         // same-root sidebars synchronized after startup too.
         let saved = sidebar::load_tree_state(&tree.root_path());
@@ -780,6 +654,30 @@ impl App {
         self.sidebar_state.focus_on_open = shared.focus_on_open;
         self.sidebar_state.custom_editor_on_click = shared.custom_editor_on_click;
         self.sidebar_state.custom_editor_inline = shared.custom_editor_inline;
+        self.sidebar_state.show_hidden = shared.show_hidden;
+        // Settings the popup (or another sidebar) may have written. The
+        // process-local fields (merged, active, search_active) are not adopted.
+        if let Some(icons) = shared.icons
+            && icons != self.theme
+        {
+            self.theme = icons;
+        }
+        self.sidebar_state.icons = shared.icons;
+        self.sidebar_state.show_hotkeys = shared.show_hotkeys;
+        self.sidebar_state.confirm_delete = shared.confirm_delete;
+        self.sidebar_state.auto_open = shared.auto_open;
+        self.sidebar_state.preview_placement = shared.preview_placement;
+        self.sidebar_state.terminal_height = shared.terminal_height;
+        self.sidebar_state.agent_width = shared.agent_width;
+        if shared.follow_cwd != self.sidebar_state.follow_cwd {
+            self.sidebar_state.follow_cwd = shared.follow_cwd;
+            self.cwd_follower.borrow_mut().reset();
+        }
+        if shared.show_hidden != self.tree.show_hidden {
+            self.tree.show_hidden = shared.show_hidden;
+            self.invalidate_quick_index();
+            self.rebuild();
+        }
         let old_git_footer = self.sidebar_state.show_git_footer;
         self.sidebar_state.show_git_footer = shared.show_git_footer;
         if shared.color_theme != self.sidebar_state.color_theme {
@@ -1414,8 +1312,7 @@ impl App {
             Some(
                 Overlay::Menu { .. }
                     | Overlay::BranchPicker(_)
-                    | Overlay::AiSettings(_)
-                    | Overlay::Settings { .. }
+                    | Overlay::Settings(_)
                     | Overlay::ConfirmDelete { .. }
             )
         )
@@ -1557,7 +1454,10 @@ impl App {
                 self.refresh_tree();
             }
             KeyCode::Char('.') => {
-                self.tree.show_hidden = !self.tree.show_hidden;
+                self.sidebar_state = sidebar::update_state(|state| {
+                    state.show_hidden = !state.show_hidden;
+                });
+                self.tree.show_hidden = self.sidebar_state.show_hidden;
                 self.invalidate_quick_index();
                 self.rebuild();
             }
@@ -1831,11 +1731,9 @@ impl App {
     }
 
     fn overlay_key(&mut self, key: KeyEvent) {
-        // The AI page owns its keys outright: route them before the Settings
-        // rows (which read ai.json) are built for every keystroke.
-        if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
-            let action = page.key(key);
-            return self.ai_page_done(action);
+        // The Settings page owns its keys outright (see `settings_key`).
+        if matches!(self.overlay, Some(Overlay::Settings(_))) {
+            return self.settings_key(key);
         }
         enum Cmd {
             Nothing,
@@ -1845,64 +1743,13 @@ impl App {
             OpenQuick(PathBuf),
             StartContentSearch,
             OpenContent(PathBuf, usize),
-            ToggleSetting(usize),
-            AdjustWidth(bool),
-            AdjustHeight(bool),
-            AdjustAgentWidth(bool),
             DeleteConfirmed(PathBuf, bool),
             Picker(PickerAction),
         }
-        let settings = self.settings_rows();
-        let row_count = settings.len();
         let cmd = match self.overlay.as_mut() {
-            Some(Overlay::Settings { selected, .. }) => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => Cmd::Close,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *selected = selected.saturating_sub(1);
-                    Cmd::Nothing
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    *selected = (*selected + 1).min(row_count.saturating_sub(1));
-                    Cmd::Nothing
-                }
-                KeyCode::Left | KeyCode::Char('h')
-                    if settings.get(*selected).map(|row| row.0) == Some(Setting::SidebarWidth) =>
-                {
-                    Cmd::AdjustWidth(false)
-                }
-                KeyCode::Right | KeyCode::Char('l')
-                    if settings.get(*selected).map(|row| row.0) == Some(Setting::SidebarWidth) =>
-                {
-                    Cmd::AdjustWidth(true)
-                }
-                KeyCode::Left | KeyCode::Char('h')
-                    if settings.get(*selected).map(|row| row.0)
-                        == Some(Setting::TerminalHeight) =>
-                {
-                    Cmd::AdjustHeight(false)
-                }
-                KeyCode::Right | KeyCode::Char('l')
-                    if settings.get(*selected).map(|row| row.0)
-                        == Some(Setting::TerminalHeight) =>
-                {
-                    Cmd::AdjustHeight(true)
-                }
-                KeyCode::Left | KeyCode::Char('h')
-                    if settings.get(*selected).map(|row| row.0) == Some(Setting::AgentWidth) =>
-                {
-                    Cmd::AdjustAgentWidth(false)
-                }
-                KeyCode::Right | KeyCode::Char('l')
-                    if settings.get(*selected).map(|row| row.0) == Some(Setting::AgentWidth) =>
-                {
-                    Cmd::AdjustAgentWidth(true)
-                }
-                KeyCode::Enter | KeyCode::Char(' ') => Cmd::ToggleSetting(*selected),
-                _ => Cmd::Nothing,
-            },
-            Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.key(key)),
             // Routed to the page before this match (see the early return above).
-            Some(Overlay::AiSettings(_)) => Cmd::Nothing,
+            Some(Overlay::Settings(_)) => Cmd::Nothing,
+            Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.key(key)),
             Some(Overlay::Menu {
                 entries, selected, ..
             }) => match key.code {
@@ -2152,10 +1999,6 @@ impl App {
             Cmd::OpenContent(path, line) => {
                 self.open_file(&path, Some(line));
             }
-            Cmd::ToggleSetting(index) => self.toggle_setting(index),
-            Cmd::AdjustWidth(wider) => self.adjust_sidebar_width(wider),
-            Cmd::AdjustHeight(taller) => self.adjust_terminal_height(taller),
-            Cmd::AdjustAgentWidth(wider) => self.adjust_agent_width(wider),
             Cmd::DeleteConfirmed(path, is_dir) => {
                 self.overlay = None;
                 self.delete_path(path, is_dir);
@@ -2165,9 +2008,8 @@ impl App {
     }
 
     fn overlay_mouse(&mut self, mouse: MouseEvent) {
-        if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
-            let action = page.mouse(mouse);
-            return self.ai_page_done(action);
+        if matches!(self.overlay, Some(Overlay::Settings(_))) {
+            return self.settings_mouse(mouse);
         }
         // A left-click on the delete confirm's buttons is the same key as the
         // keyboard: Yes is `y`, No is Esc (any other key cancels too). Clicks
@@ -2187,54 +2029,12 @@ impl App {
             Nothing,
             Close,
             Activate,
-            ToggleSetting(usize),
             Reopen(u16, u16),
             Picker(PickerAction),
         }
-        let row_count = self.settings_rows().len();
         let cmd = match self.overlay.as_mut() {
-            Some(Overlay::Settings {
-                selected,
-                rect,
-                scroll,
-            }) => {
-                // Rows start just inside the top border (the title renders ON
-                // the border, not on its own line).
-                let row_at = |row: u16, col: u16| -> Option<usize> {
-                    let index = usize::from(row.saturating_sub(rect.y + 1)) + *scroll;
-                    (col > rect.x
-                        && col < rect.x + rect.width.saturating_sub(1)
-                        && row > rect.y
-                        && row < rect.y + rect.height.saturating_sub(1)
-                        && index < row_count)
-                        .then_some(index)
-                };
-                match mouse.kind {
-                    MouseEventKind::Moved => {
-                        if let Some(i) = row_at(mouse.row, mouse.column) {
-                            *selected = i;
-                        }
-                        Cmd::Nothing
-                    }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        match row_at(mouse.row, mouse.column) {
-                            Some(i) => {
-                                *selected = i;
-                                Cmd::ToggleSetting(i)
-                            }
-                            None if mouse.column >= rect.x
-                                && mouse.column < rect.x + rect.width
-                                && mouse.row >= rect.y
-                                && mouse.row < rect.y + rect.height =>
-                            {
-                                Cmd::Nothing
-                            }
-                            None => Cmd::Close,
-                        }
-                    }
-                    _ => Cmd::Nothing,
-                }
-            }
+            // Routed to the page before this match (see the early return above).
+            Some(Overlay::Settings(_)) => Cmd::Nothing,
             Some(Overlay::Menu {
                 entries,
                 selected,
@@ -2281,7 +2081,6 @@ impl App {
             Cmd::Nothing => {}
             Cmd::Close => self.overlay = None,
             Cmd::Activate => self.activate_menu_entry(),
-            Cmd::ToggleSetting(index) => self.toggle_setting(index),
             Cmd::Reopen(x, y) => {
                 self.overlay = None;
                 self.open_context_menu(x, y);
@@ -2415,38 +2214,101 @@ impl App {
 
     // ---- Settings modal ----
 
-    /// Applies what the AI page asked for: Back returns to the Settings modal
-    /// with the AI commit row selected, Close dismisses everything.
-    fn ai_page_done(&mut self, action: AiPageAction) {
-        match action {
-            AiPageAction::None => {}
-            AiPageAction::Close => self.overlay = None,
-            AiPageAction::Back => self.reopen_settings_on(Setting::AiCommit),
+    /// Open the ⚙ settings: as a herdr popup when one can open, otherwise the
+    /// in-pane modal.
+    fn open_settings(&mut self) {
+        if self.open_settings_popup() {
+            return;
+        }
+        self.suspend_search_for_modal();
+        self.overlay = Some(Overlay::Settings(SettingsPage::open()));
+    }
+
+    /// Ask herdr for the Settings popup. False on Windows (popup panes are
+    /// linux/macos only), without a herdr pane, or when herdr refused the
+    /// request; the caller then opens the in-pane modal.
+    fn open_settings_popup(&self) -> bool {
+        if cfg!(windows) || self.pane_ctl.is_none() {
+            return false;
+        }
+        let ctx = CallerContext {
+            unified_available: self.other_exe.is_some(),
+            root_name: SettingsHost::root_name(self),
+            icon_theme: self.theme,
+            hints: self
+                .hints()
+                .into_iter()
+                .map(|(key, label)| (key.to_string(), label.to_string()))
+                .collect(),
+        };
+        settings_popup::open(&ctx).is_ok()
+    }
+
+    /// Carry out a request the Settings popup left for this sidebar: unified
+    /// mode or the change-folder dialog. Polled from the event loop.
+    pub fn poll_settings_request(&mut self) {
+        let Some(request) = self
+            .pane_ctl
+            .as_ref()
+            .and_then(|ctl| settings_popup::take_request(&ctl.pane_id))
+        else {
+            return;
+        };
+        match request {
+            Request::Unified(on) => {
+                if self.other_exe.is_some() {
+                    self.set_unified(on);
+                }
+            }
+            Request::ChangeFolder => self.change_folder_dialog(),
         }
     }
 
-    /// Reopens the Settings modal with `setting` selected.
-    fn reopen_settings_on(&mut self, setting: Setting) {
-        let selected = self
-            .settings_rows()
-            .iter()
-            .position(|row| row.0 == setting)
-            .unwrap_or(0);
-        self.overlay = Some(Overlay::Settings {
-            selected,
-            rect: Rect::default(),
-            scroll: 0,
-        });
+    /// Key input while the Settings page is open. The page is taken out of the
+    /// overlay slot while it runs so it can drive this app as its host.
+    fn settings_key(&mut self, key: KeyEvent) {
+        let Some(Overlay::Settings(mut page)) = self.overlay.take() else {
+            return;
+        };
+        let outcome = page.key(key, self);
+        self.settings_outcome(page, outcome);
     }
 
-    fn open_settings(&mut self) {
-        herdr_sidebar::updates::check();
-        self.suspend_search_for_modal();
-        self.overlay = Some(Overlay::Settings {
-            selected: 0,
-            rect: Rect::default(),
-            scroll: 0,
-        });
+    /// Mouse input while the Settings page is open (see [`Self::settings_key`]).
+    fn settings_mouse(&mut self, mouse: MouseEvent) {
+        let Some(Overlay::Settings(mut page)) = self.overlay.take() else {
+            return;
+        };
+        let outcome = page.mouse(mouse, self);
+        self.settings_outcome(page, outcome);
+    }
+
+    /// Put the page back unless it closed. A host action may have opened an
+    /// overlay of its own while the page ran; that one wins. Closing the page
+    /// resumes a Search view parked under it.
+    fn settings_outcome(&mut self, page: SettingsPage, outcome: Outcome) {
+        match outcome {
+            Outcome::Stay => {
+                if self.overlay.is_none() {
+                    self.overlay = Some(Overlay::Settings(page));
+                }
+            }
+            Outcome::Close => {
+                if self.overlay.is_none() {
+                    self.overlay = self.suspended_search.take();
+                }
+            }
+        }
+    }
+
+    /// Render the Settings page as the centered modal over the whole frame.
+    fn draw_settings(&mut self, frame: &mut Frame) {
+        let Some(Overlay::Settings(mut page)) = self.overlay.take() else {
+            return;
+        };
+        let area = frame.area();
+        page.draw(frame, area, false, self);
+        self.overlay = Some(Overlay::Settings(page));
     }
 
     fn collect_quick_index(&mut self) {
@@ -2902,478 +2764,6 @@ impl App {
         });
     }
 
-    /// The modal's rows for the current state.
-    fn settings_rows(&self) -> Vec<SettingRow> {
-        let update = herdr_sidebar::updates::row();
-        vec![
-            (
-                Setting::Version,
-                "Sidebar version",
-                herdr_sidebar::updates::VERSION.into(),
-                false,
-            ),
-            (Setting::Update, update.0, update.1, update.2),
-            (
-                Setting::UnifiedSidebar,
-                "Unified sidebar",
-                if self.merged() { "on" } else { "off" }.to_string(),
-                self.other_exe.is_some(),
-            ),
-            (
-                Setting::DockRight,
-                "Dock on the right",
-                if self.sidebar_state.dock_right {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::SidebarWidth,
-                "Sidebar width",
-                format!("{} cols", self.sidebar_state.sidebar_width),
-                true,
-            ),
-            (
-                Setting::TerminalHeight,
-                "Terminal height",
-                match self.sidebar_state.terminal_height {
-                    Some(rows) => format!("{rows} rows"),
-                    None => "auto".to_string(),
-                },
-                true,
-            ),
-            (
-                Setting::AgentWidth,
-                "Agent width",
-                match self.sidebar_state.agent_width {
-                    Some(cols) => format!("{cols} cols"),
-                    None => "auto".to_string(),
-                },
-                true,
-            ),
-            (
-                Setting::IconTheme,
-                "Icon theme",
-                match self.theme {
-                    IconTheme::Material => "material",
-                    IconTheme::Emoji => "emoji",
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::ColorTheme,
-                "Color theme",
-                self.sidebar_state.color_theme.label().to_string(),
-                true,
-            ),
-            (
-                Setting::PreviewPlacement,
-                "Preview opens in",
-                self.sidebar_state.preview_placement.label().to_string(),
-                true,
-            ),
-            (
-                Setting::CustomEditorCommand,
-                "Custom editor...",
-                actions::configured_editor()
-                    .map(|command| truncate_to(command, 24))
-                    .unwrap_or_else(|| "not set".into()),
-                true,
-            ),
-            (
-                Setting::CustomEditorClick,
-                "Use editor on click",
-                if self.sidebar_state.custom_editor_on_click {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                actions::configured_editor().is_some(),
-            ),
-            (
-                Setting::CustomEditorInline,
-                "Editor opens",
-                if self.sidebar_state.custom_editor_inline {
-                    "inline"
-                } else {
-                    "tab"
-                }
-                .to_string(),
-                actions::configured_editor().is_some(),
-            ),
-            (
-                Setting::HiddenFiles,
-                "Hidden files",
-                if self.tree.show_hidden {
-                    "shown"
-                } else {
-                    "hidden"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::Hotkeys,
-                "Footer hotkeys",
-                if self.show_hotkeys() {
-                    "shown"
-                } else {
-                    "hidden"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::AutoOpen,
-                "Auto-open sidebar",
-                if self.sidebar_state.auto_open {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::StrictToggle,
-                "Strict toggle",
-                if self.sidebar_state.strict_toggle {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::FocusOnOpen,
-                "Focus on open",
-                if self.sidebar_state.focus_on_open {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::FollowCwd,
-                "Follow pane folder",
-                sidebar::follow_cwd_setting_value(self.sidebar_state.follow_cwd),
-                true,
-            ),
-            (
-                Setting::GitDecorations,
-                "Git decorations",
-                if self.sidebar_state.git_deco {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::GitFooter,
-                "Git footer",
-                if self.sidebar_state.show_git_footer {
-                    "shown"
-                } else {
-                    "hidden"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::ConfirmDelete,
-                "Confirm delete",
-                if self.sidebar_state.confirm_delete {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::AiCommit,
-                "AI commit…",
-                ai_settings::model_value(),
-                true,
-            ),
-            (
-                Setting::Folder,
-                "Change folder…",
-                self.tree.root_name(),
-                true,
-            ),
-        ]
-    }
-
-    fn toggle_setting(&mut self, index: usize) {
-        let rows = self.settings_rows();
-        let Some(row) = rows.get(index) else { return };
-        let (setting, enabled) = (row.0, row.3);
-        if !enabled {
-            return;
-        }
-        match setting {
-            Setting::Version => {}
-            Setting::Update => {
-                self.notice = Some(
-                    herdr_sidebar::updates::activate()
-                        .map(|_| "Update requested".into())
-                        .unwrap_or_else(|error| error),
-                );
-            }
-            Setting::UnifiedSidebar => {
-                // The pane layout changes underneath the modal; close it.
-                self.overlay = None;
-                let on = !self.merged();
-                self.set_unified(on);
-            }
-            Setting::DockRight => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.dock_right = !state.dock_right);
-            }
-            Setting::SidebarWidth => self.adjust_sidebar_width(true),
-            Setting::TerminalHeight => self.clear_terminal_height(),
-            Setting::AgentWidth => self.clear_agent_width(),
-            Setting::IconTheme => self.set_theme(self.theme.toggled()),
-            Setting::ColorTheme => {
-                self.sidebar_state = sidebar::update_state(|state| {
-                    state.color_theme = state.color_theme.next();
-                });
-                set_color_theme(self.sidebar_state.color_theme);
-            }
-            Setting::PreviewPlacement => {
-                self.sidebar_state = sidebar::update_state(|state| {
-                    state.preview_placement = state.preview_placement.other();
-                });
-            }
-            Setting::CustomEditorCommand => {
-                self.overlay = Some(Overlay::Prompt {
-                    title: "Custom editor".into(),
-                    input: actions::configured_editor().unwrap_or_default(),
-                    kind: PromptKind::CustomEditor,
-                    select_all: SelectAll::default(),
-                });
-            }
-            Setting::CustomEditorClick => {
-                self.sidebar_state = sidebar::update_state(|state| {
-                    state.custom_editor_on_click = !state.custom_editor_on_click;
-                });
-            }
-            Setting::CustomEditorInline => {
-                self.sidebar_state = sidebar::update_state(|state| {
-                    state.custom_editor_inline = !state.custom_editor_inline;
-                });
-            }
-            Setting::HiddenFiles => {
-                self.tree.show_hidden = !self.tree.show_hidden;
-                self.invalidate_quick_index();
-                self.rebuild();
-            }
-            Setting::Hotkeys => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.show_hotkeys = !state.show_hotkeys);
-            }
-            Setting::AutoOpen => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.auto_open = !state.auto_open);
-            }
-            Setting::StrictToggle => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.strict_toggle = !state.strict_toggle);
-            }
-            Setting::FocusOnOpen => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.focus_on_open = !state.focus_on_open);
-            }
-            Setting::FollowCwd => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.follow_cwd = !state.follow_cwd);
-                self.cwd_follower.borrow_mut().reset();
-            }
-            Setting::GitDecorations => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.git_deco = !state.git_deco);
-                self.rediscover_repos();
-                self.request_decorations(true);
-            }
-            Setting::GitFooter => {
-                self.sidebar_state = sidebar::update_state(|state| {
-                    state.show_git_footer = !state.show_git_footer;
-                });
-                self.rediscover_repos();
-                self.request_decorations(true);
-            }
-            Setting::ConfirmDelete => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.confirm_delete = !state.confirm_delete);
-            }
-            Setting::AiCommit => {
-                self.overlay = Some(Overlay::AiSettings(AiSettingsPage::open()));
-            }
-            Setting::Folder => {
-                self.overlay = None;
-                self.change_folder_dialog();
-            }
-        }
-    }
-
-    fn adjust_sidebar_width(&mut self, wider: bool) {
-        self.sidebar_state = sidebar::update_state(|state| {
-            state.sidebar_width = sidebar::step_sidebar_width(state.sidebar_width, wider);
-        });
-        if let Some(ctl) = &self.pane_ctl {
-            ctl.resize_preferred(
-                self.last_width,
-                self.sidebar_state.sidebar_width,
-                self.sidebar_state.dock_right,
-            );
-        }
-    }
-
-    /// `←`/`→` on the Terminal height row: step the persisted default and size
-    /// THIS tab's editor/terminal column right away. The setting is a default
-    /// (the IDE layer's remembered per-project ratio still wins when a layout is
-    /// built); applying it here just makes the row feel immediate.
-    fn adjust_terminal_height(&mut self, taller: bool) {
-        // Step from the STORED value: a failed apply leaves the tab's layout
-        // alone, so re-measuring it every press would land on the same two
-        // values forever.
-        let seed = match self.sidebar_state.terminal_height {
-            Some(rows) => rows,
-            None => self
-                .pane_ctl
-                .as_ref()
-                .and_then(|ctl| ctl.terminal_rows_now())
-                .unwrap_or(sidebar::SEED_TERMINAL_HEIGHT),
-        };
-        let rows = sidebar::step_terminal_height(seed, taller);
-        self.sidebar_state = sidebar::update_state(|state| state.terminal_height = Some(rows));
-        let applied = self
-            .pane_ctl
-            .as_ref()
-            .is_some_and(|ctl| ctl.set_terminal_rows(rows));
-        if !applied {
-            // Keep the stored value: it still applies to tabs built later.
-            self.notice = Some("Terminal height: this tab has no editor/terminal split".into());
-        }
-    }
-
-    /// `⏎` on the Terminal height row: back to "auto", so a built layout uses
-    /// the IDE layer's own default again. The current layout is left alone.
-    fn clear_terminal_height(&mut self) {
-        self.sidebar_state = sidebar::update_state(|state| state.terminal_height = None);
-    }
-
-    /// `←`/`→` on the Agent width row: step the persisted default and size THIS
-    /// tab's Agent column right away. The setting is a default (the IDE layer's
-    /// remembered per-project ratio still wins when a layout is built); applying
-    /// it here just makes the row feel immediate.
-    fn adjust_agent_width(&mut self, wider: bool) {
-        // Step from the STORED value: a failed apply leaves the tab's layout
-        // alone, so re-measuring it every press would land on the same two
-        // values forever.
-        let seed = match self.sidebar_state.agent_width {
-            Some(cols) => cols,
-            None => self
-                .pane_ctl
-                .as_ref()
-                .and_then(|ctl| ctl.agent_cols_now())
-                .unwrap_or(sidebar::SEED_AGENT_WIDTH),
-        };
-        let cols = sidebar::step_agent_width(seed, wider);
-        self.sidebar_state = sidebar::update_state(|state| state.agent_width = Some(cols));
-        let applied = self
-            .pane_ctl
-            .as_ref()
-            .is_some_and(|ctl| ctl.set_agent_cols(cols));
-        if !applied {
-            // Keep the stored value: it still applies to tabs built later.
-            self.notice = Some("Agent width: this tab has no Agent column".into());
-        }
-    }
-
-    /// `⏎` on the Agent width row: back to "auto", so a built layout uses the
-    /// IDE layer's own default again. The current layout is left alone.
-    fn clear_agent_width(&mut self) {
-        self.sidebar_state = sidebar::update_state(|state| state.agent_width = None);
-    }
-
-    /// Render the centered Settings popup and remember its rect for clicks.
-    fn draw_settings(&mut self, frame: &mut Frame) {
-        let rows = self.settings_rows();
-        let area = frame.area();
-        let desired_width = rows
-            .iter()
-            .map(|(_, label, value, _)| label.chars().count() + value.chars().count() + 5)
-            .max()
-            .unwrap_or(30)
-            .max(30) as u16;
-        let width = desired_width.min(area.width);
-        // The hotkey reference lives here now; the footer chips are opt-in.
-        let hint_lines = wrap_hints(&self.hints(), width.saturating_sub(2), 0);
-        let Some(Overlay::Settings {
-            selected,
-            rect,
-            scroll,
-        }) = self.overlay.as_mut()
-        else {
-            return;
-        };
-        let height = (rows.len() as u16 + 5 + hint_lines.len() as u16).min(area.height);
-        let popup = Rect::new(
-            (area.width.saturating_sub(width)) / 2,
-            (area.height.saturating_sub(height)) / 3,
-            width,
-            height,
-        );
-        *rect = popup;
-        let inner_height = usize::from(height.saturating_sub(2));
-        let content_height = rows.len() + 3 + hint_lines.len();
-        *scroll = keep_visible_scroll(*selected, inner_height, content_height);
-
-        let inner_w = usize::from(width.saturating_sub(2));
-        let mut lines: Vec<Line> = Vec::new();
-        for (i, (_, label, value, enabled)) in rows.iter().enumerate() {
-            let pad = inner_w.saturating_sub(label.chars().count() + value.chars().count() + 2);
-            let text = format!(" {label}{}{value} ", " ".repeat(pad.max(1)));
-            let style = if !enabled {
-                Style::default().dim()
-            } else if i == *selected {
-                selection_style(true)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::styled(text, style));
-        }
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            " Hotkeys",
-            Style::default().bold(),
-        )));
-        lines.extend(hint_lines);
-        lines.push(Line::from(" click/⏎ · ←/→ adjust · esc".dim()));
-
-        frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new(lines).scroll((*scroll as u16, 0)).block(
-                ratatui::widgets::Block::bordered()
-                    .title(" Settings ")
-                    .border_style(Style::default().dim()),
-            ),
-            popup,
-        );
-    }
-
     fn activate_menu_entry(&mut self) {
         let Some(Overlay::Menu {
             target,
@@ -3639,14 +3029,6 @@ impl App {
             self.rename_pane(&input);
             return;
         }
-        if matches!(kind, PromptKind::CustomEditor) {
-            if sidebar::save_editor_command(&input) {
-                self.notice = Some("custom editor saved; Enter still previews files".into());
-            } else {
-                self.notice = Some("custom editor command must be one non-empty line".into());
-            }
-            return;
-        }
         let Some(name) = actions::validate_name(&input) else {
             self.notice = Some("invalid name".into());
             return;
@@ -3656,7 +3038,6 @@ impl App {
             PromptKind::NewFolder(dir) => actions::create_folder(dir, name),
             PromptKind::Rename(path) => actions::rename(path, name),
             PromptKind::ChangeFolder => unreachable!("handled above"),
-            PromptKind::CustomEditor => unreachable!("handled above"),
             PromptKind::PaneRename => unreachable!("handled above"),
         };
         match result {
@@ -4114,15 +3495,10 @@ impl App {
                     picker.draw(frame);
                 }
             }
-            Some(Overlay::AiSettings(_)) => {
-                if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
-                    page.draw(frame);
-                }
-            }
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
             Some(Overlay::Prompt { .. }) => self.draw_prompt(frame),
             Some(Overlay::ConfirmDelete { .. }) => self.draw_confirm(frame),
-            Some(Overlay::Settings { .. }) => self.draw_settings(frame),
+            Some(Overlay::Settings(_)) => self.draw_settings(frame),
             Some(Overlay::QuickOpen { .. }) => self.draw_quick_open(frame),
             _ => {}
         }
@@ -4931,74 +4307,65 @@ impl App {
     }
 }
 
-/// What a key did to a caret-less text input (see [`text_input_key`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TextKey {
-    /// Not this input's key: the caller handles it (Enter, Esc, arrows, Tab).
-    Other,
-    /// The value changed, so whatever is derived from it must be refreshed.
-    Edited,
-    /// Consumed without an edit: an armed Esc dropped the selection, or a
-    /// caret key did nothing but clear it.
-    Consumed,
-}
-
-/// One key on one caret-less text input that supports Ctrl+A select-all.
-///
-/// These fields have no selection model (no anchor, no shift+arrows), so Ctrl+A
-/// arms [`SelectAll`]: the value is drawn with [`selected_text_style`] and the
-/// NEXT insert or delete replaces the whole value — the same one-shot selection
-/// the crate's popups use. Caret keys and Ctrl+U drop it, and Esc only closes
-/// once it is dropped (that press comes back as [`TextKey::Consumed`]).
-fn text_input_key(key: KeyEvent, text: &mut String, select_all: &mut SelectAll) -> TextKey {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    match key.code {
-        // Esc first drops an armed selection, then does its normal job.
-        KeyCode::Esc if select_all.armed() => {
-            select_all.disarm();
-            TextKey::Consumed
-        }
-        // AltGr layouts deliver CONTROL+ALT for plain characters, so only a
-        // bare Ctrl+A is the select-all chord (and only a bare Ctrl+U clears).
-        KeyCode::Char('a') if ctrl && !alt => {
-            select_all.arm_if_nonempty(!text.is_empty());
-            TextKey::Consumed
-        }
-        KeyCode::Char('u') if ctrl && !alt => {
-            select_all.disarm();
-            text.clear();
-            TextKey::Edited
-        }
-        // These fields type at the end and cannot move a caret, so the caret
-        // keys only drop the selection — exactly what they do in the popups.
-        KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
-            select_all.disarm();
-            TextKey::Consumed
-        }
-        KeyCode::Backspace => {
-            // An armed Ctrl+A means "replace it all": the first delete clears
-            // the value instead of removing one character.
-            if !take_selected(select_all, text) {
-                text.pop();
-            }
-            TextKey::Edited
-        }
-        KeyCode::Char(c) if !ctrl || alt => {
-            take_selected(select_all, text);
-            text.push(c);
-            TextKey::Edited
-        }
-        _ => TextKey::Other,
+/// The Settings page's host: this view applies what the page changed.
+impl SettingsHost for App {
+    fn unified_available(&self) -> bool {
+        self.other_exe.is_some()
     }
-}
 
-/// Drop an armed Ctrl+A (`ui::SelectAll`) by clearing `text`, and report that
-/// the edit about to happen must be skipped. These fields type at the end of
-/// the value, so the caret `SelectAll::take` leaves behind is 0.
-fn take_selected(select_all: &mut SelectAll, text: &mut String) -> bool {
-    let mut caret = 0;
-    select_all.take(text, &mut caret)
+    fn set_unified(&mut self, on: bool) {
+        self.set_unified(on);
+    }
+
+    fn change_folder(&mut self) {
+        self.change_folder_dialog();
+    }
+
+    fn root_name(&self) -> String {
+        self.tree.root_name()
+    }
+
+    fn icon_theme(&self) -> IconTheme {
+        self.theme
+    }
+
+    fn set_icon_theme(&mut self, theme: IconTheme) {
+        self.set_theme(theme);
+    }
+
+    fn state_changed(&mut self, setting: Setting, state: &sidebar::State) {
+        self.sidebar_state = *state;
+        match setting {
+            Setting::SidebarWidth => {
+                if let Some(ctl) = &self.pane_ctl {
+                    ctl.resize_preferred(self.last_width, state.sidebar_width, state.dock_right);
+                }
+            }
+            Setting::FollowCwd => self.cwd_follower.borrow_mut().reset(),
+            Setting::GitDecorations | Setting::GitFooter => {
+                self.rediscover_repos();
+                self.request_decorations(true);
+            }
+            Setting::HiddenFiles => {
+                self.tree.show_hidden = state.show_hidden;
+                self.invalidate_quick_index();
+                self.rebuild();
+            }
+            _ => {}
+        }
+    }
+
+    fn pane_id(&self) -> Option<String> {
+        self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone())
+    }
+
+    fn notice(&mut self, text: String, _error: bool) {
+        self.notice = Some(text);
+    }
+
+    fn hints(&self) -> Vec<(&'static str, &'static str)> {
+        App::hints(self)
+    }
 }
 
 /// The Search view's focused text field, if the focus is on one at all (the

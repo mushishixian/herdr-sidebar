@@ -3,6 +3,7 @@
 //! pane-list parsing both views use to find their sibling panes. One home —
 //! these used to be copy-mirrored between two crates.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -713,6 +714,76 @@ impl SelectAll {
         *cursor = 0;
         true
     }
+}
+
+/// What a key did to a caret-less text input (see [`text_input_key`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextKey {
+    /// Not this input's key: the caller handles it (Enter, Esc, arrows, Tab).
+    Other,
+    /// The value changed, so whatever is derived from it must be refreshed.
+    Edited,
+    /// Consumed without an edit: an armed Esc dropped the selection, or a
+    /// caret key did nothing but clear it.
+    Consumed,
+}
+
+/// One key on one caret-less text input that supports Ctrl+A select-all.
+///
+/// These fields have no selection model (no anchor, no shift+arrows), so Ctrl+A
+/// arms [`SelectAll`]: the value is drawn with [`selected_text_style`] and the
+/// NEXT insert or delete replaces the whole value — the same one-shot selection
+/// the crate's popups use. Caret keys and Ctrl+U drop it, and Esc only closes
+/// once it is dropped (that press comes back as [`TextKey::Consumed`]).
+pub fn text_input_key(key: KeyEvent, text: &mut String, select_all: &mut SelectAll) -> TextKey {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        // Esc first drops an armed selection, then does its normal job.
+        KeyCode::Esc if select_all.armed() => {
+            select_all.disarm();
+            TextKey::Consumed
+        }
+        // AltGr layouts deliver CONTROL+ALT for plain characters, so only a
+        // bare Ctrl+A is the select-all chord (and only a bare Ctrl+U clears).
+        KeyCode::Char('a') if ctrl && !alt => {
+            select_all.arm_if_nonempty(!text.is_empty());
+            TextKey::Consumed
+        }
+        KeyCode::Char('u') if ctrl && !alt => {
+            select_all.disarm();
+            text.clear();
+            TextKey::Edited
+        }
+        // These fields type at the end and cannot move a caret, so the caret
+        // keys only drop the selection — exactly what they do in the popups.
+        KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
+            select_all.disarm();
+            TextKey::Consumed
+        }
+        KeyCode::Backspace => {
+            // An armed Ctrl+A means "replace it all": the first delete clears
+            // the value instead of removing one character.
+            if !take_selected(select_all, text) {
+                text.pop();
+            }
+            TextKey::Edited
+        }
+        KeyCode::Char(c) if !ctrl || alt => {
+            take_selected(select_all, text);
+            text.push(c);
+            TextKey::Edited
+        }
+        _ => TextKey::Other,
+    }
+}
+
+/// Drop an armed Ctrl+A (`ui::SelectAll`) by clearing `text`, and report that
+/// the edit about to happen must be skipped. These fields type at the end of
+/// the value, so the caret `SelectAll::take` leaves behind is 0.
+fn take_selected(select_all: &mut SelectAll, text: &mut String) -> bool {
+    let mut caret = 0;
+    select_all.take(text, &mut caret)
 }
 
 /// The look of a value that is "selected" by [`SelectAll`]: same background the

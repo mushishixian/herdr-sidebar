@@ -1007,6 +1007,38 @@ HACKING.md — budget time for that before promising a patched build.
     stored value is kept, because it still applies to tabs built later. The first `←`/`→` on
     "auto" is seeded from the live column (`PaneCtl::agent_cols_now`), or
     `state::SEED_AGENT_WIDTH` when there is nothing to measure.
+- **⚙ Settings is ONE page, `src/settings_page.rs`, shown as a herdr popup** (user-requested
+  2026-10-31; it used to be a ~32-column box drawn inside the sidebar pane, implemented twice, once
+  per view). `SettingsPage` owns the rows, keys, mouse handling and drawing, and writes `state.json`
+  itself. It talks to whoever hosts it only through the `SettingsHost` trait (unified toggle, change
+  folder, icon theme, `state_changed` side effects, notices, hotkey chips). There are three hosts:
+  Explorer, Source Control (both keep it in their overlay slot as `Overlay::Settings(SettingsPage)`)
+  and the `--settings-popup` process (`src/settings_popup.rs`, `[[panes]] id = "settings"`,
+  `ENTRYPOINT`, 44%×80%, opened with `file_popup::request_popup_pane_with_env`). Both views show the
+  SAME rows, the union of what each used to show. View-specific rows (custom editor, Hidden files,
+  Confirm delete, View as) just store their value when the other view is in front.
+  - `⚙` / `s` open the popup (`open_settings_popup`). The in-pane box is the fallback: always on
+    Windows (popup panes are linux/macos only), with no herdr pane, and whenever `plugin.pane.open`
+    errors (e.g. `ui_busy`, since herdr allows one popup per session).
+  - The popup is another process. What it cannot read from disk travels in its spawn env
+    (`HERDR_SIDEBAR_SETTINGS_{UNIFIED_OK,ROOT,ICONS,HINTS}`, hints as JSON pairs). The caller is
+    `HERDR_CALLER_PANE_ID` = the sidebar pane, so Terminal height / Agent width apply to the caller's
+    tab (`src/pane_layout.rs`, the one copy of those split helpers).
+  - The two rows that need the sidebar process (Unified sidebar, Change folder…) go back as a
+    request file `<rundir>/settings/pane-<pane>.req` (`unified on|off` / `folder` + unix stamp,
+    tmp+rename, claimed by rename, 30 s freshness — the `ai_commit` request pattern).
+    `poll_settings_request` runs on EVERY event-loop turn in `main.rs`, not in `tick`: the sidebar
+    that opened the popup is unfocused, and SCM's tick work is focus-gated. A request that cannot be
+    written keeps the popup open with the error in its footer.
+  - Everything else is plain `state.json`. Running sidebars ADOPT every setting the page can write on
+    their periodic re-read (Explorer `sync_shared_settings`, SCM `tick`): icons (without writing
+    state back), hotkeys, follow cwd (resets the follower), confirm delete, preview placement, auto
+    open, terminal height, agent width, hidden files, view mode, plus the older fields. They never
+    adopt `merged` / `active` / `search_active`, which are process-local. A new persisted row must be
+    added to BOTH re-reads, or it works only in the in-pane fallback.
+  - Tests isolate the state dir with `state::TEST_STATE_DIR`, a `#[cfg(test)]` thread-local that
+    `state_dir()` (and therefore `rundir`, `ai.json`, …) checks first. Never `set_var` the state-dir
+    env in a test: the env is process-wide and the lib tests run in parallel.
 - Every Settings action uses `state::update_state`, a lock-protected read-modify-write.
   State/tree/SCM/root writers use persistent sibling `.lock` files with OS-backed locks; the
   kernel releases ownership on process death, so do not poll, age, or delete those files.
@@ -2147,9 +2179,9 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
 - The query runs on a worker thread after a 300 ms settle (`DEBOUNCE`). Every search gets a generation;
   results from an older generation are dropped in `tick`. An old worker keeps running to completion
   (the engine has no cancel flag), so the cost of a superseded query is bounded by one scan.
-- Hidden files: the popup searches with hidden files shown, matching the Explorer's default
-  (`Tree::show_hidden` starts `true`). That flag is NOT persisted in `state.json`; there is no saved
-  setting to follow. `.git` and `.gitignore`d paths are always skipped by the engine.
+- Hidden files: the popup always searches with hidden files shown. The Explorer's `.` toggle is
+  now persisted as `show_hidden` in `state.json` (default true), but the popup does not follow it yet.
+  `.git` and `.gitignore`d paths are always skipped by the engine.
 - Preview: reads at most 1 MiB (`PREVIEW_MAX_BYTES`); a binary or invalid-UTF-8 file shows a message
   instead. The highlighted window is hit ±300 lines (`preview_window`), highlighted through
   `syntax::highlight_lines` (the grammar state at the window start is approximate). It returns

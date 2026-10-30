@@ -1,0 +1,8 @@
+# starship — managed here (install.sh symlinks this to ~/.config/starship.toml).
+#
+# Everything else is starship's default look. The one override: no blank row
+# before the prompt. Starship inserts it by default, and inside the IDE's
+# Terminal pane (10 rows tall, one border row above the first line) it wasted a
+# whole row of the few this pane has — the prompt now starts directly under the
+# border (user-reported).
+add_newline = false

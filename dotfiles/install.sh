@@ -314,6 +314,9 @@ done
 link config/lazygit/config.yml "$HOME/.config/lazygit/config.yml"
 link config/ripgrep/config     "$HOME/.config/ripgrep/config"
 link config/bat/config         "$HOME/.config/bat/config"
+# The prompt: no blank row above it (see the file) — the IDE Terminal pane is
+# 10 rows tall and could not spare one.
+link config/starship.toml      "$HOME/.config/starship.toml"
 
 for script in fresh-open fresh-ide fresh-restart herdr-ide herdr-ide-term herdr-rpc; do
   link "herdr-plugins/ide/bin/$script" "$BIN/$script"

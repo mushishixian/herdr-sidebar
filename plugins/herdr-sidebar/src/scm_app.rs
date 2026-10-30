@@ -23,7 +23,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 
 use herdr_sidebar::actions::{self, ClipboardWrite, copy_to_clipboard, open_external, reveal};
-use herdr_sidebar::ai_settings::{self, AiPageAction, AiSettingsPage};
 use herdr_sidebar::branch_ui::{
     BranchPicker, FooterZones, PickerAction, draw_git_footer, sync_glyph,
 };
@@ -31,6 +30,8 @@ use herdr_sidebar::fswatch::{FsWatch, WatchSet};
 use herdr_sidebar::git::{DeleteRefused, FileEntry, Git, Status};
 use herdr_sidebar::icons::{IconTheme, icon};
 use herdr_sidebar::pane_menu::{self, PaneAction};
+use herdr_sidebar::settings_page::{Outcome, Setting, SettingsHost, SettingsPage};
+use herdr_sidebar::settings_popup::{self, CallerContext, Request};
 use herdr_sidebar::state::Exit;
 use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::suggest;
@@ -38,10 +39,9 @@ use herdr_sidebar::ui::{
     SelectAll, TitleAction, activity_button_style, activity_icons, branch_icon,
     chrome_button_style, draw_activity_caps, draw_hover_tooltip, draw_scrollbar, gear_icon, hits,
     hits_activity_button, hits_collapse_button, hover_style, hover_tooltip_visible,
-    icon_style as ui_icon_style, keep_visible_scroll, palette, selected_text_style,
-    selection_style, set_color_theme, sibling_panes_of, sparkle_icon, status_color,
-    title_action_spans, title_actions_visible, title_actions_width, truncate_to, within,
-    wrap_footer_message, wrap_hints,
+    icon_style as ui_icon_style, palette, selected_text_style, selection_style, set_color_theme,
+    sibling_panes_of, sparkle_icon, status_color, title_action_spans, title_actions_visible,
+    title_actions_width, truncate_to, within, wrap_footer_message, wrap_hints,
 };
 
 /// How many log lines the history-ish drawers fetch.
@@ -1173,9 +1173,6 @@ enum MenuEntry {
 /// A modal layered over the list; while open it owns keyboard and mouse input.
 enum Overlay {
     BranchPicker(BranchPicker),
-    /// The AI commit page (API URL / key / model, connection test), opened from
-    /// the Settings modal.
-    AiSettings(AiSettingsPage),
     Menu {
         x: u16,
         y: u16,
@@ -1212,12 +1209,8 @@ enum Overlay {
         hash: String,
         subject: String,
     },
-    /// The ⚙ settings modal: mouse-toggleable panel settings.
-    Settings {
-        selected: usize,
-        rect: Rect,
-        scroll: usize,
-    },
+    /// The ⚙ settings modal (shared with the Explorer, see `settings_page`).
+    Settings(SettingsPage),
     /// The name typed for our own pane ("Rename pane…"), edited in a dialog.
     PaneRename {
         input: String,
@@ -1243,38 +1236,64 @@ enum Overlay {
     },
 }
 
-/// One row of the Settings modal.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Setting {
-    Version,
-    Update,
-    UnifiedSidebar,
-    DockRight,
-    SidebarWidth,
-    /// Default height, in rows, of the bottom pane of the IDE layout's
-    /// editor/terminal column.
-    TerminalHeight,
-    /// Default width, in columns, of the IDE layout's rightmost Agent column.
-    AgentWidth,
-    IconTheme,
-    ColorTheme,
-    PreviewPlacement,
-    AutoOpen,
-    StrictToggle,
-    FocusOnOpen,
-    FollowCwd,
-    GitDecorations,
-    GitFooter,
-    Hotkeys,
-    Folder,
-    ScmViewMode,
-    /// Opens the AI commit page; the value is the configured model.
-    AiCommit,
-}
+/// The Settings page's host: this view applies what the page changed.
+impl SettingsHost for App {
+    fn unified_available(&self) -> bool {
+        self.other_exe.is_some()
+    }
 
-/// (setting, label, current value, enabled) — disabled rows render dimmed and
-/// don't toggle.
-type SettingRow = (Setting, &'static str, String, bool);
+    fn set_unified(&mut self, on: bool) {
+        self.set_unified(on);
+    }
+
+    fn change_folder(&mut self) {
+        self.change_folder_dialog();
+    }
+
+    fn root_name(&self) -> String {
+        self.cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.cwd.display().to_string())
+    }
+
+    fn icon_theme(&self) -> IconTheme {
+        self.theme
+    }
+
+    fn set_icon_theme(&mut self, theme: IconTheme) {
+        self.set_theme(theme);
+    }
+
+    fn state_changed(&mut self, setting: Setting, state: &sidebar::State) {
+        self.sidebar_state = *state;
+        match setting {
+            Setting::SidebarWidth => {
+                if let Some(ctl) = &self.pane_ctl {
+                    ctl.resize_preferred(self.last_width, state.sidebar_width, state.dock_right);
+                }
+            }
+            Setting::FollowCwd => self.cwd_follower.borrow_mut().reset(),
+            Setting::ScmViewMode => {
+                self.tree_view = state.scm_tree_view;
+                self.apply_tree_view();
+            }
+            _ => {}
+        }
+    }
+
+    fn pane_id(&self) -> Option<String> {
+        self.pane_ctl.as_ref().map(|ctl| ctl.pane_id.clone())
+    }
+
+    fn notice(&mut self, text: String, error: bool) {
+        self.flash = Some((text, error));
+    }
+
+    fn hints(&self) -> Vec<(&'static str, &'static str)> {
+        App::hints(self)
+    }
+}
 
 /// Smallest row index `top` such that the rows from `top` to the end fit in
 /// `height` lines. Returns the last index when even that row alone is taller
@@ -1347,9 +1366,6 @@ struct ClickZones {
 /// Handle for identity/label control of our own pane over the socket API.
 struct PaneCtl {
     pane_id: String,
-    /// The pane's tab, so a split ratio can be set on the whole tab rather than
-    /// on whichever pane happens to be focused.
-    tab_id: Option<String>,
 }
 
 impl PaneCtl {
@@ -1357,12 +1373,7 @@ impl PaneCtl {
         let pane_id = std::env::var("HERDR_PANE_ID")
             .ok()
             .filter(|id| !id.is_empty())?;
-        Some(Self {
-            pane_id,
-            tab_id: std::env::var("HERDR_TAB_ID")
-                .ok()
-                .filter(|id| !id.is_empty()),
-        })
+        Some(Self { pane_id })
     }
 
     /// Set or clear the pane label — cleared while collapsed so the sliver
@@ -1432,80 +1443,6 @@ impl PaneCtl {
             serde_json::json!({ "pane_id": self.pane_id }),
         )
         .ok()
-    }
-
-    /// Rows the bottom pane of this tab's editor/terminal column occupies right
-    /// now — the seed for the first `←`/`→` on an "auto" Terminal height.
-    fn terminal_rows_now(&self) -> Option<u16> {
-        let layout = self.layout()?;
-        let (_, ratio, height) = herdr_sidebar::launch::foreign_down_split(&layout, &self.pane_id)?;
-        let rows = (1.0 - ratio) * height as f64;
-        Some(rows.round().max(0.0) as u16)
-    }
-
-    /// Size this tab's editor/terminal split so its BOTTOM pane is `rows` rows
-    /// tall. False when the tab has no such split (nothing to size), so the
-    /// caller can say so instead of looking like it worked.
-    fn set_terminal_rows(&self, rows: u16) -> bool {
-        let Ok(layout) = herdr_sidebar::ipc::call_text(
-            "pane.layout",
-            serde_json::json!({ "pane_id": self.pane_id }),
-        ) else {
-            return false;
-        };
-        let Some((path, _ratio, height)) =
-            herdr_sidebar::launch::foreign_down_split(&layout, &self.pane_id)
-        else {
-            return false;
-        };
-        self.apply_split_ratio(path, herdr_sidebar::launch::ratio_for_rows(rows, height))
-    }
-
-    /// Columns the Agent column of this tab occupies right now — the seed for
-    /// the first `←`/`→` on an "auto" Agent width.
-    fn agent_cols_now(&self) -> Option<u16> {
-        let layout = self.layout()?;
-        let (_, ratio, width) = herdr_sidebar::launch::foreign_right_split(&layout, &self.pane_id)?;
-        let cols = (1.0 - ratio) * width as f64;
-        Some(cols.round().max(0.0) as u16)
-    }
-
-    /// Size this tab's Agent column so it is `cols` columns wide. False when the
-    /// tab has no such split (nothing to size), so the caller can say so
-    /// instead of looking like it worked.
-    fn set_agent_cols(&self, cols: u16) -> bool {
-        let Ok(layout) = herdr_sidebar::ipc::call_text(
-            "pane.layout",
-            serde_json::json!({ "pane_id": self.pane_id }),
-        ) else {
-            return false;
-        };
-        let Some((path, _ratio, width)) =
-            herdr_sidebar::launch::foreign_right_split(&layout, &self.pane_id)
-        else {
-            return false;
-        };
-        self.apply_split_ratio(path, herdr_sidebar::launch::ratio_for_cols(cols, width))
-    }
-
-    /// Set one of this tab's splits to `ratio`. False when the host refused it
-    /// (call_text returns the reply line even for an error response).
-    fn apply_split_ratio(&self, path: Vec<bool>, ratio: f64) -> bool {
-        let mut params = serde_json::json!({ "path": path, "ratio": ratio });
-        // Prefer the tab form; a launch that did not tell us its tab still
-        // resolves the same tab from the pane.
-        match &self.tab_id {
-            Some(tab) => params["tab_id"] = serde_json::Value::String(tab.clone()),
-            None => params["pane_id"] = serde_json::Value::String(self.pane_id.clone()),
-        }
-        match herdr_sidebar::ipc::call_text("layout.set_split_ratio", params) {
-            Ok(reply) => {
-                serde_json::from_str::<serde_json::Value>(reply.trim_start_matches('\u{feff}'))
-                    .map(|value| value.get("error").is_none())
-                    .unwrap_or(false)
-            }
-            Err(_) => false,
-        }
     }
 
     /// Report identity tokens: always our own; in merged mode also the other
@@ -2128,6 +2065,24 @@ impl App {
             self.sidebar_state.color_theme = shared.color_theme;
             set_color_theme(shared.color_theme);
         }
+        // Settings the popup (or another sidebar) may have written. The
+        // process-local fields (merged, active, search_active) are not adopted.
+        if let Some(icons) = shared.icons
+            && icons != self.theme
+        {
+            self.theme = icons;
+        }
+        self.sidebar_state.icons = shared.icons;
+        self.sidebar_state.show_hotkeys = shared.show_hotkeys;
+        self.sidebar_state.confirm_delete = shared.confirm_delete;
+        self.sidebar_state.auto_open = shared.auto_open;
+        self.sidebar_state.preview_placement = shared.preview_placement;
+        self.sidebar_state.terminal_height = shared.terminal_height;
+        self.sidebar_state.agent_width = shared.agent_width;
+        if shared.follow_cwd != self.sidebar_state.follow_cwd {
+            self.sidebar_state.follow_cwd = shared.follow_cwd;
+            self.cwd_follower.borrow_mut().reset();
+        }
         if shared.sidebar_width != self.sidebar_state.sidebar_width {
             self.sidebar_state.sidebar_width = shared.sidebar_width;
             if let Some(ctl) = &self.pane_ctl {
@@ -2352,30 +2307,6 @@ impl App {
     /// event loop polls faster while this holds.
     pub fn is_ai_commit_busy(&self) -> bool {
         self.ai_commit.is_some() || self.ai_commit_due.is_some()
-    }
-
-    /// Applies what the AI page asked for: Back returns to the Settings modal
-    /// with the AI commit row selected, Close dismisses everything.
-    fn ai_page_done(&mut self, action: AiPageAction) {
-        match action {
-            AiPageAction::None => {}
-            AiPageAction::Close => self.overlay = None,
-            AiPageAction::Back => self.reopen_settings_on(Setting::AiCommit),
-        }
-    }
-
-    /// Reopens the Settings modal with `setting` selected.
-    fn reopen_settings_on(&mut self, setting: Setting) {
-        let selected = self
-            .settings_rows()
-            .iter()
-            .position(|row| row.0 == setting)
-            .unwrap_or(0);
-        self.overlay = Some(Overlay::Settings {
-            selected,
-            rect: Rect::default(),
-            scroll: 0,
-        });
     }
 
     pub fn on_resize(&mut self, width: u16) {
@@ -3394,18 +3325,13 @@ impl App {
     fn overlay_key(&mut self, key: KeyEvent) {
         // The AI page owns its keys outright: route them before the Settings
         // rows (which read ai.json) are built for every keystroke.
-        if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
-            let action = page.key(key);
-            return self.ai_page_done(action);
+        if matches!(self.overlay, Some(Overlay::Settings(_))) {
+            return self.settings_key(key);
         }
         enum Cmd {
             Nothing,
             Close,
             Activate,
-            ToggleSetting(usize),
-            AdjustWidth(bool),
-            AdjustHeight(bool),
-            AdjustAgentWidth(bool),
             DiscardConfirmed(usize, FileEntry),
             DiscardAllConfirmed(usize),
             GitConfirmed(usize, Vec<String>),
@@ -3420,8 +3346,6 @@ impl App {
             CopyInput,
         }
 
-        let settings = self.settings_rows();
-        let row_count = settings.len();
         let cmd = match self.overlay.as_mut() {
             Some(Overlay::Menu {
                 entries, selected, ..
@@ -3438,54 +3362,9 @@ impl App {
                 KeyCode::Enter => Cmd::Activate,
                 _ => Cmd::Nothing,
             },
-            Some(Overlay::Settings { selected, .. }) => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => Cmd::Close,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *selected = selected.saturating_sub(1);
-                    Cmd::Nothing
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    *selected = (*selected + 1).min(row_count.saturating_sub(1));
-                    Cmd::Nothing
-                }
-                KeyCode::Left | KeyCode::Char('h')
-                    if settings.get(*selected).map(|row| row.0) == Some(Setting::SidebarWidth) =>
-                {
-                    Cmd::AdjustWidth(false)
-                }
-                KeyCode::Right | KeyCode::Char('l')
-                    if settings.get(*selected).map(|row| row.0) == Some(Setting::SidebarWidth) =>
-                {
-                    Cmd::AdjustWidth(true)
-                }
-                KeyCode::Left | KeyCode::Char('h')
-                    if settings.get(*selected).map(|row| row.0)
-                        == Some(Setting::TerminalHeight) =>
-                {
-                    Cmd::AdjustHeight(false)
-                }
-                KeyCode::Right | KeyCode::Char('l')
-                    if settings.get(*selected).map(|row| row.0)
-                        == Some(Setting::TerminalHeight) =>
-                {
-                    Cmd::AdjustHeight(true)
-                }
-                KeyCode::Left | KeyCode::Char('h')
-                    if settings.get(*selected).map(|row| row.0) == Some(Setting::AgentWidth) =>
-                {
-                    Cmd::AdjustAgentWidth(false)
-                }
-                KeyCode::Right | KeyCode::Char('l')
-                    if settings.get(*selected).map(|row| row.0) == Some(Setting::AgentWidth) =>
-                {
-                    Cmd::AdjustAgentWidth(true)
-                }
-                KeyCode::Enter | KeyCode::Char(' ') => Cmd::ToggleSetting(*selected),
-                _ => Cmd::Nothing,
-            },
-            Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.key(key)),
             // Routed to the page before this match (see the early return above).
-            Some(Overlay::AiSettings(_)) => Cmd::Nothing,
+            Some(Overlay::Settings(_)) => Cmd::Nothing,
+            Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.key(key)),
             Some(Overlay::PaneRename { input, select_all }) => {
                 match field_key(key, input, select_all) {
                     FieldKey::Close => Cmd::Close,
@@ -3540,10 +3419,6 @@ impl App {
             Cmd::Nothing => {}
             Cmd::Close => self.overlay = None,
             Cmd::Activate => self.activate_menu_entry(),
-            Cmd::ToggleSetting(index) => self.toggle_setting(index),
-            Cmd::AdjustWidth(wider) => self.adjust_sidebar_width(wider),
-            Cmd::AdjustHeight(taller) => self.adjust_terminal_height(taller),
-            Cmd::AdjustAgentWidth(wider) => self.adjust_agent_width(wider),
             Cmd::GitConfirmed(repo, args) => {
                 self.overlay = None;
                 match safe_branch_delete(&args) {
@@ -3623,15 +3498,13 @@ impl App {
     }
 
     fn overlay_mouse(&mut self, mouse: MouseEvent) {
-        if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
-            let action = page.mouse(mouse);
-            return self.ai_page_done(action);
+        if matches!(self.overlay, Some(Overlay::Settings(_))) {
+            return self.settings_mouse(mouse);
         }
         enum Cmd {
             Nothing,
             Close,
             Activate,
-            ToggleSetting(usize),
             Reopen(u16, u16),
             Picker(PickerAction),
         }
@@ -3655,44 +3528,9 @@ impl App {
             }
             return;
         }
-        let row_count = self.settings_rows().len();
         let cmd = match self.overlay.as_mut() {
-            Some(Overlay::Settings {
-                selected,
-                rect,
-                scroll,
-            }) => {
-                // Rows start just inside the top border (the title renders ON
-                // the border, not on its own line).
-                let row_at = |row: u16, col: u16| -> Option<usize> {
-                    let index = usize::from(row.saturating_sub(rect.y + 1)) + *scroll;
-                    (col > rect.x
-                        && col < rect.x + rect.width.saturating_sub(1)
-                        && row > rect.y
-                        && row < rect.y + rect.height.saturating_sub(1)
-                        && index < row_count)
-                        .then_some(index)
-                };
-                match mouse.kind {
-                    MouseEventKind::Moved => {
-                        if let Some(i) = row_at(mouse.row, mouse.column) {
-                            *selected = i;
-                        }
-                        Cmd::Nothing
-                    }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        match row_at(mouse.row, mouse.column) {
-                            Some(i) => {
-                                *selected = i;
-                                Cmd::ToggleSetting(i)
-                            }
-                            None if hits(*rect, mouse.column, mouse.row) => Cmd::Nothing,
-                            None => Cmd::Close,
-                        }
-                    }
-                    _ => Cmd::Nothing,
-                }
-            }
+            // Routed to the page before this match (see the early return above).
+            Some(Overlay::Settings(_)) => Cmd::Nothing,
             Some(Overlay::Menu {
                 entries,
                 selected,
@@ -3738,7 +3576,6 @@ impl App {
             Cmd::Nothing => {}
             Cmd::Close => self.overlay = None,
             Cmd::Activate => self.activate_menu_entry(),
-            Cmd::ToggleSetting(index) => self.toggle_setting(index),
             Cmd::Reopen(x, y) => {
                 self.overlay = None;
                 self.open_context_menu(x, y);
@@ -3814,351 +3651,90 @@ impl App {
 
     // ---- Settings modal ----
 
+    /// Open the ⚙ settings: as a herdr popup when one can open, otherwise the
+    /// in-pane modal.
     fn open_settings(&mut self) {
-        herdr_sidebar::updates::check();
-        self.overlay = Some(Overlay::Settings {
-            selected: 0,
-            rect: Rect::default(),
-            scroll: 0,
-        });
-    }
-
-    /// The modal's rows for the current state.
-    fn settings_rows(&self) -> Vec<SettingRow> {
-        let update = herdr_sidebar::updates::row();
-        vec![
-            (
-                Setting::Version,
-                "Sidebar version",
-                herdr_sidebar::updates::VERSION.into(),
-                false,
-            ),
-            (Setting::Update, update.0, update.1, update.2),
-            (
-                Setting::UnifiedSidebar,
-                "Unified sidebar",
-                if self.merged() { "on" } else { "off" }.to_string(),
-                self.other_exe.is_some(),
-            ),
-            (
-                Setting::DockRight,
-                "Dock on the right",
-                if self.sidebar_state.dock_right {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::SidebarWidth,
-                "Sidebar width",
-                format!("{} cols", self.sidebar_state.sidebar_width),
-                true,
-            ),
-            (
-                Setting::TerminalHeight,
-                "Terminal height",
-                match self.sidebar_state.terminal_height {
-                    Some(rows) => format!("{rows} rows"),
-                    None => "auto".to_string(),
-                },
-                true,
-            ),
-            (
-                Setting::AgentWidth,
-                "Agent width",
-                match self.sidebar_state.agent_width {
-                    Some(cols) => format!("{cols} cols"),
-                    None => "auto".to_string(),
-                },
-                true,
-            ),
-            (
-                Setting::IconTheme,
-                "Icon theme",
-                match self.theme {
-                    IconTheme::Material => "material",
-                    IconTheme::Emoji => "emoji",
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::ColorTheme,
-                "Color theme",
-                self.sidebar_state.color_theme.label().to_string(),
-                true,
-            ),
-            (
-                Setting::PreviewPlacement,
-                "Preview opens in",
-                self.sidebar_state.preview_placement.label().to_string(),
-                true,
-            ),
-            (
-                Setting::Hotkeys,
-                "Footer hotkeys",
-                if self.show_hotkeys() {
-                    "shown"
-                } else {
-                    "hidden"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::AutoOpen,
-                "Auto-open sidebar",
-                if self.sidebar_state.auto_open {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::StrictToggle,
-                "Strict toggle",
-                if self.sidebar_state.strict_toggle {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::FocusOnOpen,
-                "Focus on open",
-                if self.sidebar_state.focus_on_open {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::FollowCwd,
-                "Follow pane folder",
-                sidebar::follow_cwd_setting_value(self.sidebar_state.follow_cwd),
-                true,
-            ),
-            (
-                Setting::GitDecorations,
-                "Git decorations",
-                if self.sidebar_state.git_deco {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::GitFooter,
-                "Git footer",
-                if self.sidebar_state.show_git_footer {
-                    "shown"
-                } else {
-                    "hidden"
-                }
-                .to_string(),
-                true,
-            ),
-            (
-                Setting::ScmViewMode,
-                "View as",
-                if self.tree_view { "tree" } else { "list" }.to_string(),
-                true,
-            ),
-            (
-                Setting::AiCommit,
-                "AI commit…",
-                ai_settings::model_value(),
-                true,
-            ),
-            (
-                Setting::Folder,
-                "Change folder…",
-                self.cwd
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| self.cwd.display().to_string()),
-                true,
-            ),
-        ]
-    }
-
-    fn toggle_setting(&mut self, index: usize) {
-        let rows = self.settings_rows();
-        let Some(row) = rows.get(index) else { return };
-        let (setting, enabled) = (row.0, row.3);
-        if !enabled {
+        if self.open_settings_popup() {
             return;
         }
-        match setting {
-            Setting::Version => {}
-            Setting::Update => {
-                self.flash = Some(match herdr_sidebar::updates::activate() {
-                    Ok(()) => ("Update requested".into(), false),
-                    Err(error) => (error, true),
-                });
-            }
-            Setting::ScmViewMode => self.toggle_tree_view(),
-            Setting::AiCommit => {
-                self.overlay = Some(Overlay::AiSettings(AiSettingsPage::open()));
-            }
-            Setting::UnifiedSidebar => {
-                // The pane layout changes underneath the modal; close it.
-                self.overlay = None;
-                let on = !self.merged();
-                self.set_unified(on);
-            }
-            Setting::DockRight => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.dock_right = !state.dock_right);
-            }
-            Setting::SidebarWidth => self.adjust_sidebar_width(true),
-            Setting::TerminalHeight => self.clear_terminal_height(),
-            Setting::AgentWidth => self.clear_agent_width(),
-            Setting::IconTheme => self.set_theme(self.theme.toggled()),
-            Setting::ColorTheme => {
-                self.sidebar_state = sidebar::update_state(|state| {
-                    state.color_theme = state.color_theme.next();
-                });
-                set_color_theme(self.sidebar_state.color_theme);
-            }
-            Setting::PreviewPlacement => {
-                self.sidebar_state = sidebar::update_state(|state| {
-                    state.preview_placement = state.preview_placement.other();
-                });
-            }
-            Setting::Hotkeys => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.show_hotkeys = !state.show_hotkeys);
-            }
-            Setting::AutoOpen => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.auto_open = !state.auto_open);
-            }
-            Setting::StrictToggle => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.strict_toggle = !state.strict_toggle);
-            }
-            Setting::FocusOnOpen => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.focus_on_open = !state.focus_on_open);
-            }
-            Setting::FollowCwd => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.follow_cwd = !state.follow_cwd);
-                self.cwd_follower.borrow_mut().reset();
-            }
-            Setting::GitDecorations => {
-                self.sidebar_state =
-                    sidebar::update_state(|state| state.git_deco = !state.git_deco);
-            }
-            Setting::GitFooter => {
-                self.sidebar_state = sidebar::update_state(|state| {
-                    state.show_git_footer = !state.show_git_footer;
-                });
-            }
-            Setting::Folder => {
-                self.overlay = None;
-                self.change_folder_dialog();
-            }
-        }
+        self.overlay = Some(Overlay::Settings(SettingsPage::open()));
     }
 
-    fn adjust_sidebar_width(&mut self, wider: bool) {
-        self.sidebar_state = sidebar::update_state(|state| {
-            state.sidebar_width = sidebar::step_sidebar_width(state.sidebar_width, wider);
-        });
-        if let Some(ctl) = &self.pane_ctl {
-            ctl.resize_preferred(
-                self.last_width,
-                self.sidebar_state.sidebar_width,
-                self.sidebar_state.dock_right,
-            );
+    /// Ask herdr for the Settings popup. False on Windows (popup panes are
+    /// linux/macos only), without a herdr pane, or when herdr refused the
+    /// request; the caller then opens the in-pane modal.
+    fn open_settings_popup(&self) -> bool {
+        if cfg!(windows) || self.pane_ctl.is_none() {
+            return false;
         }
-    }
-
-    /// `←`/`→` on the Terminal height row: step the persisted default and size
-    /// THIS tab's editor/terminal column right away. The setting is a default
-    /// (the IDE layer's remembered per-project ratio still wins when a layout is
-    /// built); applying it here just makes the row feel immediate.
-    fn adjust_terminal_height(&mut self, taller: bool) {
-        // Step from the STORED value: a failed apply leaves the tab's layout
-        // alone, so re-measuring it every press would land on the same two
-        // values forever.
-        let seed = match self.sidebar_state.terminal_height {
-            Some(rows) => rows,
-            None => self
-                .pane_ctl
-                .as_ref()
-                .and_then(|ctl| ctl.terminal_rows_now())
-                .unwrap_or(sidebar::SEED_TERMINAL_HEIGHT),
+        let ctx = CallerContext {
+            unified_available: self.other_exe.is_some(),
+            root_name: SettingsHost::root_name(self),
+            icon_theme: self.theme,
+            hints: self
+                .hints()
+                .into_iter()
+                .map(|(key, label)| (key.to_string(), label.to_string()))
+                .collect(),
         };
-        let rows = sidebar::step_terminal_height(seed, taller);
-        self.sidebar_state = sidebar::update_state(|state| state.terminal_height = Some(rows));
-        let applied = self
+        settings_popup::open(&ctx).is_ok()
+    }
+
+    /// Carry out a request the Settings popup left for this sidebar: unified
+    /// mode or the change-folder dialog. Polled from the event loop.
+    pub fn poll_settings_request(&mut self) {
+        let Some(request) = self
             .pane_ctl
             .as_ref()
-            .is_some_and(|ctl| ctl.set_terminal_rows(rows));
-        if !applied {
-            // Keep the stored value: it still applies to tabs built later.
-            self.flash = Some((
-                "Terminal height: this tab has no editor/terminal split".to_string(),
-                false,
-            ));
-        }
-    }
-
-    /// `⏎` on the Terminal height row: back to "auto", so a built layout uses
-    /// the IDE layer's own default again. The current layout is left alone.
-    fn clear_terminal_height(&mut self) {
-        self.sidebar_state = sidebar::update_state(|state| state.terminal_height = None);
-    }
-
-    /// `←`/`→` on the Agent width row: step the persisted default and size THIS
-    /// tab's Agent column right away. The setting is a default (the IDE layer's
-    /// remembered per-project ratio still wins when a layout is built); applying
-    /// it here just makes the row feel immediate.
-    fn adjust_agent_width(&mut self, wider: bool) {
-        // Step from the STORED value: a failed apply leaves the tab's layout
-        // alone, so re-measuring it every press would land on the same two
-        // values forever.
-        let seed = match self.sidebar_state.agent_width {
-            Some(cols) => cols,
-            None => self
-                .pane_ctl
-                .as_ref()
-                .and_then(|ctl| ctl.agent_cols_now())
-                .unwrap_or(sidebar::SEED_AGENT_WIDTH),
+            .and_then(|ctl| settings_popup::take_request(&ctl.pane_id))
+        else {
+            return;
         };
-        let cols = sidebar::step_agent_width(seed, wider);
-        self.sidebar_state = sidebar::update_state(|state| state.agent_width = Some(cols));
-        let applied = self
-            .pane_ctl
-            .as_ref()
-            .is_some_and(|ctl| ctl.set_agent_cols(cols));
-        if !applied {
-            // Keep the stored value: it still applies to tabs built later.
-            self.flash = Some((
-                "Agent width: this tab has no Agent column".to_string(),
-                false,
-            ));
+        match request {
+            Request::Unified(on) => {
+                if self.other_exe.is_some() {
+                    self.set_unified(on);
+                }
+            }
+            Request::ChangeFolder => self.change_folder_dialog(),
         }
     }
 
-    /// `⏎` on the Agent width row: back to "auto", so a built layout uses the
-    /// IDE layer's own default again. The current layout is left alone.
-    fn clear_agent_width(&mut self) {
-        self.sidebar_state = sidebar::update_state(|state| state.agent_width = None);
+    /// Key input while the Settings page is open. The page is taken out of the
+    /// overlay slot while it runs so it can drive this app as its host.
+    fn settings_key(&mut self, key: KeyEvent) {
+        let Some(Overlay::Settings(mut page)) = self.overlay.take() else {
+            return;
+        };
+        let outcome = page.key(key, self);
+        self.settings_outcome(page, outcome);
+    }
+
+    /// Mouse input while the Settings page is open (see [`Self::settings_key`]).
+    fn settings_mouse(&mut self, mouse: MouseEvent) {
+        let Some(Overlay::Settings(mut page)) = self.overlay.take() else {
+            return;
+        };
+        let outcome = page.mouse(mouse, self);
+        self.settings_outcome(page, outcome);
+    }
+
+    /// Put the page back unless it closed. A host action may have opened an
+    /// overlay of its own while the page ran; that one wins.
+    fn settings_outcome(&mut self, page: SettingsPage, outcome: Outcome) {
+        if outcome == Outcome::Stay && self.overlay.is_none() {
+            self.overlay = Some(Overlay::Settings(page));
+        }
+    }
+
+    /// Render the Settings page as the centered modal over the whole frame.
+    fn draw_settings(&mut self, frame: &mut Frame) {
+        let Some(Overlay::Settings(mut page)) = self.overlay.take() else {
+            return;
+        };
+        let area = frame.area();
+        page.draw(frame, area, false, self);
+        self.overlay = Some(Overlay::Settings(page));
     }
 
     /// The NATIVE folder picker on a background thread (the pane's liveness
@@ -4212,72 +3788,6 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(_) => self.picking = None,
         }
-    }
-
-    /// Render the centered Settings popup and remember its rect for clicks.
-    fn draw_settings(&mut self, frame: &mut Frame) {
-        let rows = self.settings_rows();
-        let area = frame.area();
-        let desired_width = rows
-            .iter()
-            .map(|(_, label, value, _)| label.chars().count() + value.chars().count() + 5)
-            .max()
-            .unwrap_or(30)
-            .max(30) as u16;
-        let width = desired_width.min(area.width);
-        // The hotkey reference lives here now; the footer chips are opt-in.
-        let hint_lines = wrap_hints(&self.hints(), width.saturating_sub(2), 0);
-        let Some(Overlay::Settings {
-            selected,
-            rect,
-            scroll,
-        }) = self.overlay.as_mut()
-        else {
-            return;
-        };
-        let height = (rows.len() as u16 + 5 + hint_lines.len() as u16).min(area.height);
-        let popup = Rect::new(
-            (area.width.saturating_sub(width)) / 2,
-            (area.height.saturating_sub(height)) / 3,
-            width,
-            height,
-        );
-        *rect = popup;
-        let inner_height = usize::from(height.saturating_sub(2));
-        let content_height = rows.len() + 3 + hint_lines.len();
-        *scroll = keep_visible_scroll(*selected, inner_height, content_height);
-
-        let inner_w = usize::from(width.saturating_sub(2));
-        let mut lines: Vec<Line> = Vec::new();
-        for (i, (_, label, value, enabled)) in rows.iter().enumerate() {
-            let pad = inner_w.saturating_sub(label.chars().count() + value.chars().count() + 2);
-            let text = format!(" {label}{}{value} ", " ".repeat(pad.max(1)));
-            let style = if !enabled {
-                Style::default().dim()
-            } else if i == *selected {
-                selection_style(true)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::styled(text, style));
-        }
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            " Hotkeys",
-            Style::default().bold(),
-        )));
-        lines.extend(hint_lines);
-        lines.push(Line::from(" click/⏎ · ←/→ adjust · esc".dim()));
-
-        frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new(lines).scroll((*scroll as u16, 0)).block(
-                Block::bordered()
-                    .title(" Settings ")
-                    .border_style(Style::default().dim()),
-            ),
-            popup,
-        );
     }
 
     fn activate_menu_entry(&mut self) {
@@ -5394,6 +4904,11 @@ impl App {
         self.sidebar_state = sidebar::update_state(|state| {
             state.scm_tree_view = self.tree_view;
         });
+        self.apply_tree_view();
+    }
+
+    /// Re-render the list in the mode `tree_view` names and remember it.
+    fn apply_tree_view(&mut self) {
         self.rebuild();
         self.persist_scm();
     }
@@ -6076,13 +5591,8 @@ impl App {
                     picker.draw(frame);
                 }
             }
-            Some(Overlay::AiSettings(_)) => {
-                if let Some(Overlay::AiSettings(page)) = self.overlay.as_mut() {
-                    page.draw(frame);
-                }
-            }
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
-            Some(Overlay::Settings { .. }) => self.draw_settings(frame),
+            Some(Overlay::Settings(_)) => self.draw_settings(frame),
             Some(Overlay::PaneRename { .. }) => self.draw_pane_rename(frame),
             Some(Overlay::BranchRename { .. }) => self.draw_branch_rename(frame),
             Some(Overlay::CommitReword { .. }) => self.draw_commit_reword(frame),

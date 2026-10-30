@@ -405,6 +405,9 @@ pub struct State {
     pub custom_editor_inline: bool,
     /// View mode in Source Control: true for hierarchical tree view, false for flat list view.
     pub scm_tree_view: bool,
+    /// Show dotfiles in the Explorer tree, Quick Open and content search.
+    /// Off hides them (`.git` is always hidden).
+    pub show_hidden: bool,
 }
 
 impl Default for State {
@@ -432,6 +435,7 @@ impl Default for State {
             custom_editor_on_click: false,
             custom_editor_inline: false,
             scm_tree_view: false,
+            show_hidden: true,
         }
     }
 }
@@ -483,7 +487,20 @@ pub fn save_editor_command(command: &str) -> bool {
     std::fs::write(path, command).is_ok()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's private state dir. Per thread, so parallel tests never see
+    /// each other's (or the user's real) state, and no test mutates the
+    /// process environment.
+    pub(crate) static TEST_STATE_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn state_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_STATE_DIR.with(|dir| dir.borrow().clone()) {
+        return Some(dir);
+    }
     if let Some(dir) = std::env::var_os("HERDR_PLUGIN_STATE_DIR")
         && !dir.is_empty()
     {
@@ -597,7 +614,7 @@ fn write_state(path: &Path, state: State) {
         None => String::new(),
     };
     let json = format!(
-        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"confirm_delete\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"terminal_height\":{},\"agent_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"custom_editor_inline\":{},\"scm_tree_view\":{}{icons}}}",
+        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"confirm_delete\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"terminal_height\":{},\"agent_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"custom_editor_inline\":{},\"scm_tree_view\":{},\"show_hidden\":{}{icons}}}",
         state.merged,
         state.active.state_name(),
         state.search_active,
@@ -626,7 +643,8 @@ fn write_state(path: &Path, state: State) {
         state.preview_placement.label(),
         state.custom_editor_on_click,
         state.custom_editor_inline,
-        state.scm_tree_view
+        state.scm_tree_view,
+        state.show_hidden
     );
     let _ = std::fs::write(path, json);
 }
@@ -1095,6 +1113,10 @@ pub fn parse_state(json: &str) -> State {
             .get("scm_tree_view")
             .and_then(|v| v.as_bool())
             .unwrap_or(default.scm_tree_view),
+        show_hidden: value
+            .get("show_hidden")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(default.show_hidden),
     }
 }
 
@@ -1244,8 +1266,9 @@ mod tests {
             custom_editor_on_click: true,
             custom_editor_inline: true,
             scm_tree_view: true,
+            show_hidden: false,
         };
-        let json = "{\"merged\":true,\"active\":\"source-control\",\"search_active\":true,\"hotkeys\":true,\"git_footer\":false,\"confirm_delete\":false,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"terminal_height\":22,\"agent_width\":96,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"custom_editor_on_click\":true,\"custom_editor_inline\":true,\"scm_tree_view\":true,\"icons\":\"emoji\"}";
+        let json = "{\"merged\":true,\"active\":\"source-control\",\"search_active\":true,\"hotkeys\":true,\"git_footer\":false,\"confirm_delete\":false,\"font_prompt\":true,\"auto_open\":false,\"strict_toggle\":true,\"focus_on_open\":false,\"follow_cwd\":false,\"git_deco\":false,\"dock_right\":true,\"sidebar_width\":44,\"terminal_height\":22,\"agent_width\":96,\"colors\":\"terminal\",\"preview_placement\":\"pane\",\"custom_editor_on_click\":true,\"custom_editor_inline\":true,\"scm_tree_view\":true,\"show_hidden\":false,\"icons\":\"emoji\"}";
         assert_eq!(parse_state(json), state);
         assert!(parse_state("\u{feff}{\"merged\":true}").merged);
         // Files written before the flag existed keep auto-open AND the git
@@ -1459,5 +1482,14 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(first, std::env::current_exe().unwrap().parent().unwrap());
+    }
+
+    /// A state.json written before `show_hidden` existed keeps dotfiles shown
+    /// (the Explorer's historical default), and a saved choice round-trips.
+    #[test]
+    fn show_hidden_defaults_to_shown_for_old_state_files() {
+        assert!(parse_state(r#"{"merged":true,"sidebar_width":32}"#).show_hidden);
+        assert!(!parse_state(r#"{"show_hidden":false}"#).show_hidden);
+        assert!(parse_state(r#"{"show_hidden":true}"#).show_hidden);
     }
 }

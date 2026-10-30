@@ -80,6 +80,9 @@ fn main() -> std::io::Result<()> {
         Some("--search-popup-open") => {
             return herdr_sidebar::search_popup::open();
         }
+        Some("--settings-popup") => {
+            return herdr_sidebar::settings_popup::run();
+        }
         Some("--symbol-popup") => {
             return herdr_sidebar::symbol_popup::run();
         }
@@ -232,7 +235,7 @@ fn main() -> std::io::Result<()> {
         Some(other) => {
             eprintln!("herdr-sidebar: unknown argument `{other}`");
             eprintln!(
-                "usage: herdr-sidebar [--view explorer|git|--preview [ctl]|--run-custom-editor|--git-popup[-open] switch|new|rename|merge|history|--file-popup[-open]|--search-popup[-open]|--symbol-popup[-open]|--merge-popup[-open]|--replace-popup-open|--ensure|--toggle|--toggle-git|--show-explorer|--show-search|--show-git|--quick-open|--launch-decision [git]|--focused-pane|--pane-has-token <id>|--open-plan|--focused-tab|--auto-open|--focus-on-open|--dock-right]"
+                "usage: herdr-sidebar [--view explorer|git|--preview [ctl]|--run-custom-editor|--git-popup[-open] switch|new|rename|merge|history|--file-popup[-open]|--search-popup[-open]|--settings-popup|--symbol-popup[-open]|--merge-popup[-open]|--replace-popup-open|--ensure|--toggle|--toggle-git|--show-explorer|--show-search|--show-git|--quick-open|--launch-decision [git]|--focused-pane|--pane-has-token <id>|--open-plan|--focused-tab|--auto-open|--focus-on-open|--dock-right]"
             );
             std::process::exit(2);
         }
@@ -624,6 +627,7 @@ fn run_explorer(
         app.heartbeat();
         app.flush_pending_width();
         app.poll_picker();
+        app.poll_settings_request();
         app.tick();
         app.dismiss_popups_if_unfocused();
         roots.record(&app.root_path());
@@ -686,6 +690,7 @@ fn run_scm(
         app.heartbeat();
         app.flush_pending_width();
         app.poll_picker();
+        app.poll_settings_request();
         app.dismiss_popups_if_unfocused();
         app.poll_branch();
         if last_tick.elapsed() >= interval {

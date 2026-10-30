@@ -134,6 +134,14 @@ The managed `zshrc` resolves the repository's `HEAD` file on `cd` (linked worktr
 `zle reset-prompt` redraws starship's prompt and keeps a half-typed line. The tick only reads a file
 and starts no process. Shells started before the managed rc was linked need `exec zsh` once.
 
+**The prompt starts flush with the pane's top border.** starship inserts a blank row before the
+prompt by default; in the IDE's Terminal pane — ten content rows, one border row above the first
+line — that row was a tenth of the pane (user-reported). `dotfiles/config/starship.toml` (symlinked
+to `~/.config/starship.toml`) sets `add_newline = false` and otherwise leaves starship's defaults
+alone. The setting applies to every shell, not just the IDE's Terminal, because one starship config
+per user is the only thing starship reads; a prompt already on screen keeps its blank row until the
+next one is drawn.
+
 **The sidebar updates as files change.** The Explorer tree, its git markers and the Source Control
 lists follow file-system events within about half a second, also while the sidebar is not focused
 (details in `AGENTS.md`). Filesystems that report no events (WSL `/mnt/c`, network shares) still get
