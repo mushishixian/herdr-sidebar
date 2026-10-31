@@ -525,21 +525,10 @@ pub enum TitleAction {
     ViewAsList,
 }
 
-/// How long the title-bar action buttons stay visible after the last mouse
-/// event. Terminals emit no "mouse left the pane" event, so hover can only be
-/// approximated: any mouse activity over the pane shows the buttons, and they
-/// fade after this linger (any further motion re-shows them instantly).
-pub const TITLE_ACTIONS_LINGER: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// The hover approximation described on [`TITLE_ACTIONS_LINGER`].
-pub fn title_actions_visible(last_mouse: Option<std::time::Instant>) -> bool {
-    last_mouse.is_some_and(|at| at.elapsed() < TITLE_ACTIONS_LINGER)
-}
-
 /// How long the hover tooltip outlives the last mouse event. Terminals emit no
-/// "mouse left the pane" event, so the tooltip needs SOME expiry — but it must
-/// last longer than the title-action chips' 3 s, because a path is read while
-/// the mouse sits still.
+/// "mouse left the pane" event, so the tooltip needs SOME expiry — a path is
+/// read while the mouse sits still, and a stale tooltip must not outlive the
+/// cursor forever.
 pub const HOVER_TOOLTIP_LINGER: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The hover approximation for the path tooltip (see `HOVER_TOOLTIP_LINGER`).
@@ -1572,13 +1561,12 @@ mod tests {
     }
 
     #[test]
-    fn the_tooltip_outlives_a_still_mouse_longer_than_the_title_chips() {
+    fn the_tooltip_outlives_a_still_mouse() {
         let now = std::time::Instant::now();
         assert!(hover_tooltip_visible(Some(now)));
         assert!(!hover_tooltip_visible(None));
         let stale = now - HOVER_TOOLTIP_LINGER - std::time::Duration::from_secs(1);
         assert!(!hover_tooltip_visible(Some(stale)));
-        assert!(HOVER_TOOLTIP_LINGER > TITLE_ACTIONS_LINGER);
     }
 
     #[test]
@@ -1619,15 +1607,6 @@ mod tests {
             assert!(hits(rect, rect.x, 0));
             assert_eq!(action, TitleAction::NewFolder);
         }
-    }
-
-    #[test]
-    fn title_actions_hide_without_recent_mouse() {
-        assert!(!title_actions_visible(None));
-        assert!(title_actions_visible(Some(std::time::Instant::now())));
-        let old =
-            std::time::Instant::now() - TITLE_ACTIONS_LINGER - std::time::Duration::from_secs(1);
-        assert!(!title_actions_visible(Some(old)));
     }
 
     #[test]

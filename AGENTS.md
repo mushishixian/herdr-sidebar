@@ -1177,9 +1177,11 @@ HACKING.md — budget time for that before promising a patched build.
   Search is a persistent first-class activity view, not a popup: it updates after a 300 ms typing
   debounce and exposes VS Code-style match-case, whole-word, and regex toggles. Its two fields are
   single-row filled boxes spanning the pane's full width — flush to the border, no border block,
-  with a dim `─` rule between them (user-requested 2026-10-31: smaller than the old 3-row bordered
-  boxes, wide enough to hug the edge) — and the query field sits directly under the " Search" title
-  row (a blank row between them read as too far; user-reported). `1`, `2`, and `3`
+  with a dim `─` rule under the toolbar row and between the two fields (user-requested
+  2026-10-31: smaller than the old 3-row bordered
+  boxes, wide enough to hug the edge). The view's top row carries ONLY the ⟳ / ✕ / ⋯ toolbar at
+  the right — the " Search" label is gone (user-requested; the field's placeholder still says
+  Search). `1`, `2`, and `3`
   select Explorer, Search, and Source Control — the SAME left-to-right order as the activity bar
   and VS Code (Search is `2`, Source Control is `3`). Switching INTO Search does NOT focus the
   search box (`open_content_search(false)` → `SearchFocus::Results`): the box stays unfocused so
@@ -1354,8 +1356,10 @@ HACKING.md — budget time for that before promising a patched build.
   layout mirrors VS Code's: each repo section carries its OWN inline message box (3-line
   bordered list row) and ✓ Commit button, and the repo header row shows `⎇branch*` (star =
   dirty) plus clickable ⟳ sync / ✓ commit icons in the fixed last-6 columns. The SINGLE-repo
-  header is ` {repo}` bold — the Search view's title style, NO disclosure triangle
-  (user-requested); the multi-repo section headers keep their ▾/▸ collapse arrows. List rows now
+  header carries only the title-action buttons (and the ⚙ standalone) pinned right — the repo
+  name AND the branch label are both gone (user-requested 2026-10-31); the branch picker stays
+  reachable through the Git footer and the multi-repo section headers, whose ▾/▸ collapse arrows
+  and `repo · branch` label remain. List rows now
   have VARIABLE HEIGHT — mouse hit-testing walks `Row::height()`, and j/k skip the widget
   rows (`Row::selectable()`). The ✧ suggest / S sync keys act on the ACTIVE repo — the one
   the selection is in (named in the panel header). ✧ (and `A`) first stages every change of that
@@ -1435,8 +1439,9 @@ HACKING.md — budget time for that before promising a patched build.
   remote-tracking refs, so it is only as fresh as the last fetch — a focused pane now runs one
   every `FETCH_EVERY` (see the polling bullet below), which is what makes the Sync offer appear
   without the user fetching by hand.
-- Branch labels are actions, not decoration: clicking the Source Control panel header, a
-  multi-repo header's branch label, or either view's Git footer opens the shared `BranchPicker`.
+- Branch labels are actions, not decoration: clicking a multi-repo header's branch label or
+  either view's Git footer opens the shared `BranchPicker` (the single-repo panel header no
+  longer carries a branch label — it was removed with the repo name, user-requested 2026-10-31).
   Local choices use a normal checkout; a remote choice creates its local tracking branch.
   Symbolic `<remote>/HEAD` aliases are omitted. Dirty-worktree checkout failures surface intact
   and never force, stash, discard, or otherwise mutate work to make the switch succeed.

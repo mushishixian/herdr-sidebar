@@ -37,8 +37,8 @@ use herdr_sidebar::ui::{
     draw_hover_tooltip, draw_scrollbar, gear_icon, hits, hits_activity_button,
     hits_collapse_button, hover_style, hover_tooltip_visible, icon_style as ui_icon_style,
     input_tail, palette, selected_text_style, selection_style, set_color_theme, sibling_panes_of,
-    status_color, text_input_key, title_action_icon, title_action_spans, title_actions_visible,
-    title_actions_width, truncate_to, wrap_footer_message, wrap_hints,
+    status_color, text_input_key, title_action_icon, title_action_spans, title_actions_width,
+    truncate_to, wrap_footer_message, wrap_hints,
 };
 
 use herdr_sidebar::settings_page::{Outcome, Setting, SettingsHost, SettingsPage};
@@ -311,12 +311,12 @@ pub struct App {
     /// The ⚙ button's rect from the last draw (activity bar in unified mode,
     /// header row otherwise).
     gear: Rect,
-    /// The hover title-bar buttons' click zones from the last draw (empty
-    /// while they are hidden).
+    /// The hover title-bar buttons' click zones from the last draw — always
+    /// populated (the buttons are permanent).
     title_zones: Vec<(Rect, TitleAction)>,
     /// When the mouse last moved/clicked/scrolled over this pane — the hover
-    /// approximation that shows the title-bar buttons (see
-    /// [`herdr_sidebar::ui::TITLE_ACTIONS_LINGER`]).
+    /// approximation for the path tooltip (see
+    /// [`herdr_sidebar::ui::HOVER_TOOLTIP_LINGER`]).
     last_mouse: Option<std::time::Instant>,
     /// Last known mouse position, for the button hover highlight.
     mouse_pos: Option<(u16, u16)>,
@@ -3545,7 +3545,9 @@ impl App {
         });
         let gear_w = gear.as_ref().map(Span::width).unwrap_or(0) as u16;
         self.title_zones.clear();
-        let (action_spans, actions_w) = if title_actions_visible(self.last_mouse) {
+        // The title-action buttons are ALWAYS visible (user-requested: 常驻,
+        // no auto-hide) — their click zones are always populated.
+        let (action_spans, actions_w) = {
             let actions = [
                 TitleAction::NewFile,
                 TitleAction::NewFolder,
@@ -3558,8 +3560,6 @@ impl App {
                 title_action_spans(self.theme, &actions, ax, area.y, self.mouse_pos);
             self.title_zones = zones;
             (spans, w)
-        } else {
-            (Vec::new(), 0)
         };
         // The name yields to the buttons and gear in narrow panes. The
         // folder name keeps its own case — no all-caps title (user-requested).
@@ -3977,7 +3977,8 @@ impl App {
         let toolbar_width = 9.min(area.width);
         let toolbar_x = area.x + area.width.saturating_sub(toolbar_width);
         let (refresh_icon, clear_icon, details_icon) = search_toolbar_icons(self.theme);
-        frame.render_widget(Paragraph::new(" Search").bold(), title);
+        // No " Search" label here (user-requested — the field's placeholder
+        // already says Search); the row keeps only the toolbar at the right.
         self.search_zones.refresh = Rect::new(toolbar_x, title.y, 3.min(toolbar_width), 1);
         self.search_zones.clear = Rect::new(toolbar_x.saturating_add(3), title.y, 3, 1);
         self.search_zones.details = Rect::new(toolbar_x.saturating_add(6), title.y, 3, 1);
@@ -4005,12 +4006,20 @@ impl App {
             Rect::new(toolbar_x, title.y, toolbar_width, 1),
         );
 
-        let query_y = area.y.saturating_add(1);
+        let query_y = area.y.saturating_add(2);
         // The two fields are single-row filled boxes spanning the pane's
         // full width — flush to the border, no border block (user: smaller,
-        // and wide enough to hug the edge). A dim rule separates them: a
-        // blank line reads as tall as a whole field, and touching filled
-        // boxes read as one block (both user-reported in the popup).
+        // and wide enough to hug the edge). Dim rules separate the title and
+        // the two fields: a blank line reads as tall as a whole field, and
+        // touching filled boxes read as one block (both user-reported in the
+        // popup).
+        fn draw_rule(frame: &mut Frame, area: &Rect, y: u16) {
+            frame.render_widget(
+                Paragraph::new("─".repeat(usize::from(area.width))).dim(),
+                Rect::new(area.x, y, area.width, 1),
+            );
+        }
+        draw_rule(frame, &area, area.y.saturating_add(1));
         let field_style = Style::default()
             .fg(palette().keycap_fg)
             .bg(palette().keycap_bg);
@@ -4075,10 +4084,7 @@ impl App {
         );
 
         let rule_y = query_y.saturating_add(1);
-        frame.render_widget(
-            Paragraph::new("─".repeat(usize::from(area.width))).dim(),
-            Rect::new(area.x, rule_y, area.width, 1),
-        );
+        draw_rule(frame, &area, rule_y);
         let replace_y = rule_y.saturating_add(1);
         let replace_rect = Rect::new(area.x, replace_y, area.width, 1);
         frame.render_widget(

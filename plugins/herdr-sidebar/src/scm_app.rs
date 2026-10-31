@@ -40,8 +40,8 @@ use herdr_sidebar::ui::{
     chrome_button_style, draw_activity_caps, draw_hover_tooltip, draw_scrollbar, gear_icon, hits,
     hits_activity_button, hits_collapse_button, hover_style, hover_tooltip_visible,
     icon_style as ui_icon_style, palette, selected_text_style, selection_style, set_color_theme,
-    sibling_panes_of, sparkle_icon, status_color, title_action_spans, title_actions_visible,
-    title_actions_width, truncate_to, within, wrap_footer_message, wrap_hints,
+    sibling_panes_of, sparkle_icon, status_color, title_action_spans, title_actions_width,
+    truncate_to, within, wrap_footer_message, wrap_hints,
 };
 
 /// How many log lines the history-ish drawers fetch.
@@ -5765,36 +5765,12 @@ impl App {
     }
 
     fn draw_header(&mut self, frame: &mut Frame, area: Rect) {
-        // A single repo titles the panel with its NAME, like VS Code's repo
-        // rows (the sections inside are already Changes/Staged Changes);
-        // several repos fall back to a neutral "Source Control".
-        let title = match self.active_repo() {
-            Some(repo) if self.repos.len() == 1 => repo.name.clone(),
-            _ => "Source Control".to_string(),
-        };
-        // No disclosure triangle here: the single-repo header is ` {name}`
-        // bold, matching the Search view's title style (user-requested);
-        // the multi-repo section headers keep their collapse arrows.
-        let left = Span::styled(format!(" {title}"), Style::default().bold());
-        // With several repos visible, the header names the one the commit box
-        // and sync act on; a single repo shows branch + ahead/behind arrows.
-        let right_text = match self.active_repo() {
-            Some(repo) if self.repos.len() > 1 => {
-                format!("{} · {} ", repo.name, repo.status.branch)
-            }
-            Some(repo) => {
-                let s = &repo.status;
-                let counts = if s.ahead + s.behind > 0 {
-                    format!(" {}↑ {}↓", s.ahead, s.behind)
-                } else {
-                    String::new()
-                };
-                format!("{}{} ", s.branch, counts)
-            }
-            None => String::new(),
-        };
-        // In unified mode the ⚙ lives in the activity bar; standalone puts it
-        // at the header's right edge.
+        // The header carries only the title-action buttons (and the ⚙ in
+        // standalone mode), pinned at the right — the branch label is gone
+        // along with the repo name (user-requested); the branch picker
+        // stays reachable through the Git footer and the multi-repo
+        // section headers.
+        self.zones.header_branch = Rect::default();
         let gear = if self.merged() {
             None
         } else {
@@ -5806,7 +5782,9 @@ impl App {
         let gear_w = gear.as_ref().map(Span::width).unwrap_or(0);
         // The hover title-action buttons sit just left of the gear.
         self.title_zones.clear();
-        let (action_spans, actions_w) = if title_actions_visible(self.last_mouse) {
+        // The title-action buttons are ALWAYS visible (user-requested: 常驻,
+        // no auto-hide) — their click zones are always populated.
+        let (action_spans, actions_w) = {
             let view_action = if self.tree_view {
                 TitleAction::ViewAsList
             } else {
@@ -5819,32 +5797,9 @@ impl App {
                 title_action_spans(self.theme, &actions, ax, area.y, self.mouse_pos);
             self.title_zones = zones;
             (spans, usize::from(w))
-        } else {
-            (Vec::new(), 0)
         };
-        // The branch text yields to the buttons and gear in narrow panes.
-        let avail = (area.width as usize)
-            .saturating_sub(left.width() + actions_w + gear_w)
-            .saturating_sub(1);
-        let branch_text = truncate_to(right_text, avail);
-        let branch_width = Span::raw(branch_text.as_str()).width();
-        let pad = (area.width as usize)
-            .saturating_sub(left.width() + branch_width + actions_w + gear_w)
-            .max(1);
-        let branch_x = area.x + left.width() as u16 + pad as u16;
-        self.zones.header_branch = Rect::new(branch_x, area.y, branch_width as u16, 1);
-        let branch_hovered = self
-            .mouse_pos
-            .is_some_and(|(x, y)| hits(self.zones.header_branch, x, y));
-        let branch = Span::styled(
-            branch_text,
-            if branch_hovered {
-                hover_style()
-            } else {
-                Style::default().dim()
-            },
-        );
-        let mut spans = vec![left, Span::raw(" ".repeat(pad)), branch];
+        let pad = usize::from(area.width).saturating_sub(actions_w + gear_w);
+        let mut spans = vec![Span::raw(" ".repeat(pad))];
         spans.extend(action_spans);
         if let Some(gear) = gear {
             let gx = area.x + area.width.saturating_sub(gear_w as u16);
