@@ -1285,6 +1285,14 @@ HACKING.md — budget time for that before promising a patched build.
   for 60s; forced stage/refresh actions still update tracked status but do not bypass that ignored
   backoff. These background reads must never hold `.git/index.lock`, strand a worker, or multiply
   across preview tabs. The main background `status` read also disables optional locks.
+- **"Add to .gitignore" (menu, next to Stage Changes) routes through `Git::owner_of` like
+  staging**: the pattern lands in the NEAREST enclosing repo's root `.gitignore`, so ignoring
+  inside a nested checkout edits THAT repo's file. `Git::ignore_path` appends the
+  `/`-separated repo-relative pattern (trailing `/` for dirs, leading `#`/`!` and `\` in a
+  name escaped), dedups on a trimmed exact-line match, and one `ls-files` read reports
+  whether git still TRACKS the path — the notice says `git rm --cached` is needed, because
+  ignoring a tracked path hides nothing. The repository root itself is refused (`rel_of`
+  returns `None` there).
 - With `-uall`, an **embedded git repo is reported by the parent as one untracked entry**
   (`?? vendor/lib/`, git never descends into it). So a nested repo root can carry BOTH an
   outer `U` and its own aggregate — `Decorations::letter` shows the louder of the two, or

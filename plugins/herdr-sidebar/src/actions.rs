@@ -24,6 +24,8 @@ pub enum MenuAction {
     Duplicate,
     /// `git add` the target — the Explorer's staging entry (issue #20).
     Stage,
+    /// Append the target to the owning repository's `.gitignore`.
+    AddToGitignore,
     OpenExternal,
     Reveal,
     ChangeFolder,
@@ -95,6 +97,7 @@ pub fn menu_entries_with(
         entries.extend([
             MenuEntry::Separator,
             MenuEntry::Action(MenuAction::Stage, "Stage Changes"),
+            MenuEntry::Action(MenuAction::AddToGitignore, "Add to .gitignore"),
         ]);
     }
     if target.is_some() {
@@ -1440,6 +1443,24 @@ mod tests {
             "outside a repo"
         );
         assert!(!has(&menu_entries(Some(true), false), MenuAction::Stage));
+    }
+
+    #[test]
+    fn add_to_gitignore_is_offered_wherever_staging_is() {
+        for (target, in_repo) in [
+            (Some(false), true),
+            (Some(true), true),
+            (None, true),
+            (Some(false), false),
+            (Some(true), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                has(&menu_entries(target, in_repo), MenuAction::AddToGitignore),
+                target.is_some() && in_repo,
+                "{target:?} in_repo={in_repo}"
+            );
+        }
     }
 
     #[test]

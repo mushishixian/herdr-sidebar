@@ -2859,6 +2859,10 @@ impl App {
                 let Some((path, _)) = target else { return };
                 self.stage(&path);
             }
+            MenuAction::AddToGitignore => {
+                let Some((path, is_dir)) = target else { return };
+                self.add_to_gitignore(&path, is_dir);
+            }
             MenuAction::Reveal => {
                 let (path, directory) = target.unwrap_or_else(|| (self.tree.root_path(), true));
                 actions::reveal(&path, directory);
@@ -3129,6 +3133,31 @@ impl App {
                 format!("staged {} paths under {name} in {repo}", done.count)
             }
             Err(err) => format!("stage failed: {err}"),
+        });
+        self.request_decorations(true);
+    }
+
+    /// "Add to .gitignore": append the repo-relative pattern to the owning
+    /// repository's root `.gitignore` (see [`Git::ignore_path`]), then refresh
+    /// decorations so an untracked row drops its `U` marker at once. A path
+    /// git still TRACKS is called out in the notice, because the pattern hides
+    /// nothing until it leaves the index.
+    fn add_to_gitignore(&mut self, path: &Path, is_dir: bool) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let result = Git::owner_of(path).and_then(|repo| {
+            repo.ignore_path(path, is_dir)
+                .map(|done| (done, repo.name()))
+        });
+        self.notice = Some(match result {
+            Ok((done, _)) if !done.added => format!("already ignored: {name}"),
+            Ok((done, repo)) if done.tracked => {
+                format!("ignored {name} in {repo} — still tracked; git rm --cached to untrack")
+            }
+            Ok((_, repo)) => format!("ignored {name} in {repo}"),
+            Err(err) => format!("gitignore failed: {err}"),
         });
         self.request_decorations(true);
     }

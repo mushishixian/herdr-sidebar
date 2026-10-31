@@ -93,6 +93,17 @@ pub struct Staged {
     pub skipped_nested: usize,
 }
 
+/// What one [`Git::ignore_path`] call did. `tracked` is what lets the UI
+/// explain an ignore that LOOKS like it did nothing: a path git already
+/// tracks stays in the status until it leaves the index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ignored {
+    /// The pattern was appended (false = `.gitignore` already had the line).
+    pub added: bool,
+    /// The path is tracked by git, so the new pattern hides nothing yet.
+    pub tracked: bool,
+}
+
 impl Git {
     /// Locate the repository containing `dir`; Err with git's message when there
     /// is none (or git itself is missing).
@@ -509,6 +520,38 @@ impl Git {
             run_in(&self.root, &args)?;
         }
         Ok(paths.len())
+    }
+
+    /// Append `target` to the owning repository's ROOT `.gitignore` (creating
+    /// the file when missing) and report whether git still tracks the path.
+    /// The pattern is the `/`-separated repo-relative path — anchored at the
+    /// root because it contains a slash — and a directory keeps a trailing
+    /// `/`. A line the file already carries is left alone, so repeated menu
+    /// clicks never pile up duplicates.
+    pub fn ignore_path(&self, target: &Path, is_dir: bool) -> Result<Ignored, String> {
+        let rel = self.rel_of(target)?;
+        let Some(rel) = rel else {
+            return Err("the repository root cannot be ignored".to_string());
+        };
+        let pattern = ignore_pattern(&rel, is_dir);
+        let file = self.root.join(".gitignore");
+        let existing = std::fs::read(&file).unwrap_or_default();
+        let added = !has_ignore_line(&existing, &pattern);
+        if added {
+            let mut out = existing;
+            if !out.is_empty() && !out.ends_with(b"\n") {
+                out.push(b'\n');
+            }
+            out.extend_from_slice(pattern.as_bytes());
+            out.push(b'\n');
+            std::fs::write(&file, out).map_err(|e| e.to_string())?;
+        }
+        // Read-only and lock-free, so it never collides with a concurrent
+        // index write; an unreadable answer must not fail the whole ignore.
+        let tracked = run_read_in(&self.root, &["ls-files", "-z", "--", &rel])
+            .map(|out| !out.is_empty())
+            .unwrap_or(false);
+        Ok(Ignored { added, tracked })
     }
 
     /// `target` as a `/`-separated repo-relative path; `None` when it IS the
@@ -1325,6 +1368,31 @@ pub struct Undone {
     pub subject: String,
     /// The commit is on a remote-tracking branch, so the remote still has it.
     pub pushed: bool,
+}
+
+/// The `.gitignore` line for a `/`-separated repo-relative path: a directory
+/// keeps a trailing `/`, backslashes inside a name are escaped (a Unix file
+/// can be NAMED `a\b`; separators are already `/`), and a leading `#`/`!` is
+/// backslash-escaped so gitignore does not read the line as a comment or a
+/// negation.
+fn ignore_pattern(rel: &str, is_dir: bool) -> String {
+    let mut pattern = rel.replace('\\', "\\\\");
+    if is_dir && !pattern.ends_with('/') {
+        pattern.push('/');
+    }
+    if pattern.starts_with(['#', '!']) {
+        pattern.insert(0, '\\');
+    }
+    pattern
+}
+
+/// Whether `.gitignore` bytes already carry `pattern` as a line. Both sides
+/// are trimmed, so trailing whitespace and a missing final newline cannot
+/// dodge the dedup.
+fn has_ignore_line(existing: &[u8], pattern: &str) -> bool {
+    String::from_utf8_lossy(existing)
+        .lines()
+        .any(|line| line.trim() == pattern)
 }
 
 fn run_in(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -3814,6 +3882,93 @@ mod tests {
         let outside = std::env::temp_dir().join("stage-boundary-other");
         let error = git.stage_under(&outside).unwrap_err();
         assert!(error.contains("outside repository"), "{error}");
+    }
+
+    #[test]
+    fn ignore_patterns_escape_and_mark_directories() {
+        assert_eq!(ignore_pattern("debug.log", false), "debug.log");
+        assert_eq!(ignore_pattern("build/out", true), "build/out/");
+        assert_eq!(ignore_pattern("build/out/", true), "build/out/");
+        // A leading `#`/`!` would be a comment or a negation; a Unix file can
+        // be NAMED with a backslash.
+        assert_eq!(ignore_pattern("#notes", false), "\\#notes");
+        assert_eq!(ignore_pattern("!keep", false), "\\!keep");
+        assert_eq!(ignore_pattern("a\\b", false), "a\\\\b");
+    }
+
+    #[test]
+    fn ignore_path_appends_dedups_and_reports_tracked() {
+        let git = repo_with_head("ignore-path");
+        std::fs::write(git.root.join("debug.log"), "log").unwrap();
+        std::fs::create_dir_all(git.root.join("cache")).unwrap();
+
+        let file = git.root.join("debug.log");
+        assert_eq!(
+            git.ignore_path(&file, false).unwrap(),
+            Ignored {
+                added: true,
+                tracked: false
+            }
+        );
+        let cache = git.root.join("cache");
+        assert!(
+            git.ignore_path(&cache, true).unwrap().added,
+            "a second pattern is still an append"
+        );
+        assert_eq!(
+            std::fs::read_to_string(git.root.join(".gitignore")).unwrap(),
+            "debug.log\ncache/\n"
+        );
+
+        // Repeats dedup; even a final newline missing does not dodge it.
+        std::fs::write(git.root.join(".gitignore"), "debug.log").unwrap();
+        assert_eq!(
+            git.ignore_path(&file, false).unwrap(),
+            Ignored {
+                added: false,
+                tracked: false
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(git.root.join(".gitignore")).unwrap(),
+            "debug.log"
+        );
+
+        // A path git tracks stays tracked; the UI must be able to say so.
+        std::fs::write(git.root.join("kept.txt"), "k").unwrap();
+        for args in [
+            &["add", "kept.txt"][..],
+            &[
+                "-c",
+                "user.email=t@t.dev",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "add",
+            ][..],
+        ] {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&git.root)
+                .output()
+                .unwrap();
+        }
+        assert!(
+            git.ignore_path(&git.root.join("kept.txt"), false)
+                .unwrap()
+                .tracked
+        );
+
+        // The repository root itself has no pattern.
+        assert!(git.ignore_path(&git.root, true).is_err());
+        // An outside path is refused like staging's.
+        let error = git
+            .ignore_path(&std::env::temp_dir().join("ignore-path-outside"), false)
+            .unwrap_err();
+        assert!(error.contains("outside repository"), "{error}");
+        let _ = std::fs::remove_dir_all(&git.root);
     }
 
     #[test]
