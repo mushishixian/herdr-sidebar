@@ -5479,9 +5479,8 @@ impl App {
                     .is_some_and(|repo| sync_is_primary(&repo.status)),
         );
         let git_footer = self.sidebar_state.show_git_footer && self.active_repo().is_some();
-        // A breathing row above and below the icons keeps the activity bar
-        // from crowding the pane border.
-        let activity_height = if self.merged() { 3 } else { 0 };
+        // A single icon row keeps the activity bar a thin strip.
+        let activity_height = if self.merged() { 1 } else { 0 };
         let layout = |footer_height| {
             Layout::vertical([
                 Constraint::Length(activity_height),
@@ -5689,32 +5688,35 @@ impl App {
         );
     }
 
-    /// The VS Code activity bar: view-switcher icons plus a detach button.
-    /// The area is three rows tall — icons on the middle one, one blank
-    /// spacer row each side.
+    /// The VS Code activity bar: view-switcher icons plus the ⚙ pinned at
+    /// the right. One row tall. Each chip is ` icon ` — a one-cell pad on
+    /// each side of the glyph — plus a HALF-CELL right pad drawn as a left
+    /// half block, and the chips sit DIRECTLY adjacent: no separator cells,
+    /// so the three fills form one connected group.
     fn draw_activity_bar(&mut self, frame: &mut Frame, area: Rect) {
-        // Three rows in the plain pane background; only the ACTIVE icon's
-        // highlight chip extends into the outer rows by a half block — a tall
-        // button with built-in breathing room, no strip container.
-        let outer_top = area.y;
-        let outer_bottom = area.y + 2;
-        let area = Rect::new(area.x, area.y + 1, area.width, 1);
         let (exp_icon, search_icon, git_icon) = activity_icons(self.theme);
-        // Both FA glyphs (folder, code-fork) render two cells wide in the
-        // non-Mono Nerd Font; reserve the second cell in each chip so the
-        // highlights are equal-sized with centered icons.
-        let slack = if self.theme == IconTheme::Material {
-            " "
-        } else {
-            ""
+        let row = area.y; // the band's single row
+        // Sub-cell precision for the right pad: on the ACTIVE chip a left
+        // half block extends the fill half a cell past the trailing pad.
+        // Hover does NOT render it — a transient half block read as a gray
+        // bar sweeping past (user-reported) — so hover fills stay the plain
+        // three-cell rectangle. Idle chips render a same-width plain space,
+        // so bounds never shift.
+        let half_pad = |active: bool| {
+            if active {
+                Span::styled("▌", Style::default().fg(palette().selection_bg))
+            } else {
+                Span::raw(" ")
+            }
         };
-        let mut spans = [
-            Span::raw(" "),
-            Span::raw(format!(" {exp_icon}{slack} ")),
-            Span::raw(" "),
-            Span::raw(format!(" {search_icon}{slack} ")),
-            Span::raw(" "),
-            Span::raw(format!(" {git_icon}{slack} ")),
+        let mut spans = vec![
+            Span::raw(" "),                         // border gap
+            Span::raw(format!(" {exp_icon} ")),     // explorer
+            Span::raw(" "),                         // explorer's half pad
+            Span::raw(format!(" {search_icon} ")),  // search
+            Span::raw(" "),                         // search's half pad
+            Span::raw(format!(" {git_icon} ")),     // source control
+            Span::raw(" "),                         // source control's half pad
         ];
         // Hit zones from the actual span widths (emoji vs nerd-glyph widths differ).
         let mut x = area.x;
@@ -5724,64 +5726,42 @@ impl App {
             bounds.push((x, x + w));
             x += w;
         }
-        self.zones.activity_row = area.y;
-        self.zones.explorer = bounds[1];
-        self.zones.search = bounds[3];
-        self.zones.source_control = bounds[5];
+        let explorer = (bounds[1].0, bounds[2].1);
+        let search = (bounds[3].0, bounds[4].1);
+        let source_control = (bounds[5].0, bounds[6].1);
+        self.zones.activity_row = row;
+        self.zones.explorer = explorer;
+        self.zones.search = search;
+        self.zones.source_control = source_control;
         let hovered = |bounds| {
             self.mouse_pos
-                .is_some_and(|(x, y)| hits_activity_button(bounds, area.y, x, y))
+                .is_some_and(|(x, y)| hits_activity_button(bounds, row, x, y))
         };
-        let explorer_hovered = hovered(bounds[1]);
-        let search_hovered = hovered(bounds[3]);
-        let git_hovered = hovered(bounds[5]);
+        let explorer_hovered = hovered(explorer);
+        let search_hovered = hovered(search);
+        let git_hovered = hovered(source_control);
         spans[1].style = activity_button_style(false, explorer_hovered);
+        spans[2] = half_pad(false);
         spans[3].style = activity_button_style(false, search_hovered);
+        spans[4] = half_pad(false);
         spans[5].style = activity_button_style(true, git_hovered);
-        draw_activity_caps(
-            frame,
-            bounds[5],
-            outer_top,
-            outer_bottom,
-            palette().selection_bg,
-        );
-        for (is_hovered, button_bounds) in
-            [(explorer_hovered, bounds[1]), (search_hovered, bounds[3])]
-        {
-            if is_hovered {
-                draw_activity_caps(
-                    frame,
-                    button_bounds,
-                    outer_top,
-                    outer_bottom,
-                    palette().activity_hover_bg,
-                );
-            }
-        }
+        spans[6] = half_pad(true);
         let gear_text = format!(" {} ", gear_icon(self.theme));
         let gear_w = Span::raw(gear_text.as_str()).width() as u16;
         let gear_x = area.x + area.width.saturating_sub(gear_w);
-        self.zones.gear = Rect::new(gear_x, outer_top, gear_w, 3);
+        self.zones.gear = Rect::new(gear_x, area.y, gear_w, 1);
         let gear_hovered = self
             .mouse_pos
             .is_some_and(|(x, y)| hits(self.zones.gear, x, y));
         let gear = Span::styled(gear_text, activity_button_style(false, gear_hovered));
-        if gear_hovered {
-            draw_activity_caps(
-                frame,
-                (gear_x, gear_x + gear_w),
-                outer_top,
-                outer_bottom,
-                palette().activity_hover_bg,
-            );
-        }
 
         let pad = usize::from(area.width)
             .saturating_sub(spans.iter().map(Span::width).sum::<usize>() + usize::from(gear_w));
-        let mut line = spans.to_vec();
+        let mut line = spans;
         line.push(Span::raw(" ".repeat(pad)));
         line.push(gear);
-        frame.render_widget(Paragraph::new(Line::from(line)), area);
+        let bar = Rect::new(area.x, row, area.width, 1);
+        frame.render_widget(Paragraph::new(Line::from(line)), bar);
     }
 
     fn draw_header(&mut self, frame: &mut Frame, area: Rect) {
@@ -7145,7 +7125,7 @@ fn tree_dir_item(
 
 fn no_repo_layout(area: Rect, merged: bool) -> [Rect; 2] {
     Layout::vertical([
-        Constraint::Length(if merged { 3 } else { 0 }),
+        Constraint::Length(if merged { 1 } else { 0 }),
         Constraint::Min(0),
     ])
     .areas(area)
@@ -7738,8 +7718,8 @@ mod tests {
     fn unified_no_repo_layout_keeps_the_activity_bar_visible() {
         let area = Rect::new(4, 7, 40, 20);
         let [activity, body] = no_repo_layout(area, true);
-        assert_eq!(activity, Rect::new(4, 7, 40, 3));
-        assert_eq!(body, Rect::new(4, 10, 40, 17));
+        assert_eq!(activity, Rect::new(4, 7, 40, 1));
+        assert_eq!(body, Rect::new(4, 8, 40, 19));
 
         let [activity, body] = no_repo_layout(area, false);
         assert_eq!(activity.height, 0);

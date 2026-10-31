@@ -34,7 +34,7 @@ use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::tree::{Row, Tree};
 use herdr_sidebar::ui::{
     SelectAll, TextKey, TitleAction, activity_button_style, activity_icons, chrome_button_style,
-    draw_activity_caps, draw_hover_tooltip, draw_scrollbar, gear_icon, hits, hits_activity_button,
+    draw_hover_tooltip, draw_scrollbar, gear_icon, hits, hits_activity_button,
     hits_collapse_button, hover_style, hover_tooltip_visible, icon_style as ui_icon_style,
     input_tail, palette, selected_text_style, selection_style, set_color_theme, sibling_panes_of,
     status_color, text_input_key, title_action_icon, title_action_spans, title_actions_visible,
@@ -3315,9 +3315,8 @@ impl App {
         } else {
             self.footer_height(frame.area().width)
         };
-        // A breathing row above and below the icons keeps the activity bar
-        // from crowding the pane border.
-        let activity_height = if self.merged() { 3 } else { 0 };
+        // A single icon row keeps the activity bar a thin strip.
+        let activity_height = if self.merged() { 1 } else { 0 };
         let [activity, header, body, footer] = Layout::vertical([
             Constraint::Length(activity_height),
             Constraint::Length(1),
@@ -3650,32 +3649,36 @@ impl App {
         Some((notice.clone(), palette().modified))
     }
 
-    /// The VS Code activity bar: view-switcher icons plus a detach button.
-    /// The area is three rows tall; the outer rows stay in the pane
-    /// background, and only the ACTIVE icon's highlight chip extends into
-    /// them by a half block — a tall button with built-in breathing room,
-    /// no strip container.
+    /// The VS Code activity bar: view-switcher icons plus the ⚙ pinned at
+    /// the right. One row tall. Each chip is ` icon ` — a one-cell pad on
+    /// each side of the glyph — plus a HALF-CELL right pad drawn as a left
+    /// half block, and the chips sit DIRECTLY adjacent: no separator cells,
+    /// so the three fills form one connected group.
     fn draw_activity_bar(&mut self, frame: &mut Frame, area: Rect) {
-        let outer_top = area.y;
-        let outer_bottom = area.y + 2;
-        let area = Rect::new(area.x, area.y + 1, area.width, 1);
         let (exp_icon, search_icon, git_icon) = activity_icons(self.theme);
         let search_active = matches!(self.overlay, Some(Overlay::ContentSearch { .. }));
-        // Both FA glyphs (folder, code-fork) render two cells wide in the
-        // non-Mono Nerd Font; reserve the second cell in each chip so the
-        // highlights are equal-sized with centered icons.
-        let slack = if self.theme == IconTheme::Material {
-            " "
-        } else {
-            ""
+        let row = area.y; // the band's single row
+        // Sub-cell precision for the right pad: on the ACTIVE chip a left
+        // half block extends the fill half a cell past the trailing pad.
+        // Hover does NOT render it — a transient half block read as a gray
+        // bar sweeping past (user-reported) — so hover fills stay the plain
+        // three-cell rectangle. Idle chips render a same-width plain space,
+        // so bounds never shift.
+        let half_pad = |active: bool| {
+            if active {
+                Span::styled("▌", Style::default().fg(palette().selection_bg))
+            } else {
+                Span::raw(" ")
+            }
         };
-        let mut spans = [
-            Span::raw(" "),
-            Span::raw(format!(" {exp_icon}{slack} ")),
-            Span::raw(" "),
-            Span::raw(format!(" {search_icon}{slack} ")),
-            Span::raw(" "),
-            Span::raw(format!(" {git_icon}{slack} ")),
+        let mut spans = vec![
+            Span::raw(" "),                         // border gap
+            Span::raw(format!(" {exp_icon} ")),     // explorer
+            Span::raw(" "),                         // explorer's half pad
+            Span::raw(format!(" {search_icon} ")),  // search
+            Span::raw(" "),                         // search's half pad
+            Span::raw(format!(" {git_icon} ")),     // source control
+            Span::raw(" "),                         // source control's half pad
         ];
         // Hit zones from the actual span widths (emoji vs nerd-glyph widths differ).
         let mut x = area.x;
@@ -3685,67 +3688,43 @@ impl App {
             bounds.push((x, x + w));
             x += w;
         }
+        let explorer = (bounds[1].0, bounds[2].1);
+        let search = (bounds[3].0, bounds[4].1);
+        let source_control = (bounds[5].0, bounds[6].1);
         self.activity = ActivityZones {
-            row: area.y,
-            explorer: bounds[1],
-            search: bounds[3],
-            source_control: bounds[5],
+            row,
+            explorer,
+            search,
+            source_control,
         };
         let hovered = |bounds| {
             self.mouse_pos
-                .is_some_and(|(x, y)| hits_activity_button(bounds, area.y, x, y))
+                .is_some_and(|(x, y)| hits_activity_button(bounds, row, x, y))
         };
-        let explorer_hovered = hovered(bounds[1]);
-        let search_hovered = hovered(bounds[3]);
-        let git_hovered = hovered(bounds[5]);
-        spans[1].style = activity_button_style(!search_active, explorer_hovered);
+        let explorer_hovered = hovered(explorer);
+        let search_hovered = hovered(search);
+        let git_hovered = hovered(source_control);
+        let explorer_active = !search_active;
+        spans[1].style = activity_button_style(explorer_active, explorer_hovered);
+        spans[2] = half_pad(explorer_active);
         spans[3].style = activity_button_style(search_active, search_hovered);
+        spans[4] = half_pad(search_active);
         spans[5].style = activity_button_style(false, git_hovered);
-        let (chip_start, chip_end) = if search_active { bounds[3] } else { bounds[1] };
-        draw_activity_caps(
-            frame,
-            (chip_start, chip_end),
-            outer_top,
-            outer_bottom,
-            palette().selection_bg,
-        );
-        for (active, is_hovered, button_bounds) in [
-            (!search_active, explorer_hovered, bounds[1]),
-            (search_active, search_hovered, bounds[3]),
-            (false, git_hovered, bounds[5]),
-        ] {
-            if !active && is_hovered {
-                draw_activity_caps(
-                    frame,
-                    button_bounds,
-                    outer_top,
-                    outer_bottom,
-                    palette().activity_hover_bg,
-                );
-            }
-        }
+        spans[6] = half_pad(false);
         let gear_text = format!(" {} ", gear_icon(self.theme));
         let gear_w = Span::raw(gear_text.as_str()).width() as u16;
         let gear_x = area.x + area.width.saturating_sub(gear_w);
-        self.gear = Rect::new(gear_x, outer_top, gear_w, 3);
+        self.gear = Rect::new(gear_x, area.y, gear_w, 1);
         let gear_hovered = self.mouse_pos.is_some_and(|(x, y)| hits(self.gear, x, y));
         let gear = Span::styled(gear_text, activity_button_style(false, gear_hovered));
-        if gear_hovered {
-            draw_activity_caps(
-                frame,
-                (gear_x, gear_x + gear_w),
-                outer_top,
-                outer_bottom,
-                palette().activity_hover_bg,
-            );
-        }
 
         let pad = usize::from(area.width)
             .saturating_sub(spans.iter().map(Span::width).sum::<usize>() + usize::from(gear_w));
-        let mut line = spans.to_vec();
+        let mut line = spans;
         line.push(Span::raw(" ".repeat(pad)));
         line.push(gear);
-        frame.render_widget(Paragraph::new(Line::from(line)), area);
+        let bar = Rect::new(area.x, row, area.width, 1);
+        frame.render_widget(Paragraph::new(Line::from(line)), bar);
     }
 
     /// Render the context-menu popup near its anchor, clamped inside the pane,

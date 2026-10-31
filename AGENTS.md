@@ -1253,9 +1253,24 @@ HACKING.md — budget time for that before promising a patched build.
   center (user-reported live); the non-Mono build just overflows into the trailing space
   like the tree's file icons do.
 - Inactive activity-bar icons and the standalone gear use a faded shade of the active selection;
-  do not reuse the smaller/subtler title-action keycap treatment. Hover extends through the same
-  three-row half-block geometry as selection, so its target never looks shorter than the selected
-  button. The active view's selection chip always wins over hover.
+  do not reuse the smaller/subtler title-action keycap treatment. The band is ONE row tall
+  (user-requested 2026-10-31: the old 3-row half-block pill was shrunk to one row, briefly
+  re-expanded to three with centered icons, and settled back on one — the user's final call), and
+  the three chips sit DIRECTLY adjacent — no
+  separator cells — so their fills form one connected group (user: "阴影部分三个应该挨着"; the
+  earlier "fills overlap" complaint was about SEPARATOR cells painted with a chip's fill, which is
+  why the separators died rather than the adjacency). Each chip is ` icon ` —
+  a one-cell pad each side of the glyph — plus a HALF-CELL right pad drawn as a left half block (▌)
+  in the chip's fill color: one full pad read as too narrow and two as too wide, so the right pad is
+  1.5 cells (both user-reported). The half block renders on the ACTIVE chip only — a transient half
+  block on HOVER read as a gray bar sweeping past (user-reported), so hover fills stay the plain
+  three-cell rectangle. Idle chips render a same-width plain space in the half-pad slot so hit zones
+  never shift. The ⚙ stays PINNED to the pane's far edge (moving it next to the icons was
+  user-rejected the same day).
+  Hover and selection are the same one-row chip fill, so hover never looks smaller than the
+  selected button, and the active view's selection chip always wins over hover;
+  `hits_activity_button` matches the bar's row ONLY (a middle±1 range on a one-row band would
+  swallow clicks meant for the header row below).
   Hit zones come from each rendered glyph's actual width, so emoji and Nerd Font themes stay aligned.
 
 ### Explorer git decorations & staging (`src/gitdeco.rs`, issues #19/#20)

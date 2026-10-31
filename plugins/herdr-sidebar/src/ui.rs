@@ -477,9 +477,9 @@ pub fn hits_collapse_button(column: u16, row: u16, pane_width: u16, pane_height:
     row == pane_height.saturating_sub(1) && column >= pane_width.saturating_sub(4)
 }
 
-/// Theme-matched activity-bar icons: (explorer, search, source control). FA
-/// glyphs render two cells wide in the non-Mono Nerd Font — chips reserve
-/// the second cell (see the activity-bar renderer).
+/// Theme-matched activity-bar icons: (explorer, search, source control).
+/// Chips render them as ` icon ` — the trailing space is the chip's right
+/// pad (see the activity-bar renderer).
 pub fn activity_icons(theme: IconTheme) -> (&'static str, &'static str, &'static str) {
     match theme {
         IconTheme::Material => ("\u{f07b}", "\u{f002}", "\u{f126}"),
@@ -614,9 +614,11 @@ pub fn within(x: u16, (start, end): (u16, u16)) -> bool {
     (start..end).contains(&x)
 }
 
-pub fn hits_activity_button((start, end): (u16, u16), middle_row: u16, x: u16, y: u16) -> bool {
-    within(x, (start, end))
-        && (middle_row.saturating_sub(1)..=middle_row.saturating_add(1)).contains(&y)
+/// The activity bar is a single row of chips; a click must land on that row,
+/// inside the chip's column span — a middle±1 range on a one-row band would
+/// swallow clicks meant for the header row below.
+pub fn hits_activity_button((start, end): (u16, u16), row: u16, x: u16, y: u16) -> bool {
+    within(x, (start, end)) && y == row
 }
 
 pub fn hits(rect: Rect, x: u16, y: u16) -> bool {
@@ -1360,12 +1362,11 @@ mod tests {
     }
 
     #[test]
-    fn activity_button_hitbox_matches_all_three_highlight_rows() {
-        for row in 4..=6 {
-            assert!(hits_activity_button((10, 14), 5, 12, row));
-        }
+    fn activity_button_hitbox_is_its_single_row() {
+        assert!(hits_activity_button((10, 14), 5, 12, 5));
         assert!(!hits_activity_button((10, 14), 5, 9, 5));
-        assert!(!hits_activity_button((10, 14), 5, 12, 7));
+        assert!(!hits_activity_button((10, 14), 5, 12, 4));
+        assert!(!hits_activity_button((10, 14), 5, 12, 6));
     }
 
     #[test]
