@@ -1173,7 +1173,11 @@ HACKING.md — budget time for that before promising a patched build.
   force the preview even with an editor configured, which made search results open somewhere
   else than a click on the same file.
   Search is a persistent first-class activity view, not a popup: it updates after a 300 ms typing
-  debounce and exposes VS Code-style match-case, whole-word, and regex toggles. `1`, `2`, and `3`
+  debounce and exposes VS Code-style match-case, whole-word, and regex toggles. Its two fields are
+  single-row filled boxes spanning the pane's full width — flush to the border, no border block,
+  with a dim `─` rule between them (user-requested 2026-10-31: smaller than the old 3-row bordered
+  boxes, wide enough to hug the edge) — and the query field sits directly under the " Search" title
+  row (a blank row between them read as too far; user-reported). `1`, `2`, and `3`
   select Explorer, Search, and Source Control — the SAME left-to-right order as the activity bar
   and VS Code (Search is `2`, Source Control is `3`). Switching INTO Search does NOT focus the
   search box (`open_content_search(false)` → `SearchFocus::Results`): the box stays unfocused so
@@ -1255,7 +1259,8 @@ HACKING.md — budget time for that before promising a patched build.
 - Inactive activity-bar icons and the standalone gear use a faded shade of the active selection;
   do not reuse the smaller/subtler title-action keycap treatment. The band is ONE row tall
   (user-requested 2026-10-31: the old 3-row half-block pill was shrunk to one row, briefly
-  re-expanded to three with centered icons, and settled back on one — the user's final call), and
+  re-expanded to three with centered icons, got a trailing empty row for icon-to-text spacing,
+  and finally settled on the plain one-row strip — too tall), and
   the three chips sit DIRECTLY adjacent — no
   separator cells — so their fills form one connected group (user: "阴影部分三个应该挨着"; the
   earlier "fills overlap" complaint was about SEPARATOR cells painted with a chip's fill, which is

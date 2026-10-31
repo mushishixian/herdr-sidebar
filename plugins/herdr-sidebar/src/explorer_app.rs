@@ -4004,42 +4004,40 @@ impl App {
             Rect::new(toolbar_x, title.y, toolbar_width, 1),
         );
 
-        let query_y = area.y.saturating_add(2);
-        let query_box = Rect::new(
-            area.x.saturating_add(2),
-            query_y,
-            area.width.saturating_sub(3),
-            3,
+        let query_y = area.y.saturating_add(1);
+        // The two fields are single-row filled boxes spanning the pane's
+        // full width — flush to the border, no border block (user: smaller,
+        // and wide enough to hug the edge). A dim rule separates them: a
+        // blank line reads as tall as a whole field, and touching filled
+        // boxes read as one block (both user-reported in the popup).
+        let field_style = Style::default()
+            .fg(palette().keycap_fg)
+            .bg(palette().keycap_bg);
+        let query_rect = Rect::new(area.x, query_y, area.width, 1);
+        let option_width = query_rect.width.min(9);
+        frame.render_widget(
+            Paragraph::new(" ".repeat(usize::from(query_rect.width))).style(field_style),
+            query_rect,
         );
-        let option_width = query_box.width.min(9);
-        let option_x = query_box.x
-            + query_box
-                .width
-                .saturating_sub(option_width.saturating_add(1));
-        let query_border = if focus == SearchFocus::Query {
-            Style::default().fg(palette().accent_focus)
-        } else {
-            Style::default().dim()
-        };
-        frame.render_widget(Block::bordered().border_style(query_border), query_box);
-        let query_inner = Rect::new(
-            query_box.x.saturating_add(1),
-            query_box.y.saturating_add(1),
-            query_box
+        let query_text = Rect::new(
+            area.x.saturating_add(1),
+            query_y,
+            query_rect
                 .width
                 .saturating_sub(option_width.saturating_add(2)),
             1,
         );
-        self.search_zones.query = query_inner;
+        self.search_zones.query = query_rect;
         frame.render_widget(
             Paragraph::new(search_input_line(
                 &query,
                 "Search",
                 focus == SearchFocus::Query,
                 selected_field && focus == SearchFocus::Query,
-                query_inner.width,
-            )),
-            query_inner,
+                query_text.width,
+            ))
+            .style(field_style),
+            query_text,
         );
 
         let option_style = |active: bool| {
@@ -4049,7 +4047,12 @@ impl App {
                 Style::default().dim()
             }
         };
-        let options_area = Rect::new(option_x, query_box.y.saturating_add(1), option_width, 1);
+        let options_area = Rect::new(
+            area.x.saturating_add(area.width.saturating_sub(option_width)),
+            query_y,
+            option_width,
+            1,
+        );
         let option_spans = [
             Span::styled("Aa ", option_style(options.match_case)),
             Span::styled("ab ", option_style(options.whole_word)),
@@ -4070,40 +4073,36 @@ impl App {
             options_area,
         );
 
-        let replace_y = query_box.y.saturating_add(query_box.height);
-        let replace_box = Rect::new(
-            area.x.saturating_add(2),
-            replace_y,
-            area.width.saturating_sub(3),
-            3,
+        let rule_y = query_y.saturating_add(1);
+        frame.render_widget(
+            Paragraph::new("─".repeat(usize::from(area.width))).dim(),
+            Rect::new(area.x, rule_y, area.width, 1),
         );
-        let replace_border = if focus == SearchFocus::Replace {
-            Style::default().fg(palette().accent_focus)
-        } else {
-            Style::default().dim()
-        };
-        frame.render_widget(Block::bordered().border_style(replace_border), replace_box);
-        let replace_inner = Rect::new(
-            replace_box.x.saturating_add(1),
-            replace_box.y.saturating_add(1),
-            replace_box.width.saturating_sub(2),
+        let replace_y = rule_y.saturating_add(1);
+        let replace_rect = Rect::new(area.x, replace_y, area.width, 1);
+        frame.render_widget(
+            Paragraph::new(" ".repeat(usize::from(replace_rect.width))).style(field_style),
+            replace_rect,
+        );
+        let replace_text = Rect::new(
+            area.x.saturating_add(1),
+            replace_y,
+            replace_rect.width.saturating_sub(2),
             1,
         );
-        self.search_zones.replace = replace_inner;
+        self.search_zones.replace = replace_rect;
         frame.render_widget(
             Paragraph::new(search_input_line(
                 &replace,
                 "Replace",
                 focus == SearchFocus::Replace,
                 selected_field && focus == SearchFocus::Replace,
-                replace_inner.width,
-            )),
-            replace_inner,
+                replace_text.width,
+            ))
+            .style(field_style),
+            replace_text,
         );
-        let mut results_y = replace_box
-            .y
-            .saturating_add(replace_box.height)
-            .saturating_add(1);
+        let mut results_y = replace_y.saturating_add(2);
 
         if details_expanded {
             let include_label = Rect::new(
