@@ -5772,7 +5772,10 @@ impl App {
             Some(repo) if self.repos.len() == 1 => repo.name.clone(),
             _ => "Source Control".to_string(),
         };
-        let left = Span::styled(format!(" ▾ {title}"), Style::default().bold());
+        // No disclosure triangle here: the single-repo header is ` {name}`
+        // bold, matching the Search view's title style (user-requested);
+        // the multi-repo section headers keep their collapse arrows.
+        let left = Span::styled(format!(" {title}"), Style::default().bold());
         // With several repos visible, the header names the one the commit box
         // and sync act on; a single repo shows branch + ahead/behind arrows.
         let right_text = match self.active_repo() {

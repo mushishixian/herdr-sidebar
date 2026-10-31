@@ -1126,6 +1126,8 @@ HACKING.md — budget time for that before promising a patched build.
   shows it for every tree row (files and folders); SCM only for `Staged`/`Unstaged` file rows —
   headers, message/commit widgets and the commit/branch drawers have no path to name.
 
+- The tree's title row renders the ROOT FOLDER NAME as-is (bold, header-accent) — NOT
+  uppercased; the all-caps treatment was removed on request (2026-10-31).
 - A single left-click anywhere on an Explorer folder row expands/collapses it; the chevron is
   not the only mouse target. Suppress the second click on the folder name inside the 450ms
   double-click window so the first toggle is not immediately undone, while repeated explicit
@@ -1258,9 +1260,9 @@ HACKING.md — budget time for that before promising a patched build.
   like the tree's file icons do.
 - Inactive activity-bar icons and the standalone gear use a faded shade of the active selection;
   do not reuse the smaller/subtler title-action keycap treatment. The band is ONE row tall
-  (user-requested 2026-10-31: the old 3-row half-block pill was shrunk to one row, briefly
-  re-expanded to three with centered icons, got a trailing empty row for icon-to-text spacing,
-  and finally settled on the plain one-row strip — too tall), and
+  (user-requested 2026-10-31, after trying a 3-row half-block pill, a 1-row strip, a 3-row
+  centered band, and a 2-row band with a trailing empty row — every nonzero gap read as too tall,
+  and a terminal can't render half a text row), and
   the three chips sit DIRECTLY adjacent — no
   separator cells — so their fills form one connected group (user: "阴影部分三个应该挨着"; the
   earlier "fills overlap" complaint was about SEPARATOR cells painted with a chip's fill, which is
@@ -1351,7 +1353,9 @@ HACKING.md — budget time for that before promising a patched build.
   frame. With >1 repo the
   layout mirrors VS Code's: each repo section carries its OWN inline message box (3-line
   bordered list row) and ✓ Commit button, and the repo header row shows `⎇branch*` (star =
-  dirty) plus clickable ⟳ sync / ✓ commit icons in the fixed last-6 columns. List rows now
+  dirty) plus clickable ⟳ sync / ✓ commit icons in the fixed last-6 columns. The SINGLE-repo
+  header is ` {repo}` bold — the Search view's title style, NO disclosure triangle
+  (user-requested); the multi-repo section headers keep their ▾/▸ collapse arrows. List rows now
   have VARIABLE HEIGHT — mouse hit-testing walks `Row::height()`, and j/k skip the widget
   rows (`Row::selectable()`). The ✧ suggest / S sync keys act on the ACTIVE repo — the one
   the selection is in (named in the panel header). ✧ (and `A`) first stages every change of that

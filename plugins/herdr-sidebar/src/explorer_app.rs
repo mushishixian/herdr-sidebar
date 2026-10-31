@@ -3561,9 +3561,10 @@ impl App {
         } else {
             (Vec::new(), 0)
         };
-        // The name yields to the buttons and gear in narrow panes.
+        // The name yields to the buttons and gear in narrow panes. The
+        // folder name keeps its own case — no all-caps title (user-requested).
         let avail = usize::from(area.width.saturating_sub(gear_w + actions_w));
-        let root_label = truncate_to(format!(" {}", self.tree.root_name().to_uppercase()), avail);
+        let root_label = truncate_to(format!(" {}", self.tree.root_name()), avail);
         let name = Span::styled(
             root_label,
             Style::default().bold().fg(palette().header_accent),
