@@ -92,6 +92,94 @@ pub fn request_popup_pane_with_env(
     .and_then(|reply| reply_error(&reply).map_or(Ok(()), |error| Err(io::Error::other(error))))
 }
 
+/// How often a `ui_busy` answer is retried, and for how long, when a popup
+/// hands off to another popup (see [`retry_while_busy`]).
+pub const BUSY_STEP: Duration = Duration::from_millis(100);
+pub const BUSY_LIMIT: Duration = Duration::from_secs(3);
+
+/// Herdr allows one popup per session. A caller that just closed its own
+/// popup can race the new one, so `ui_busy` is retried every `step` until
+/// `limit` has been waited out; then the last error is returned.
+pub fn retry_while_busy(
+    mut attempt: impl FnMut() -> io::Result<()>,
+    step: Duration,
+    limit: Duration,
+) -> io::Result<()> {
+    let mut waited = Duration::ZERO;
+    loop {
+        match attempt() {
+            Err(err) if err.to_string().contains("ui_busy") && waited < limit => {
+                std::thread::sleep(step);
+                waited += step;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Start `current_exe() <flag>` in its own process group, without waiting for
+/// it, as a popup hand-off: the caller is about to exit or close its popup,
+/// and the child retries until herdr has room for its own popup. `env` is set
+/// on the child. `caller` becomes its `HERDR_PANE_ID` (the pane `plugin.pane.open`
+/// anchors the popup to); with no caller the variable is removed, because our
+/// own `HERDR_PANE_ID` is the popup that is about to disappear.
+#[cfg(unix)]
+pub fn spawn_detached(
+    flag: &str,
+    env: &[(String, String)],
+    caller: Option<&str>,
+) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg(flag)
+        .envs(env_refs(env))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    match caller {
+        Some(pane) => {
+            command.env("HERDR_PANE_ID", pane);
+        }
+        None => {
+            command.env_remove("HERDR_PANE_ID");
+        }
+    }
+    command.spawn().map(|_child| ())
+}
+
+/// Popup hand-offs are unix only: popup panes are linux/macos only.
+#[cfg(not(unix))]
+pub fn spawn_detached(
+    _flag: &str,
+    _env: &[(String, String)],
+    _caller: Option<&str>,
+) -> io::Result<()> {
+    Err(io::Error::other("popup hand-off is unix only"))
+}
+
+/// Borrowed view of an owned env list, as [`request_popup_pane_with_env`] takes it.
+pub fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
+    env.iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect()
+}
+
+/// The `(name, value)` pairs of `keys` that `read` finds non-empty, in the
+/// order of `keys`. Pure: production passes the process environment, tests a
+/// map.
+pub fn env_from(read: impl Fn(&str) -> Option<String>, keys: &[&str]) -> Vec<(String, String)> {
+    keys.iter()
+        .filter_map(|key| {
+            read(key)
+                .filter(|value| !value.is_empty())
+                .map(|value| ((*key).to_string(), value))
+        })
+        .collect()
+}
+
 /// herdr answers a refused request with `{"error":{"code","message"}}` on an
 /// otherwise successful round trip, so the transport alone reports success.
 /// `code: message` for such a reply, `None` otherwise. The merge editor's

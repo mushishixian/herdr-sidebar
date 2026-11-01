@@ -109,6 +109,17 @@ placement = "popup"
 command = ["./target/release/herdr-sidebar", "--settings-popup"]
 platforms = ["linux", "macos"]
 
+# Keyboard shortcuts: its own popup, larger than Settings (a popup cannot be
+# resized, and the Settings rows must stay narrow). Reached from the Settings
+# popup's "Keyboard shortcuts…" row (a hand-off) or the keyboard-shortcuts
+# action below.
+[[panes]]
+id = "shortcuts"
+title = "Keyboard shortcuts"
+placement = "popup"
+command = ["./target/release/herdr-sidebar", "--shortcuts-popup"]
+platforms = ["linux", "macos"]
+
 # Content search (Ctrl+Alt+F): a session-modal popup with a live preview.
 [[panes]]
 id = "search-popup"
@@ -168,6 +179,13 @@ platforms = ["windows"]
 title = "Go to symbol (popup)"
 description = "Popup: fuzzy-search a project-wide symbol list (heuristic, no LSP) and open the definition."
 command = [".\\target\\release\\herdr-sidebar-ensure.exe", "--symbol-popup-open"]
+
+[[actions]]
+id = "keyboard-shortcuts"
+platforms = ["linux", "macos"]
+title = "Keyboard shortcuts"
+description = "Popup: view and rebind the sidebar's keyboard shortcuts (keymap.json)."
+command = ["./target/release/herdr-sidebar", "--shortcuts-popup-open"]
 
 [[actions]]
 id = "merge-editor"

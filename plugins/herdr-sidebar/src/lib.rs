@@ -41,6 +41,7 @@ pub mod settings_file;
 pub mod settings_page;
 pub mod settings_popup;
 pub mod shortcuts_page;
+pub mod shortcuts_popup;
 pub mod shortcut_tip;
 pub mod snooze;
 pub mod state;

@@ -26,7 +26,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthChar;
 
-use crate::file_popup::{open_file_in_workspace, request_popup_pane_with_env};
+use crate::file_popup::{
+    BUSY_LIMIT, BUSY_STEP, open_file_in_workspace, request_popup_pane_with_env, retry_while_busy,
+};
 use crate::git::{ConflictKind, Git};
 use crate::merge_conflict::{self, LineKind, MergeDoc, Resolution, SaveError, Side, ViewLine};
 use crate::syntax;
@@ -39,8 +41,6 @@ pub const MERGE_ROOT_ENV: &str = "HERDR_SIDEBAR_MERGE_ROOT";
 /// The `[[panes]]` id stage 3 adds for this popup.
 pub const ENTRYPOINT: &str = "merge-editor";
 
-const BUSY_STEP: Duration = Duration::from_millis(100);
-const BUSY_LIMIT: Duration = Duration::from_secs(3);
 const IDLE_POLL: Duration = Duration::from_millis(250);
 const DISK_POLL: Duration = Duration::from_secs(1);
 /// Below this width the Incoming/Current panes are hidden and only Result shows.
@@ -93,26 +93,6 @@ pub fn open_file(file: &Path) -> io::Result<()> {
         BUSY_STEP,
         BUSY_LIMIT,
     )
-}
-
-/// Herdr allows one popup per session. A caller that just closed its own
-/// popup can race the new one, so `ui_busy` is retried every `step` until
-/// `limit` has been waited out; then the last error is returned.
-fn retry_while_busy(
-    mut attempt: impl FnMut() -> io::Result<()>,
-    step: Duration,
-    limit: Duration,
-) -> io::Result<()> {
-    let mut waited = Duration::ZERO;
-    loop {
-        match attempt() {
-            Err(err) if err.to_string().contains("ui_busy") && waited < limit => {
-                std::thread::sleep(step);
-                waited += step;
-            }
-            other => return other,
-        }
-    }
 }
 
 // ── Popup TUI process side ──────────────────────────────────────────────

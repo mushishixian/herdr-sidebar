@@ -40,6 +40,19 @@ pub const ENV_ROOT: &str = "HERDR_SIDEBAR_SETTINGS_ROOT";
 pub const ENV_ICONS: &str = "HERDR_SIDEBAR_SETTINGS_ICONS";
 /// JSON array of `[key, label]` pairs: the hotkey chips the sidebar shows.
 pub const ENV_HINTS: &str = "HERDR_SIDEBAR_SETTINGS_HINTS";
+/// The Settings row a reopened popup starts on (see [`SELECT_KEYBOARD_SHORTCUTS`]).
+/// Set only by the `--settings-popup-open` hand-off, never by the sidebar.
+pub const ENV_SELECT: &str = "HERDR_SIDEBAR_SETTINGS_SELECT";
+/// The value of [`ENV_SELECT`] that starts the page on the Keyboard shortcuts row.
+pub const SELECT_KEYBOARD_SHORTCUTS: &str = "keyboard-shortcuts";
+/// The env values a child popup forwards so that Settings can be reopened with
+/// the same caller context.
+pub const CONTEXT_KEYS: [&str; 4] = [ENV_UNIFIED_OK, ENV_ROOT, ENV_ICONS, ENV_HINTS];
+/// The flag that reopens this popup from a hand-off child (see [`reopen`]).
+pub const REOPEN_FLAG: &str = "--settings-popup-open";
+/// Settings popup size, as a share of the terminal.
+const POPUP_WIDTH: &str = "44%";
+const POPUP_HEIGHT: &str = "80%";
 
 /// Idle redraw interval. Keys and mouse events wake the loop at once.
 const POLL: Duration = Duration::from_millis(250);
@@ -66,14 +79,56 @@ pub fn open(ctx: &CallerContext) -> io::Result<()> {
     let hints = serde_json::to_string(&ctx.hints).unwrap_or_else(|_| "[]".to_string());
     crate::file_popup::request_popup_pane_with_env(
         ENTRYPOINT,
-        "44%",
-        "80%",
+        POPUP_WIDTH,
+        POPUP_HEIGHT,
         &[
             (ENV_UNIFIED_OK, unified),
             (ENV_ROOT, ctx.root_name.as_str()),
             (ENV_ICONS, icons),
             (ENV_HINTS, hints.as_str()),
         ],
+    )
+}
+
+/// The Settings row named by [`ENV_SELECT`], if it names one.
+pub fn setting_named(name: &str) -> Option<Setting> {
+    (name == SELECT_KEYBOARD_SHORTCUTS).then_some(Setting::KeyboardShortcuts)
+}
+
+/// The context env of a Settings popup, read through `read`: the
+/// [`CONTEXT_KEYS`] that are set. Pure, so the forwarding is unit-tested.
+pub fn context_env(read: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    crate::file_popup::env_from(read, &CONTEXT_KEYS)
+}
+
+/// The env of the `--settings-popup-open` child that reopens Settings on
+/// `select`: the forwarded `context` plus the row to start on. Pure.
+pub fn reopen_env(context: Vec<(String, String)>, select: &str) -> Vec<(String, String)> {
+    let mut env = context;
+    env.push((ENV_SELECT.to_string(), select.to_string()));
+    env
+}
+
+/// `--settings-popup-open`: reopen the Settings popup from a child that a
+/// popup handed off to. The context env this process was started with (the
+/// popup that spawned it forwarded it) is passed on, and so is the row to
+/// select. Retries `ui_busy` while the previous popup is still closing.
+pub fn reopen() -> io::Result<()> {
+    let read = |key: &str| std::env::var(key).ok();
+    let mut env = context_env(read);
+    env.extend(crate::file_popup::env_from(read, &[ENV_SELECT]));
+    let refs = crate::file_popup::env_refs(&env);
+    crate::file_popup::retry_while_busy(
+        || {
+            crate::file_popup::request_popup_pane_with_env(
+                ENTRYPOINT,
+                POPUP_WIDTH,
+                POPUP_HEIGHT,
+                &refs,
+            )
+        },
+        crate::file_popup::BUSY_STEP,
+        crate::file_popup::BUSY_LIMIT,
     )
 }
 
@@ -183,6 +238,9 @@ fn parse_hints(json: &str) -> Vec<(String, String)> {
 /// The popup's host. Everything the page changes that lives in a sidebar goes
 /// out as a request to the caller pane.
 struct PopupHost {
+    /// The caller context this popup was started with, forwarded to any
+    /// popup it hands off to (and back here, see [`reopen`]).
+    context: Vec<(String, String)>,
     unified_ok: bool,
     root: String,
     fallback_icons: IconTheme,
@@ -212,6 +270,7 @@ impl PopupHost {
             })
             .collect();
         Self {
+            context: context_env(env),
             unified_ok: env(ENV_UNIFIED_OK).is_some_and(|v| v == "1"),
             root: env(ENV_ROOT).unwrap_or_default(),
             fallback_icons: env(ENV_ICONS)
@@ -285,6 +344,24 @@ impl SettingsHost for PopupHost {
     fn hints(&self) -> Vec<(&'static str, &'static str)> {
         self.hints.clone()
     }
+
+    /// The shortcuts page is its own popup. Spawning its hand-off child does
+    /// not need herdr's popup slot yet (the child retries `ui_busy` until this
+    /// popup is gone). A failed spawn keeps the in-pane page open here.
+    fn open_shortcuts(&mut self) -> bool {
+        let env = crate::shortcuts_popup::from_settings_env(self.context.clone());
+        match crate::file_popup::spawn_detached(
+            crate::shortcuts_popup::OPEN_FLAG,
+            &env,
+            self.caller.as_deref(),
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                self.notice = Some((format!("keyboard shortcuts: {error}"), true));
+                false
+            }
+        }
+    }
 }
 
 fn is_ctrl_c(key: KeyEvent) -> bool {
@@ -319,7 +396,14 @@ pub fn run() -> io::Result<()> {
     crate::keymap::ensure_files();
     ui::set_color_theme(state::load_state().color_theme);
     let mut host = PopupHost::from_env();
-    let mut page = SettingsPage::open();
+    let select = std::env::var(ENV_SELECT)
+        .ok()
+        .as_deref()
+        .and_then(setting_named);
+    let mut page = match select {
+        Some(setting) => SettingsPage::open_at(setting, &host),
+        None => SettingsPage::open(),
+    };
 
     crossterm::style::force_color_output(true);
     let mut terminal = ratatui::init();
@@ -408,6 +492,41 @@ mod tests {
         assert_eq!(parse_request("explode\n1000\n", now), None);
         assert_eq!(parse_request("folder\nnot-a-number\n", now), None);
         assert_eq!(parse_request("folder\n", now), None);
+    }
+
+    #[test]
+    fn context_env_forwards_only_the_context_values() {
+        let env = context_env(|key| match key {
+            ENV_UNIFIED_OK => Some("1".into()),
+            ENV_ROOT => Some(String::new()),
+            ENV_HINTS => Some("[]".into()),
+            "HERDR_PANE_ID" => Some("w1-p1".into()),
+            _ => None,
+        });
+        assert_eq!(
+            env,
+            vec![
+                (ENV_UNIFIED_OK.to_string(), "1".to_string()),
+                (ENV_HINTS.to_string(), "[]".to_string()),
+            ],
+            "unset, empty and unrelated variables are not forwarded"
+        );
+    }
+
+    #[test]
+    fn reopen_env_names_the_row_to_start_on() {
+        let context = vec![(ENV_ICONS.to_string(), "emoji".to_string())];
+        let env = reopen_env(context.clone(), SELECT_KEYBOARD_SHORTCUTS);
+        assert_eq!(&env[..1], context.as_slice());
+        assert_eq!(
+            env.last(),
+            Some(&(ENV_SELECT.to_string(), "keyboard-shortcuts".to_string()))
+        );
+        assert_eq!(
+            setting_named(SELECT_KEYBOARD_SHORTCUTS),
+            Some(Setting::KeyboardShortcuts)
+        );
+        assert_eq!(setting_named("no-such-row"), None);
     }
 
     #[test]

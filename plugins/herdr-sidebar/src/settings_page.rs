@@ -100,6 +100,12 @@ pub trait SettingsHost {
     fn notice(&mut self, text: String, error: bool);
     /// Hotkey chips shown under the rows.
     fn hints(&self) -> Vec<(&'static str, &'static str)>;
+    /// Open the Keyboard shortcuts page outside this page, in a host popup of
+    /// its own. `true` means it was handed off: the page closes. `false` (the
+    /// default, and the in-pane fallback) keeps the page's own sub-page.
+    fn open_shortcuts(&mut self) -> bool {
+        false
+    }
 }
 
 /// What the owner should do with the page after a key or mouse event.
@@ -438,6 +444,20 @@ impl SettingsPage {
         }
     }
 
+    /// A page that starts on `setting`'s row, for a reopened popup.
+    pub fn open_at(setting: Setting, host: &dyn SettingsHost) -> Self {
+        let mut page = Self::open();
+        page.select_setting(setting, host);
+        page
+    }
+
+    /// Move the selection onto `setting`'s row, when the page has one.
+    fn select_setting(&mut self, setting: Setting, host: &dyn SettingsHost) {
+        if let Some(index) = self.rows(host).iter().position(|row| row.0 == setting) {
+            self.selected = index;
+        }
+    }
+
     /// Draw the page inside `area`. `fill = false` draws the centered box
     /// (the in-pane modal); `fill = true` uses all of `area`.
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, fill: bool, host: &dyn SettingsHost) {
@@ -743,7 +763,12 @@ impl SettingsPage {
                 write(host, setting, |s| s.confirm_delete = !s.confirm_delete)
             }
             Setting::AiCommit => self.sub = Sub::Ai(AiSettingsPage::open()),
-            Setting::KeyboardShortcuts => self.sub = Sub::Shortcuts(ShortcutsPage::open()),
+            Setting::KeyboardShortcuts => {
+                if host.open_shortcuts() {
+                    return Outcome::Close;
+                }
+                self.sub = Sub::Shortcuts(ShortcutsPage::open());
+            }
         }
         Outcome::Stay
     }
@@ -863,6 +888,8 @@ mod tests {
         pane: Option<String>,
         calls: RefCell<Vec<String>>,
         notices: Vec<(String, bool)>,
+        /// What `open_shortcuts` answers: `true` hands the page to a popup.
+        shortcuts_outside: bool,
     }
 
     impl FakeHost {
@@ -872,6 +899,7 @@ mod tests {
                 pane: None,
                 calls: RefCell::new(Vec::new()),
                 notices: Vec::new(),
+                shortcuts_outside: false,
             }
         }
 
@@ -910,6 +938,10 @@ mod tests {
         }
         fn hints(&self) -> Vec<(&'static str, &'static str)> {
             Vec::new()
+        }
+        fn open_shortcuts(&mut self) -> bool {
+            self.calls.borrow_mut().push("shortcuts".into());
+            self.shortcuts_outside
         }
     }
 
@@ -1098,7 +1130,46 @@ mod tests {
         assert!(!page.captures_keys());
         assert_eq!(page.key(key(KeyCode::Esc), &mut host), Outcome::Stay);
         assert!(matches!(page.sub, Sub::Rows));
-        assert_eq!(page.selected, index_of(&page, &host, Setting::KeyboardShortcuts));
+        assert_eq!(
+            page.selected,
+            index_of(&page, &host, Setting::KeyboardShortcuts)
+        );
+    }
+
+    #[test]
+    fn keyboard_shortcuts_handed_to_a_popup_closes_the_page() {
+        isolated_state();
+        let mut host = FakeHost::new();
+        host.shortcuts_outside = true;
+        let mut page = SettingsPage::new();
+        select(&mut page, &mut host, Setting::KeyboardShortcuts);
+        assert_eq!(page.key(key(KeyCode::Enter), &mut host), Outcome::Close);
+        assert!(host.called("shortcuts"));
+        assert!(matches!(page.sub, Sub::Rows), "no in-pane sub-page");
+    }
+
+    #[test]
+    fn keyboard_shortcuts_stays_in_pane_when_the_host_declines() {
+        isolated_state();
+        let mut host = FakeHost::new();
+        let mut page = SettingsPage::new();
+        select(&mut page, &mut host, Setting::KeyboardShortcuts);
+        assert_eq!(page.key(key(KeyCode::Enter), &mut host), Outcome::Stay);
+        assert!(host.called("shortcuts"));
+        assert!(matches!(page.sub, Sub::Shortcuts(_)));
+    }
+
+    #[test]
+    fn a_reopened_page_selects_the_named_row() {
+        isolated_state();
+        let host = FakeHost::new();
+        let mut page = SettingsPage::new();
+        page.select_setting(Setting::KeyboardShortcuts, &host);
+        assert_eq!(
+            page.selected,
+            index_of(&page, &host, Setting::KeyboardShortcuts)
+        );
+        assert!(matches!(page.sub, Sub::Rows));
     }
 
     #[test]

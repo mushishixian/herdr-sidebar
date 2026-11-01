@@ -1168,6 +1168,28 @@ HACKING.md — budget time for that before promising a patched build.
     footer hotkey hints still show the default keys. The wide layout gives every row one key column
     (the widest effective key, capped at 16 cells, longer ones elided) so the command id starts at
     the same x on every row.
+  - **The shortcuts page is its own popup, 86%×88%** (`src/shortcuts_popup.rs`, `[[panes]] id =
+    "shortcuts"`, `ENTRYPOINT`, `--shortcuts-popup`; the `keyboard-shortcuts` action runs
+    `--shortcuts-popup-open`, Linux/macOS only). Why: herdr cannot resize an open popup
+    (`popup.close` is its only popup call; `plugin.pane.open` takes width/height once), and the
+    Settings popup must stay 44%×80% (its rows put label and value apart), so the page could not
+    get more room from inside it. The page itself (`ShortcutsPage`) is unchanged; the popup hosts
+    it full-screen and maps its `Back` to a return to Settings and its `Close` to exit.
+    **Two-way hand-off**, because herdr allows one popup per session: Settings' `Keyboard
+    shortcuts…` row (`SettingsHost::open_shortcuts`, true in the popup host only) spawns a detached
+    `--shortcuts-popup-open` child (`file_popup::spawn_detached`, unix process group, not waited on)
+    and the Settings popup exits. The child forwards the Settings context env
+    (`settings_popup::CONTEXT_KEYS` plus `HERDR_SIDEBAR_SHORTCUTS_RETURN=1`) and retries `ui_busy` for
+    3 s (`file_popup::retry_while_busy`, shared with the merge editor hand-off) until the old popup
+    is gone. Esc in the shortcuts popup (the page's own Esc layering: a filter, a capture or a
+    confirm take it first) spawns a detached `--settings-popup-open` child with the same context
+    plus `HERDR_SIDEBAR_SETTINGS_SELECT=keyboard-shortcuts`, which reopens Settings on that row
+    (`SettingsPage::open_at`). Opened straight from the action there is no return marker, so Esc
+    just closes. `q` closes in both cases. Both children exit 1 at once without a herdr socket and
+    leave nothing behind. A failed spawn keeps the page open: the Settings popup shows the error in
+    its footer and falls back to the in-pane sub-page; Windows, a missing pane or a refused request
+    use that sub-page too. A child that gets `ui_busy` for more than 3 s, or any other refusal,
+    fails silently, because its stdio is null: the previous popup is already gone.
   - **Tests** run with `state::TEST_STATE_DIR` and a fake `Herdr`, never the real binary. The real
     herdr check ran once against a COPY of the repo config (`e2e_check_copy`, ignored: `HS_KEYMAP_E2E_CONFIG`
     and `HS_KEYMAP_E2E_JSON`, with a no-op reload): a clean `ctrl+alt+o` entry was written as the block,
@@ -1189,6 +1211,11 @@ HACKING.md — budget time for that before promising a patched build.
     (`HERDR_SIDEBAR_SETTINGS_{UNIFIED_OK,ROOT,ICONS,HINTS}`, hints as JSON pairs). The caller is
     `HERDR_CALLER_PANE_ID` = the sidebar pane, so Terminal height / Agent width apply to the caller's
     tab (`src/pane_layout.rs`, the one copy of those split helpers).
+  - The `Keyboard shortcuts…` row in the Settings POPUP hands off to the shortcuts popup (see
+    *The shortcuts page is its own popup* above) and closes the Settings popup. Settings opened from
+    a sidebar with no popup (in-pane box, Explorer or SCM host) keeps the in-pane sub-page, because
+    their `open_shortcuts` answers `false`. `HERDR_SIDEBAR_SETTINGS_SELECT` (read once in `run`) starts
+    the popup on a named row; `--settings-popup-open` is the child that reopens it.
   - The two rows that need the sidebar process (Unified sidebar, Change folder…) go back as a
     request file `<rundir>/settings/pane-<pane>.req` (`unified on|off` / `folder` + unix stamp,
     tmp+rename, claimed by rename, 30 s freshness — the `ai_commit` request pattern).
