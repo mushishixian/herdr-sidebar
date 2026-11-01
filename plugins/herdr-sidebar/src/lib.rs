@@ -33,6 +33,7 @@ pub mod pane_layout;
 pub mod pane_menu;
 pub mod pi_state;
 pub mod rundir;
+pub mod reroot;
 pub mod search_popup;
 pub mod session_reporter;
 pub mod settings_page;

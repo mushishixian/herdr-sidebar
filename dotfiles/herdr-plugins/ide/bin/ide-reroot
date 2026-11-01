@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# ide-reroot DIR WORKSPACE TAB — point a whole herdr space at DIR's project.
+#
+# Called by the herdr-sidebar plugin after "Change Folder" crosses a project
+# root: its y/N confirm already asked the user (agents restart, conversations
+# are lost), so this script is the destructive part. Every pane the IDE layer
+# owns anywhere in WORKSPACE — Fresh editor, Terminal, Agent, plus a Terminal
+# parked in its own background tab — is closed, across ALL of the space's
+# tabs; tabs left empty close with them. Unlabeled shells are never touched
+# (a dev server cannot be told apart from an abandoned prompt), and the
+# sidebar's own panes are matched by nothing here at all: the close list is a
+# WHITELIST of IDE labels/tokens, so sidebars, previews and editors survive
+# by construction. The sidebar's tab is then rebuilt via herdr-ide, whose
+# panes all launch with --cwd DIR's project root — which is what moves
+# herdr's rail identity (space name, branch, git status) to the new project,
+# because a workspace's identity cwd is its first tab's root pane's live cwd.
+#
+# herdr-ide builds from a non-sidebar anchor pane; a tab holding only the
+# sidebar has none, so when that happens a fresh shell at the new root is
+# split beside the sidebar first — herdr-ide's shell path makes it the
+# Terminal, and the editor/agent split off it all inherit the new root.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+. "$here/lib.sh"
+
+in_herdr || die "ide-reroot must run inside herdr"
+[ $# -eq 3 ] || die "usage: ide-reroot DIR WORKSPACE TAB"
+root=$(project_root "$1")
+[ -d "$root" ] || die "not a folder: $1"
+ws=$2
+tab=$3
+
+# One reroot at a time: two confirmations landing together would race the
+# pane snapshots and double-close.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/ide-reroot-${EUID}.lock"
+flock 9
+
+# Close EVERY pane of this space except the sidebar plugin's own: the old
+# project's editor/terminal/agent panes, parked terminals, AND the
+# workspace's unlabeled shells — an unlabeled shell that survives would
+# become herdr-ide's anchor and KEEP ITS OLD CWD as the Terminal, and as the
+# tab's root pane it would also pin herdr's rail identity (name, branch) to
+# the old project. Spared: the sidebar panes (identity tokens
+# herdr-sidebar*), preview panes (hs-preview-path/control) and custom-editor
+# panes (hs-editor-path) — a preview may hold an unsaved editor buffer, and
+# closing the sidebar pane would kill this script's own parent. NOTE:
+# hs-preview-host is NOT on the spare list — it marks the FRESH pane (the
+# preview host inside the editor), which is exactly what gets rebuilt here.
+# The keys[]? | select(test()) shape matters: test() alone would collect one
+# boolean PER TOKEN KEY, making the length nonzero for every pane with
+# tokens (bit live — only the tokenless shell got closed).
+to_close=$("$HERDR" pane list | jq -r --arg ws "$ws" '
+  .result.panes[]
+  | select(.workspace_id == $ws)
+  | select(
+      ((.label // "") as $l
+        | ($l != "Sidebar")
+        and ($l | test("^(Preview|Editor · )|( · preview| · editor)$") | not))
+      and ([.tokens // {} | keys[]?
+              | select(test("^(herdr-sidebar|hs-preview-path|hs-preview-control|hs-editor-path)"))]
+            | length == 0)
+    )
+  | .pane_id')
+
+closed=0
+for pane in $to_close; do
+  "$HERDR" pane close "$pane" >/dev/null 2>&1 || true
+  closed=$((closed + 1))
+done
+# pane.close kills processes; the snapshot every later step reads must be
+# taken AFTER the closes (a stale one still lists the dead panes).
+printf 'closed %s pane(s): %s\n' "$closed" "$(echo "$to_close" | tr '\n' ' ')" >&2
+
+"$HERDR" tab focus "$tab" >/dev/null 2>&1 || true
+
+# herdr-ide anchors on a non-sidebar pane of the tab. After the closes above
+# the tab often holds only the sidebar, so give it a shell to build from —
+# at the NEW root, so the Terminal it becomes starts there too. The ratio is
+# a placeholder; herdr-ide's restore_sizes re-applies the remembered split
+# sizes after building.
+eligible=$("$HERDR" pane list | jq --arg tab "$tab" '
+  [.result.panes[]
+   | select(.tab_id == $tab)
+   | select((.label // "") as $l | ($l != "Sidebar")
+       and ($l | test("^(Preview|Editor · )|( · preview| · editor)$") | not))]
+  | length')
+if [ "$eligible" -eq 0 ]; then
+  anchor=$("$HERDR" pane list | jq -r --arg tab "$tab" '
+    first(.result.panes[] | select(.tab_id == $tab) | .pane_id) // empty')
+  [ -n "$anchor" ] || die "reroot tab has no panes left"
+  "$HERDR" pane split "$anchor" --direction right --ratio 0.25 --cwd "$root" \
+    --no-focus >/dev/null
+fi
+
+exec "$here/herdr-ide" "$root"

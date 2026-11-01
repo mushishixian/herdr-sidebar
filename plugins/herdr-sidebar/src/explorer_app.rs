@@ -30,6 +30,7 @@ use herdr_sidebar::gitdeco::{Decorations, RepoStatus};
 use herdr_sidebar::icons::{IconTheme, icon};
 use herdr_sidebar::ipc;
 use herdr_sidebar::pane_menu::{self, PaneAction};
+use herdr_sidebar::reroot;
 use herdr_sidebar::state::{self as sidebar, View};
 use herdr_sidebar::tree::{Row, Tree};
 use herdr_sidebar::ui::{
@@ -211,6 +212,12 @@ enum Overlay {
         path: PathBuf,
         is_dir: bool,
     },
+    /// Change Folder crossed a project root: offer to rebuild the whole space
+    /// in the new one (every pane of the space restarts there; agent
+    /// conversations are lost). `y` hands the rebuild to the dotfiles-ide
+    /// plugin (`reroot::spawn_refresh`), any other answer keeps the change
+    /// sidebar-only.
+    ConfirmReroot { root: PathBuf },
     /// The ⚙ settings modal (shared with Source Control, see `settings_page`).
     Settings(SettingsPage),
     QuickOpen {
@@ -1314,6 +1321,7 @@ impl App {
                     | Overlay::BranchPicker(_)
                     | Overlay::Settings(_)
                     | Overlay::ConfirmDelete { .. }
+                    | Overlay::ConfirmReroot { .. }
             )
         )
     }
@@ -1744,6 +1752,7 @@ impl App {
             StartContentSearch,
             OpenContent(PathBuf, usize),
             DeleteConfirmed(PathBuf, bool),
+            RerootConfirmed(PathBuf),
             Picker(PickerAction),
         }
         let cmd = match self.overlay.as_mut() {
@@ -1976,6 +1985,10 @@ impl App {
                 }
                 _ => Cmd::Close,
             },
+            Some(Overlay::ConfirmReroot { root }) => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Cmd::RerootConfirmed(root.clone()),
+                _ => Cmd::Close,
+            },
             None => Cmd::Nothing,
         };
         match cmd {
@@ -2003,6 +2016,10 @@ impl App {
                 self.overlay = None;
                 self.delete_path(path, is_dir);
             }
+            Cmd::RerootConfirmed(root) => {
+                self.overlay = None;
+                self.start_space_refresh(&root);
+            }
             Cmd::Picker(action) => self.handle_picker_action(action),
         }
     }
@@ -2011,10 +2028,13 @@ impl App {
         if matches!(self.overlay, Some(Overlay::Settings(_))) {
             return self.settings_mouse(mouse);
         }
-        // A left-click on the delete confirm's buttons is the same key as the
-        // keyboard: Yes is `y`, No is Esc (any other key cancels too). Clicks
-        // anywhere else do nothing.
-        if matches!(self.overlay, Some(Overlay::ConfirmDelete { .. })) {
+        // A left-click on a y/N confirm's buttons (delete, space reroot) is
+        // the same key as the keyboard: Yes is `y`, No is Esc (any other key
+        // cancels too). Clicks anywhere else do nothing.
+        if matches!(
+            self.overlay,
+            Some(Overlay::ConfirmDelete { .. }) | Some(Overlay::ConfirmReroot { .. })
+        ) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 let (yes, no) = self.confirm_buttons.unwrap_or_default();
                 if hits(yes, mouse.column, mouse.row) {
@@ -2928,24 +2948,23 @@ impl App {
     /// `c` / the context menu: the NATIVE folder picker, on a background
     /// thread so the pane's liveness heartbeat keeps beating while the
     /// dialog is open (a frozen TUI would read as a corpse after 20s).
-    #[cfg(any(windows, target_os = "macos"))]
+    /// Windows/macOS have a native picker; unix desktops get zenity/kdialog/
+    /// yad starting at the user's home. Anything else keeps the typed prompt.
     fn change_folder_dialog(&mut self) {
+        if !actions::folder_picker_available() {
+            self.change_folder_prompt();
+            return;
+        }
         if self.picking.is_some() {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let start = self.tree.root_path();
+        let start = actions::picker_start_dir(&self.tree.root_path());
         std::thread::spawn(move || {
             let _ = tx.send(actions::pick_folder(&start));
         });
         self.picking = Some(rx);
         self.notice = Some("folder picker open… (check your other windows)".into());
-    }
-
-    /// No native dialogs here — fall back to the typed prompt.
-    #[cfg(not(any(windows, target_os = "macos")))]
-    fn change_folder_dialog(&mut self) {
-        self.change_folder_prompt();
     }
 
     /// Collect a finished folder pick, if any (called from the poll loop).
@@ -3008,16 +3027,41 @@ impl App {
             return;
         }
         let root = std::env::current_dir().unwrap_or(target);
+        // Captured BEFORE the rebuild: crossing a project root offers to
+        // rebuild the whole space there (see `Overlay::ConfirmReroot`).
+        let old_root = self.tree.root_path();
         if manual && self.sidebar_state.follow_cwd {
             self.cwd_follower.borrow_mut().mark_manual_folder();
         }
         let cwd_follower = std::rc::Rc::clone(&self.cwd_follower);
-        *self = App::new(root, cwd_follower);
+        *self = App::new(root.clone(), cwd_follower);
         // Only confirm an explicit folder change; an automatic cwd-follow
         // re-root must not pop an unprompted "folder: …" notice.
         if manual {
             self.notice = Some(format!("folder: {}", self.tree.root_name()));
+            // AFTER the App rebuild: `*self = App::new(...)` wiped the overlay
+            // slot, so the confirm is installed on the fresh App.
+            if reroot::should_refresh_space(&old_root, &root) {
+                self.overlay = Some(Overlay::ConfirmReroot { root });
+            }
         }
+    }
+
+    /// Yes on the reroot confirm: hand the rebuild to the dotfiles-ide plugin
+    /// on a worker (the script closes the space's panes and re-splits —
+    /// several herdr round trips), so the event loop and the liveness
+    /// heartbeat never block on it.
+    fn start_space_refresh(&mut self, root: &Path) {
+        let name = root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let root = root.to_path_buf();
+        std::thread::spawn(move || {
+            reroot::spawn_refresh(&root);
+        });
+        self.notice = Some(format!("rebuilding space in {name}…"));
     }
 
     fn confirm_prompt(&mut self) {
@@ -3526,6 +3570,7 @@ impl App {
             Some(Overlay::Menu { .. }) => self.draw_menu(frame),
             Some(Overlay::Prompt { .. }) => self.draw_prompt(frame),
             Some(Overlay::ConfirmDelete { .. }) => self.draw_confirm(frame),
+            Some(Overlay::ConfirmReroot { .. }) => self.draw_confirm(frame),
             Some(Overlay::Settings(_)) => self.draw_settings(frame),
             Some(Overlay::QuickOpen { .. }) => self.draw_quick_open(frame),
             _ => {}
@@ -3800,27 +3845,36 @@ impl App {
         herdr_sidebar::ui::draw_input_dialog(frame, title, input, select_all.armed());
     }
 
-    /// Render the delete confirm as a bordered dialog over the body. The title
-    /// names what is deleted; `y` or a click on Yes confirms, and any other key
+    /// Render a y/N confirm (delete, or the space reroot offer) as a bordered
+    /// dialog over the body. `y` or a click on Yes confirms, and any other key
     /// or a click on No cancels.
     fn draw_confirm(&mut self, frame: &mut Frame) {
         self.confirm_buttons = None;
-        let Some(Overlay::ConfirmDelete { path, is_dir }) = self.overlay.as_ref() else {
-            return;
-        };
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let title = if *is_dir {
-            "Delete folder"
-        } else {
-            "Delete file"
+        let (title, message) = match self.overlay.as_ref() {
+            Some(Overlay::ConfirmDelete { path, is_dir }) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (
+                    if *is_dir { "Delete folder" } else { "Delete file" }.to_string(),
+                    format!("Delete '{name}' permanently?"),
+                )
+            }
+            Some(Overlay::ConfirmReroot { root }) => (
+                "Refresh space".to_string(),
+                format!(
+                    "Rebuild this space in '{}'? All of its panes restart there — \
+                     agent conversations are lost.",
+                    root.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                ),
+            ),
+            _ => return,
         };
         self.confirm_buttons = Some(herdr_sidebar::ui::draw_confirm_dialog(
             frame,
-            title,
-            &format!("Delete '{name}' permanently?"),
+            &title,
+            &message,
             self.mouse_pos,
         ));
     }

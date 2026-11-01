@@ -1162,11 +1162,13 @@ fn applescript_escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Parse a completed osascript picker invocation. Keeping this separate from
-/// process launch makes cancel/error and path normalization testable on every
-/// platform, including CI hosts that do not provide osascript.
-#[cfg(any(test, target_os = "macos"))]
-fn parse_osascript_folder(success: bool, stdout: &[u8]) -> Option<PathBuf> {
+/// Parse a completed picker invocation. osascript, zenity, kdialog and yad
+/// all print the chosen directory with a trailing slash on stdout. Keeping
+/// this separate from process launch makes cancel/error and path
+/// normalization testable on every platform, including CI hosts that provide
+/// none of the pickers.
+#[cfg(any(test, unix))]
+fn parse_picker_folder(success: bool, stdout: &[u8]) -> Option<PathBuf> {
     if !success {
         return None;
     }
@@ -1209,7 +1211,7 @@ pub fn pick_folder(start: &Path) -> Option<PathBuf> {
             ))
             .output()
             .ok()?;
-        parse_osascript_folder(output.status.success(), &output.stdout)
+        parse_picker_folder(output.status.success(), &output.stdout)
     }
     #[cfg(windows)]
     {
@@ -1218,6 +1220,120 @@ pub fn pick_folder(start: &Path) -> Option<PathBuf> {
             .set_directory(start)
             .pick_folder()
     }
+}
+
+/// Whether this machine can open a native picker at all. `change_folder_dialog`
+/// gates on this so a platform without one falls back to its typed prompt
+/// instead of spawning a worker that silently answers None.
+#[cfg(any(windows, target_os = "macos"))]
+pub fn folder_picker_available() -> bool {
+    true
+}
+
+/// The picker's initial directory: the user's home on the unix desktop
+/// pickers (a directory known to exist), the current root on Windows and
+/// macOS.
+pub fn picker_start_dir(current: &Path) -> PathBuf {
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| current.to_path_buf())
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        current.to_path_buf()
+    }
+}
+
+/// Desktop folder pickers commonly installed on unix, in probe order:
+/// zenity (GNOME and friends), kdialog (KDE), yad (zenity's fork).
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+const UNIX_PICKERS: [&str; 3] = ["zenity", "kdialog", "yad"];
+
+/// Whether `name` sits on `path_var` as an executable file. Symlinks are
+/// followed: /usr/bin/zenity often is one.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn executable_on_path(path_var: &std::ffi::OsStr, name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path_var).any(|dir| {
+        std::fs::metadata(dir.join(name))
+            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unix_picker_tool() -> Option<&'static str> {
+    let path = std::env::var_os("PATH")?;
+    UNIX_PICKERS
+        .into_iter()
+        .find(|tool| executable_on_path(&path, tool))
+}
+
+/// A picker only helps when it can open a window: SSH and other headless
+/// sessions keep the typed prompt.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn has_display_server() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn folder_picker_available() -> bool {
+    unix_picker_tool().is_some() && has_display_server()
+}
+
+/// The unix desktops have no dialog toolkit we can link cheaply from a
+/// terminal TUI, so the picker is whatever helper is on PATH. It inherits
+/// our env, so it opens on the same display server as the terminal.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn pick_folder(start: &Path) -> Option<PathBuf> {
+    let tool = unix_picker_tool()?;
+    let output = unix_pick_command(tool, start).output().ok()?;
+    parse_picker_folder(output.status.success(), &output.stdout)
+}
+
+/// zenity, kdialog and yad disagree on how the dialog type, title and start
+/// directory are spelled.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn unix_pick_command(tool: &str, start: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(tool);
+    match tool {
+        // KDE takes the start directory positionally.
+        "kdialog" => {
+            cmd.arg("--getexistingdirectory")
+                .arg(start)
+                .arg("--title")
+                .arg("Open Folder");
+        }
+        // yad renamed the file dialog to --file.
+        "yad" => {
+            cmd.arg("--file")
+                .arg("--directory")
+                .arg(picker_filename_arg(start));
+        }
+        _ => {
+            cmd.arg("--file-selection")
+                .arg("--directory")
+                .arg("--title")
+                .arg("Open Folder")
+                .arg(picker_filename_arg(start));
+        }
+    }
+    cmd
+}
+
+/// The GTK pickers take the start directory through `--filename=`; the
+/// trailing slash makes GTK open INSIDE it instead of selecting the entry.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn picker_filename_arg(start: &Path) -> std::ffi::OsString {
+    let mut name = start.as_os_str().to_os_string();
+    if !name.is_empty() && !start.to_string_lossy().ends_with('/') {
+        name.push("/");
+    }
+    let mut arg = std::ffi::OsString::from("--filename=");
+    arg.push(name);
+    arg
 }
 
 #[cfg(test)]
@@ -1606,17 +1722,74 @@ mod tests {
     }
 
     #[test]
-    fn osascript_picker_output_parsing_handles_cancel_root_and_trailing_slash() {
-        assert_eq!(parse_osascript_folder(false, b"/ignored/\n"), None);
-        assert_eq!(parse_osascript_folder(true, b"\n"), None);
+    fn picker_output_parsing_handles_cancel_root_and_trailing_slash() {
+        assert_eq!(parse_picker_folder(false, b"/ignored/\n"), None);
+        assert_eq!(parse_picker_folder(true, b"\n"), None);
         assert_eq!(
-            parse_osascript_folder(true, b"/\n"),
+            parse_picker_folder(true, b"/\n"),
             Some(PathBuf::from("/"))
         );
         assert_eq!(
-            parse_osascript_folder(true, b"/Users/alex/My Folder/\n"),
+            parse_picker_folder(true, b"/Users/alex/My Folder/\n"),
             Some(PathBuf::from("/Users/alex/My Folder"))
         );
+    }
+
+    #[test]
+    fn zenity_kdialog_and_yad_target_the_start_directory() {
+        let start = Path::new("/home/xian");
+        let zenity: Vec<_> = unix_pick_command("zenity", start)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            zenity,
+            [
+                "--file-selection",
+                "--directory",
+                "--title",
+                "Open Folder",
+                "--filename=/home/xian/"
+            ]
+        );
+        let kdialog: Vec<_> = unix_pick_command("kdialog", start)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            kdialog,
+            ["--getexistingdirectory", "/home/xian", "--title", "Open Folder"]
+        );
+        let yad: Vec<_> = unix_pick_command("yad", start)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(yad, ["--file", "--directory", "--filename=/home/xian/"]);
+        // A start that already ends in a slash must not grow a second one.
+        let slashed: Vec<_> = unix_pick_command("zenity", Path::new("/"))
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(slashed.contains(&"--filename=/".to_string()));
+    }
+
+    /// Only executables count as present: a data file named `zenity` must
+    /// not make the picker spawn a shell error.
+    #[cfg(unix)]
+    #[test]
+    fn picker_probe_requires_the_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("herdr-picker-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("zenity");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let plain_path = std::ffi::OsString::from(&dir);
+        assert!(!executable_on_path(&plain_path, "zenity"));
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(executable_on_path(&plain_path, "zenity"));
+        assert!(!executable_on_path(&plain_path, "kdialog"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

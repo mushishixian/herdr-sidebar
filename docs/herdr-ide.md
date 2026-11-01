@@ -532,6 +532,23 @@ Two things that surprise people:
   opencode, aider, qwen, kimi, grok, droid, since claude is not a given; `none` = no
   column, which is also what you get when none of them is installed). An explicit
   choice always wins.
+- **Change Folder rebuilds the space (`bin/ide-reroot`).** When the sidebar's
+  Change Folder crosses a project root (its y/N **Refresh space?** dialog), it
+  runs this script with `<dir> <workspace> <tab>`: EVERY pane of the space is
+  closed across all its tabs — IDE panes, parked terminals, unlabeled shells,
+  detected agents — and only the sidebar plugin's own panes are spared
+  (identity tokens `herdr-sidebar*`, preview `hs-preview-path`/`-control`,
+  editor `hs-editor-path`; `hs-preview-host` marks the FRESH pane and is NOT
+  spared). The sidebar's tab is focused again and, when nothing but the
+  sidebar is left in it, a fresh shell at the new root is split beside the
+  sidebar so `herdr-ide <dir>` has an anchor (the shell becomes the Terminal,
+  the editor/agent split off it all inherit the root). The spaces rail then
+  follows on its own: herdr derives a workspace's name, branch and git status
+  from its FIRST tab's root pane's live cwd, which the rebuild moves to the
+  new project. Agent conversations are lost (the dialog warns); the new
+  project starts with default split sizes until you drag them, and the old
+  project's Fresh daemon keeps running headless until `fresh-restart`/
+  `fresh-pause` handles it.
 - **Agent pane title.** The Agent pane's border shows the agent it runs: `◆ CLAUDE`,
   `◆ CODEX`, and so on, taken from the command you type there (`claude -r`,
   `codex resume xxxx`, `npx @openai/codex@latest`, `env X=1 claude`, `~/.local/bin/claude`
@@ -697,6 +714,7 @@ Upstream: `alexarthurs/herdr-sidebar`, forked at `v0.15.1`. Commits on `main` (t
 
 | Commit | Feature | Mechanism |
 |---|---|---|
+| *uncommitted* | **Change Folder rebuilds the space** | A manual folder change that crosses a project root (nearest `.git` walk, `src/reroot.rs`) now asks **Refresh space?** (y/N dialog) and, on Yes, hands over to `dotfiles-ide`'s new `bin/ide-reroot <dir> <ws> <tab>` (plugin root via `herdr plugin list --json`; worker thread; log at `<rundir>/ide-reroot/last.log`). The script closes EVERY pane of the space across ALL tabs — IDE panes, parked terminals, unlabeled shells, detected agents — except the sidebar plugin's own (`herdr-sidebar*` / `hs-preview-path`/`-control` / `hs-editor-path` tokens; `hs-preview-host` marks the FRESH pane and is not spared). A surviving unlabeled shell was the failure that broke both halves, user-reported: herdr-ide anchored on it, its shell path kept the OLD cwd as the Terminal, and as the tab's root pane it pinned herdr's rail identity to the old project. The script refocuses the sidebar's tab, pre-splits a shell at the new root when nothing else can anchor `herdr-ide`, and runs `herdr-ide <dir>`. The rail follows by itself — a workspace's identity cwd is its FIRST tab's root pane's live cwd (herdr `Workspace::resolved_identity_cwd_from`) — so name, branch and git status re-derive from the rebuilt panes; `workspace rename` is deliberately not used (a custom name freezes the auto label). Agent conversations are lost (the dialog says so); a change inside the same project only re-roots the sidebar. |
 | a8e9cd6 | **Editor opens: inline** | Settings row `custom_editor_inline`: a click runs the editor command (`fresh-open`) in the background instead of opening a new herdr tab, so the sidebar and agent columns never move. |
 | 22756b9 | **Branch switch / rename / merge popups** | Actions `git-switch-branch`, `git-rename-branch`, `git-merge-branch` → `--git-popup-open <op>` resolves the focused pane's cwd and opens `--git-popup <op>` via `plugin.pane.open` placement `popup`. Rename uses `git branch -m` (never `-M`); merge uses `--no-edit` and offers `a` to abort on conflicts. |
 | 2c0912a | **Plain right-click menu + Cut/Copy/Paste/Duplicate** | The sidebar calls `pane.input.set right_click=pane` for its own pane. The file clipboard is a file in the plugin state dir, so copy in one tab and paste in another. Copies never overwrite (`name copy`, `name copy 2`); cut refuses an existing name. |

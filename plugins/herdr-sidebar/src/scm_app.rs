@@ -30,6 +30,7 @@ use herdr_sidebar::fswatch::{FsWatch, WatchSet};
 use herdr_sidebar::git::{DeleteRefused, FileEntry, Git, Status};
 use herdr_sidebar::icons::{IconTheme, icon};
 use herdr_sidebar::pane_menu::{self, PaneAction};
+use herdr_sidebar::reroot;
 use herdr_sidebar::settings_page::{Outcome, Setting, SettingsHost, SettingsPage};
 use herdr_sidebar::settings_popup::{self, CallerContext, Request};
 use herdr_sidebar::state::Exit;
@@ -1209,6 +1210,12 @@ enum Overlay {
         hash: String,
         subject: String,
     },
+    /// Change Folder crossed a project root: offer to rebuild the whole space
+    /// in the new one (every pane of the space restarts there; agent
+    /// conversations are lost). `y` hands the rebuild to the dotfiles-ide
+    /// plugin (`reroot::spawn_refresh`), any other answer keeps the change
+    /// sidebar-only.
+    ConfirmReroot { root: PathBuf },
     /// The ⚙ settings modal (shared with the Explorer, see `settings_page`).
     Settings(SettingsPage),
     /// The name typed for our own pane ("Rename pane…"), edited in a dialog.
@@ -3338,6 +3345,7 @@ impl App {
             PullThenCommit(usize),
             CommitNow(usize),
             UndoConfirmed(usize, String),
+            RerootConfirmed(PathBuf),
             Picker(PickerAction),
             PaneRenameConfirmed,
             BranchRenameConfirmed,
@@ -3413,6 +3421,10 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Char('Y') => Cmd::UndoConfirmed(*repo, hash.clone()),
                 _ => Cmd::Close,
             },
+            Some(Overlay::ConfirmReroot { root }) => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Cmd::RerootConfirmed(root.clone()),
+                _ => Cmd::Close,
+            },
             None => Cmd::Nothing,
         };
         match cmd {
@@ -3440,6 +3452,10 @@ impl App {
             Cmd::UndoConfirmed(repo, hash) => {
                 self.overlay = None;
                 self.undo_commit(repo, &hash);
+            }
+            Cmd::RerootConfirmed(root) => {
+                self.overlay = None;
+                self.start_space_refresh(&root);
             }
             Cmd::DiscardConfirmed(repo, entry) => {
                 self.overlay = None;
@@ -3518,6 +3534,7 @@ impl App {
                 | Some(Overlay::ConfirmGit { .. })
                 | Some(Overlay::ConfirmPullThenCommit { .. })
                 | Some(Overlay::ConfirmUndoCommit { .. })
+                | Some(Overlay::ConfirmReroot { .. })
         ) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if hits(self.zones.confirm_yes, mouse.column, mouse.row) {
@@ -3738,14 +3755,22 @@ impl App {
     }
 
     /// The NATIVE folder picker on a background thread (the pane's liveness
-    /// heartbeat must keep beating while the dialog is open).
-    #[cfg(any(windows, target_os = "macos"))]
+    /// heartbeat must keep beating while the dialog is open). Windows/macOS
+    /// have a native picker; unix desktops get zenity/kdialog/yad starting at
+    /// the user's home. Anything else says so — there is no typed prompt here.
     fn change_folder_dialog(&mut self) {
+        if !herdr_sidebar::actions::folder_picker_available() {
+            self.flash = Some((
+                "no native picker here — use c in the Files view".into(),
+                true,
+            ));
+            return;
+        }
         if self.picking.is_some() {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let start = self.cwd.clone();
+        let start = herdr_sidebar::actions::picker_start_dir(&self.cwd);
         std::thread::spawn(move || {
             let _ = tx.send(herdr_sidebar::actions::pick_folder(&start));
         });
@@ -3753,14 +3778,6 @@ impl App {
         self.flash = Some((
             "folder picker open… (check your other windows)".into(),
             false,
-        ));
-    }
-
-    #[cfg(not(any(windows, target_os = "macos")))]
-    fn change_folder_dialog(&mut self) {
-        self.flash = Some((
-            "no native picker here — use c in the Files view".into(),
-            true,
         ));
     }
 
@@ -3772,11 +3789,19 @@ impl App {
                 self.picking = None;
                 if std::env::set_current_dir(&path).is_ok() {
                     let root = std::env::current_dir().unwrap_or(path);
+                    // Captured BEFORE the rebuild: crossing a project root
+                    // offers to rebuild the whole space there.
+                    let old_root = self.cwd.clone();
                     if self.sidebar_state.follow_cwd {
                         self.cwd_follower.borrow_mut().mark_manual_folder();
                     }
                     let cwd_follower = std::rc::Rc::clone(&self.cwd_follower);
-                    *self = App::new(root, cwd_follower);
+                    *self = App::new(root.clone(), cwd_follower);
+                    // AFTER the App rebuild: `*self = App::new(...)` wiped the
+                    // overlay slot, so the confirm is installed on the fresh App.
+                    if reroot::should_refresh_space(&old_root, &root) {
+                        self.overlay = Some(Overlay::ConfirmReroot { root });
+                    }
                 } else {
                     self.flash = Some((format!("cannot open {}", path.display()), true));
                 }
@@ -3788,6 +3813,23 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(_) => self.picking = None,
         }
+    }
+
+    /// Yes on the reroot confirm: hand the rebuild to the dotfiles-ide plugin
+    /// on a worker (the script closes the space's panes and re-splits —
+    /// several herdr round trips), so the tick loop and the liveness
+    /// heartbeat never block on it.
+    fn start_space_refresh(&mut self, root: &Path) {
+        let name = root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let root = root.to_path_buf();
+        std::thread::spawn(move || {
+            reroot::spawn_refresh(&root);
+        });
+        self.flash = Some((format!("rebuilding space in {name}…"), false));
     }
 
     fn activate_menu_entry(&mut self) {
@@ -5600,6 +5642,7 @@ impl App {
             | Some(Overlay::ConfirmGit { .. }) => self.draw_confirm(frame),
             Some(Overlay::ConfirmPullThenCommit { .. }) => self.draw_confirm(frame),
             Some(Overlay::ConfirmUndoCommit { .. }) => self.draw_confirm(frame),
+            Some(Overlay::ConfirmReroot { .. }) => self.draw_confirm(frame),
             _ => {}
         }
     }
@@ -5635,6 +5678,14 @@ impl App {
                     format!("{branch} is {behind} commit(s) behind its upstream. Pull first?"),
                 )
             }
+            Some(Overlay::ConfirmReroot { root }) => (
+                "Refresh space".to_string(),
+                format!(
+                    "Rebuild this space in '{}'? All of its panes restart there — \
+                     agent conversations are lost.",
+                    root.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                ),
+            ),
             _ => return,
         };
         let (yes, no) =

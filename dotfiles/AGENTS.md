@@ -186,6 +186,12 @@ installer and verifier. Record non-obvious findings (herdr, Fresh or WSL behavio
   "succeeded". The variables are `$lbl`/`$tab`/`$ws`/… now; never name a jq variable
   `label`, `break`, `def`, `as`, `if`, `then`, `else`, `end`, `reduce`, `foreach`, `try`,
   `catch`, `import`, `include`, `and`, `or` or `not`.
+- **`[.tokens | keys[]? | test(…)]` collects one BOOLEAN per key, not the matching keys.**
+  Its `length` is the pane's token count — never 0 for a pane with any tokens — so a
+  "spare panes carrying token X" filter built that way silently spares EVERY pane with
+  tokens (bit `ide-reroot` live: only the tokenless shell was closed, the Fresh pane rode
+  its `hs-preview-host` token). Filter first: `[.tokens // {} | keys[]? |
+  select(test(…))] | length == 0`.
 - **A herdr server restart leaves every IDE pane a CORPSE with a label.** Resumed panes are
   plain shells: `Fresh`/`Terminal`/`Agent` come back, the metadata tokens (`fresh_daemon`,
   `hs-preview-host`) do not, and no daemon runs. So never treat the label as proof that an

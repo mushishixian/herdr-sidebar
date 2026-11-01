@@ -47,6 +47,13 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
 
 - `herdr plugin link .` (from the plugin dir) registers the local checkout with the running
   herdr; `herdr plugin list --json` shows what's registered.
+- **A rebuild is not a deploy.** Running sidebar panes keep the OLD binary until they
+  respawn (the exe is mmapped at process start), so EVERY `cargo build --release` on this
+  repo must be followed by `herdr plugin action invoke herdr-sidebar.redeploy`
+  (`scripts/redeploy.sh`, linux/macos; `redeploy-windows` twin) — it closes every sidebar
+  pane so the ensure hook re-docks them on the new binary. `dotfiles/herdr-sidebar/build.sh`
+  ends with exactly this invoke; a bare build leaves live panes stale and makes a fresh
+  change look unshipped.
 - `herdr plugin action list` / `herdr plugin action invoke <plugin>.<action>` run manifest actions.
 - `herdr plugin log list --plugin <id>` shows plugin logs.
 - Manifest format: `herdr-plugin.toml` (`[[build]]`, `[[panes]]`, `[[actions]]`).
@@ -760,6 +767,26 @@ Building herdr itself from source (for local patches): needs Zig ≥ 0.15.2 on P
 this machine with the known Zig-0.15-Windows linking issue mentioned in libghostty's
 HACKING.md — budget time for that before promising a patched build.
 
+### pi vs Command Code token speed on the same model (measured 2026-11-01)
+
+- pi (via `pi-commandcode-provider`) and the Command Code CLI use the SAME account/key and
+  the SAME models, but DIFFERENT HTTP endpoints: the provider package calls the public
+  Provider API `https://api.commandcode.ai/provider/v1/chat/completions`, while the CC CLI's
+  own traffic goes over the internal `POST /alpha/generate`. Interleaved A/B with identical
+  prompts on `z-ai/glm-5.3-flash`: alpha/generate streams at 345–396 tok/s (TTFT 0.6–0.8 s),
+  the Provider API at 68–97 tok/s (TTFT 1.1–2.4 s). A minimal request body to the Provider
+  API is equally slow, so it is the endpoint's serving path, not any request parameter
+  (`store:false`, `stream_options`, `reasoning_effort`, `max_completion_tokens` all ruled
+  out). That 3–5× gap is the whole "glm-5.3-flash is fast in Command Code, slow in pi"
+  effect; the provider package only switches to the generate transport on a 403
+  `upgrade_required`, and `COMMANDCODE_API_BASE` does not change that.
+- Secondary, smaller losses inside pi: its TUI re-renders the whole Markdown on every delta
+  (why `pi-streaming-guard` exists; one giant thinking block still re-renders in full), so
+  real sessions show a ~49 tok/s median / ~68 ceiling against the Provider API's raw 81–97,
+  and `defaultThinkingLevel: "max"` makes GLM spend large thinking budgets that count toward
+  the displayed TPS. Lowering thinking in pi or pointing pi's GLM at another provider is the
+  only user-side fix until the provider package learns the generate endpoint.
+
 ### Terminal/TUI gotchas (both plugins)
 
 - **crossterm honors `NO_COLOR`** — and Claude Code's Bash tool sets `NO_COLOR=1`, so a
@@ -1088,12 +1115,46 @@ HACKING.md — budget time for that before promising a patched build.
   `herdr-sidebar-git`) so either launcher decision finds it; turning unified off clears
   the other token (null value — report_metadata MERGES token maps).
 - `c` (or "Change Folder…" in the context menu / both ⚙ Settings modals) re-roots the
-  sidebar via the native OS folder picker: `rfd`/IFileDialog on Windows and an `osascript`
-  `choose folder` subprocess on macOS; Linux keeps the typed-path prompt. The dialog runs
-  on a BACKGROUND thread polled from the event loop — a blocking call would freeze the TUI
-  and the liveness heartbeat would declare the pane a corpse after 20s. "Change Folder
-  (Type Path)…" accepts absolute, relative, or ~-prefixed paths. A successful choice marks
-  the shared cwd follower as manually overridden before rebuilding either view.
+  sidebar via the native OS folder picker: `rfd`/IFileDialog on Windows, an `osascript`
+  `choose folder` subprocess on macOS, and on the other unixes whichever of
+  `zenity`/`kdialog`/`yad` is on PATH (zenity/yad get the start directory through
+  `--filename=<dir>/` — the trailing slash makes GTK open INSIDE it; kdialog takes it
+  positionally), starting at the user's `$HOME`. A picker exists only when a tool is on
+  PATH AND `DISPLAY`/`WAYLAND_DISPLAY` is set (headless/SSH keeps the typed prompt);
+  `actions::folder_picker_available()` is the ONE gate — Explorer falls back to the typed
+  prompt and Source Control flashes "no native picker" (it has no typed prompt). On this
+  machine (WSLg/Ubuntu) the ONLY picker is zenity — kdialog/yad/qarma and python3-tk are
+  absent — so `sudo apt install zenity` (v4.2.1, 2026-11-01) is a HARD dependency of the
+  feature here; WSLg supplies `DISPLAY`/`WAYLAND_DISPLAY`, and a real dialog was verified
+  to open (stderr EGL warnings are normal WSLg software rendering). The dialog runs on a BACKGROUND thread polled from the event loop — a blocking call would
+  freeze the TUI and the liveness heartbeat would declare the pane a corpse after 20s.
+  "Change Folder (Type Path)…" accepts absolute, relative, or ~-prefixed paths. A
+  successful choice marks the shared cwd follower as manually overridden before rebuilding
+  either view. A MANUAL change that crosses a project root (`reroot::should_refresh_space`,
+  a nearest-`.git` walk — same-repo subfolder changes stay sidebar-only) first asks a y/N
+  "Refresh space" dialog and, on Yes, hands the rebuild to the dotfiles IDE layer on a
+  worker: `spawn_refresh` resolves `dotfiles-ide`'s plugin root from `herdr plugin list
+  --json` and runs `bash <root>/bin/ide-reroot <dir> <ws> <tab>` detached (output to
+  `<rundir>/ide-reroot/last.log`; absent IDE layer = silent no-op). The script closes EVERY
+  pane of the space across ALL tabs — IDE panes, parked terminals, unlabeled shells,
+  detected agents — EXCEPT the sidebar plugin's own (identity tokens `herdr-sidebar*`,
+  preview `hs-preview-path`/`hs-preview-control`, custom editor `hs-editor-path`; note
+  `hs-preview-host` marks the FRESH pane and is NOT spared). An unlabeled shell that
+  survives is the one failure mode that breaks BOTH halves of the feature, user-reported:
+  herdr-ide anchors on it and its shell path KEEPS THE ANCHOR'S OLD CWD as the Terminal,
+  and as the tab's root pane it pins herdr's rail identity (name, branch) to the old
+  project. The confirm dialog says "All of its panes restart there". After the closes the
+  script refocuses the sidebar's tab, pre-splits a shell at the new root beside the sidebar
+  when nothing else remains to anchor `herdr-ide`, and runs `herdr-ide <dir>`. The spaces
+  rail follows WITHOUT any token work: herdr derives a workspace's name/branch/git status
+  from its FIRST tab's ROOT pane's live cwd (`Workspace::resolved_identity_cwd_from`),
+  which the rebuilt panes move — so `workspace rename` must NOT be used here (a custom
+  name freezes the auto label). Both apps install the confirm AFTER their `*self =
+  App::new(...)` rebuild — the rebuild wipes the overlay slot. Verified live in a
+  throwaway workspace AND on the user's real space: the script closed the space's panes
+  and rebuilt them at the new root (the Fresh daemon name followed the new root), herdr
+  reassigned the tab's root pane to a surviving pane, and the rail label flipped to the
+  new project once no old-cwd pane was left as the root.
 - "Open with Default App" (`actions::open_external`, in the Explorer menu for FILE rows
   only and in the SCM file menu unless the entry's status letter is `D`) hands the path to
   the OS shell association. Windows uses `explorer.exe <path>`, NOT `cmd /c start`: explorer
@@ -1944,6 +2005,16 @@ build sequences programmatically (`[char]27`, or JSON `\u001b` via a params file
 `herdr_ipc.py` pattern: open `\\.\pipe\<HERDR_SOCKET_PATH>` from Python; PS 5.1's
 FileStream refuses pipe paths).
 
+**Typing into a TUI's input dialog is unreliable** (verified live, cost a debugging round):
+`pane run`/`send_input` (bracketed paste) DROPPED the first character — a leading-`/`
+absolute path arrived as `tmp/…` and the app resolved it relative to its root; char-by-char
+`send-keys` lost the first key too. Menu navigation via `send-keys` flakes when the pane
+loses focus between tool calls (the sidebar's `dismiss_popups_if_unfocused` closes the
+open menu), so `herdr-rpc pane.focus` + keys + assertions must run in ONE command, and a
+y/N flow needs a retry loop that re-reads the pane between steps. To assert WHERE a menu
+selection sits, capture `pane read --format ansi` and look for the `48;5;…` background on
+the row — plain text captures do not show the highlight.
+
 ## README screenshots (how-to)
 
 The framed screenshots in `plugins/herdr-sidebar/docs/media/` are produced with the
@@ -2181,7 +2252,8 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   quotes in AppleScript literals, treat a non-zero status (including cancel `-128`) as no
   selection, and trim the returned trailing slash without turning `/` into an empty path.
   The parser is separated from process launch so all of these cases run in cross-platform
-  unit tests. `rfd` remains Windows-only; Linux behavior is unchanged.
+  unit tests. `rfd` remains Windows-only; the other unixes use zenity/kdialog/yad (see the
+  Change Folder bullet in the sidebar section).
 - Everything else verified working on macOS unchanged: ensure hook docks on tab focus,
   unified view switch, SCM drawers/commit box in a real repo, the diff preview
   (full-size park/restore at the time; preview TABS on the trial branch),
