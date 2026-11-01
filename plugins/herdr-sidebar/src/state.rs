@@ -3,6 +3,11 @@
 //! active last, persisted in a small JSON file so every pane and launcher
 //! agrees across restarts.
 //!
+//! The file split: every USER setting lives in `settings.json` (the file a
+//! person edits, validated by [`crate::settings_file`]); `state.json` keeps only
+//! internal state (`active`, `search_active`, `font_prompt`). [`load_state`]
+//! merges them; [`update_state`] writes both. See `AGENTS.md` (*settings.json*).
+//!
 //! - `merged`: the unified sidebar is on (survives restarts).
 //! - `active`: the view shown last, so a fresh sidebar opens where the user
 //!   left off.
@@ -276,7 +281,7 @@ impl ColorTheme {
         self == Self::Light
     }
 
-    fn from_state_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_state_name(name: &str) -> Option<Self> {
         match name {
             "vscode" => Some(Self::VsCode),
             "light" => Some(Self::Light),
@@ -319,7 +324,7 @@ impl PreviewPlacement {
         matches!(self, Self::Pane | Self::Replace)
     }
 
-    fn from_state_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_state_name(name: &str) -> Option<Self> {
         match name {
             "tab" => Some(Self::Tab),
             "pane" => Some(Self::Pane),
@@ -559,102 +564,297 @@ fn legacy_state_path() -> Option<PathBuf> {
     Some(base?.join("herdr").join("aa-sidebar.json"))
 }
 
-pub fn load_state() -> State {
-    if let Some(json) = state_path().and_then(|p| std::fs::read_to_string(p).ok()) {
-        return parse_state(&json);
-    }
-    // One-time migration from the legacy config-dir file.
-    if let Some(json) = legacy_state_path().and_then(|p| std::fs::read_to_string(p).ok()) {
-        let state = parse_state(&json);
-        save_state(state);
-        return state;
-    }
-    State::default()
+/// Every USER setting, in the canonical order `settings.json` is written in.
+/// Each key name and value format is the one [`parse_state`] reads.
+pub(crate) const USER_KEYS: [&str; 20] = [
+    "merged",
+    "hotkeys",
+    "git_footer",
+    "confirm_delete",
+    "icons",
+    "colors",
+    "auto_open",
+    "strict_toggle",
+    "focus_on_open",
+    "follow_cwd",
+    "git_deco",
+    "dock_right",
+    "sidebar_width",
+    "terminal_height",
+    "agent_width",
+    "preview_placement",
+    "custom_editor_on_click",
+    "custom_editor_inline",
+    "scm_tree_view",
+    "show_hidden",
+];
+
+/// `<state dir>/settings.json`: every user setting, the one file a person
+/// edits. Validation and the cache live in [`crate::settings_file`].
+pub fn settings_path() -> Option<PathBuf> {
+    Some(state_dir()?.join("settings.json"))
 }
 
-/// Best-effort persist; the sidebar still works for this session if it fails.
-pub fn save_state(state: State) {
-    let Some(path) = state_path() else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+/// `<state dir>/settings.last-good.json`: a copy of the last VALID settings.json
+/// this crate parsed or wrote. Only read while settings.json is invalid, so a
+/// fresh process (or a redeploy) still applies the user's values instead of
+/// defaults. Written by [`crate::settings_file`].
+pub fn last_good_path() -> Option<PathBuf> {
+    Some(state_dir()?.join("settings.last-good.json"))
+}
+
+thread_local! {
+    /// Whether the last `update_state` on this thread left settings.json alone
+    /// because the file exists and holds errors.
+    static SETTINGS_WRITE_BLOCKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// True when the most recent `update_state` (on this thread) could NOT save
+/// its user settings: settings.json exists and is invalid, so it was left
+/// untouched and the change is only in memory. The Settings page turns this
+/// into a notice. Thread-local because every caller runs on the TUI thread.
+pub fn settings_write_blocked() -> bool {
+    SETTINGS_WRITE_BLOCKED.with(|blocked| blocked.get())
+}
+
+/// A JSON object from `path`, or `None` when unreadable or not an object.
+fn read_object(path: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')).ok()? {
+        serde_json::Value::Object(map) => Some(map),
+        _ => None,
     }
-    let Some(_lock) = StateWriteLock::acquire(&path) else {
-        return;
+}
+
+/// The effective settings: defaults ← state.json (legacy files still carry user
+/// keys) ← every user key of a VALID settings.json. A settings.json key wins, a
+/// missing one falls back to state.json, then to the default.
+pub fn load_state() -> State {
+    let mut merged = match state_path() {
+        Some(path) if path.exists() => read_object(&path).unwrap_or_default(),
+        // One-time legacy file in the config dir; migrate_settings persists it.
+        _ => legacy_state_path()
+            .and_then(|path| read_object(&path))
+            .unwrap_or_default(),
     };
-    write_state(&path, state);
+    let snapshot = crate::settings_file::settings_snapshot();
+    // While settings.json is broken, the copy saved when it last validated is
+    // the user's settings; this process's own last-good parse (if any) is newer.
+    if snapshot.present
+        && snapshot.error.is_some()
+        && let Some(saved) = crate::settings_file::last_good_values()
+    {
+        overlay_user_keys(&mut merged, &saved);
+    }
+    if let Some(good) = &snapshot.good {
+        overlay_user_keys(&mut merged, good);
+    }
+    state_from_value(&serde_json::Value::Object(merged))
+}
+
+/// Copy every user key of `source` into `target`.
+fn overlay_user_keys(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    source: &serde_json::Map<String, serde_json::Value>,
+) {
+    for key in USER_KEYS {
+        if let Some(value) = source.get(key) {
+            target.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
+/// Best-effort persist of the whole state; the sidebar still works for this
+/// session if it fails.
+pub fn save_state(state: State) {
+    let _ = update_state(|current| *current = state);
 }
 
 /// Atomically-with-respect-to-other-sidebar-processes update one or more
 /// settings. Every caller reloads after taking the lock, so a tab that has
 /// been open for hours cannot overwrite newer fields from another tab.
 pub fn update_state(update: impl FnOnce(&mut State)) -> State {
-    let mut state = load_state();
-    let Some(path) = state_path() else {
+    update_state_reporting(update).0
+}
+
+/// [`update_state`] that also reports whether settings.json was left alone
+/// because it holds errors (`true` = the user settings were NOT saved).
+pub fn update_state_reporting(update: impl FnOnce(&mut State)) -> (State, bool) {
+    let (Some(state_file), Some(settings_file)) = (state_path(), settings_path()) else {
+        let mut state = load_state();
         update(&mut state);
-        return state;
+        return (state, false);
     };
-    if let Some(dir) = path.parent() {
+    if let Some(dir) = state_file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let Some(_lock) = StateWriteLock::acquire(&path) else {
+    // Both locks, always taken in this order (state, then settings).
+    let locks = StateWriteLock::acquire(&state_file).zip(StateWriteLock::acquire(&settings_file));
+    let Some(_locks) = locks else {
+        let mut state = load_state();
         update(&mut state);
-        return state;
+        return (state, false);
     };
-    if let Ok(json) = std::fs::read_to_string(&path) {
-        state = parse_state(&json);
-    }
+    let mut state = load_state();
     update(&mut state);
-    write_state(&path, state);
-    state
+    let blocked = write_files(&state_file, &settings_file, &state);
+    SETTINGS_WRITE_BLOCKED.with(|flag| flag.set(blocked));
+    (state, blocked)
 }
 
-fn write_state(path: &Path, state: State) {
-    let icons = match state.icons {
-        Some(theme) => format!(",\"icons\":\"{}\"", theme.state_name()),
-        None => String::new(),
+/// Write both files for `state`. Returns true when settings.json was left
+/// alone because it exists and is invalid.
+fn write_files(state_file: &Path, settings_file: &Path, state: &State) -> bool {
+    // A fresh read: the decision must not rest on a cached view.
+    let (blocked, existing) = match std::fs::read_to_string(settings_file) {
+        Ok(text) => match crate::settings_file::check_settings(&text) {
+            Ok((map, _warnings)) => (false, Some(map)),
+            Err(_) => (true, None),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (false, None),
+        Err(_) => (true, None),
     };
-    let json = format!(
-        "{{\"merged\":{},\"active\":\"{}\",\"search_active\":{},\"hotkeys\":{},\"git_footer\":{},\"confirm_delete\":{},\"font_prompt\":{},\"auto_open\":{},\"strict_toggle\":{},\"focus_on_open\":{},\"follow_cwd\":{},\"git_deco\":{},\"dock_right\":{},\"sidebar_width\":{},\"terminal_height\":{},\"agent_width\":{},\"colors\":\"{}\",\"preview_placement\":\"{}\",\"custom_editor_on_click\":{},\"custom_editor_inline\":{},\"scm_tree_view\":{},\"show_hidden\":{}{icons}}}",
-        state.merged,
-        state.active.state_name(),
-        state.search_active,
-        state.show_hotkeys,
-        state.show_git_footer,
-        state.confirm_delete,
-        state.font_prompt_done,
-        state.auto_open,
-        state.strict_toggle,
-        state.focus_on_open,
-        state.follow_cwd,
-        state.git_deco,
-        state.dock_right,
-        clamp_sidebar_width(state.sidebar_width),
-        // `null` is "auto": the IDE layer keeps its own default.
-        match state.terminal_height {
-            Some(rows) => clamp_terminal_height(rows).to_string(),
-            None => "null".to_string(),
-        },
-        // `null` is "auto": the IDE layer keeps its own default.
-        match state.agent_width {
-            Some(cols) => clamp_agent_width(cols).to_string(),
-            None => "null".to_string(),
-        },
-        state.color_theme.label(),
-        state.preview_placement.label(),
-        state.custom_editor_on_click,
-        state.custom_editor_inline,
-        state.scm_tree_view,
-        state.show_hidden
-    );
-    let _ = std::fs::write(path, json);
+    // state.json holds internal keys only. While settings.json is blocked, the
+    // user keys this file already carries stay as they are, so the effective
+    // values survive until the user fixes settings.json.
+    let mut internal = internal_values(state);
+    if blocked && let Some(old) = read_object(state_file) {
+        for key in USER_KEYS {
+            if let Some(value) = old.get(key) {
+                internal.push((key.to_string(), value.clone()));
+            }
+        }
+    }
+    write_atomic(state_file, &pretty_object(&internal));
+    if !blocked {
+        // Canonical user keys first, then every key this file does not know,
+        // unchanged, so a typo the user made is never silently deleted.
+        let mut entries = user_values(state);
+        if let Some(existing) = existing {
+            entries.extend(
+                existing
+                    .into_iter()
+                    .filter(|(key, _)| !USER_KEYS.contains(&key.as_str())),
+            );
+        }
+        let text = pretty_object(&entries);
+        if write_atomic(settings_file, &text) {
+            crate::settings_file::note_own_write(settings_file);
+            crate::settings_file::store_last_good_text(&text);
+        }
+    }
+    blocked
 }
 
-struct StateWriteLock {
+/// The internal keys of `state`, in state.json order.
+fn internal_values(state: &State) -> Vec<(String, serde_json::Value)> {
+    use serde_json::json;
+    vec![
+        ("active".into(), json!(state.active.state_name())),
+        ("search_active".into(), json!(state.search_active)),
+        ("font_prompt".into(), json!(state.font_prompt_done)),
+    ]
+}
+
+/// The user settings of `state`, in [`USER_KEYS`] order. `null` is "auto" for
+/// `icons`, `terminal_height` and `agent_width`.
+fn user_values(state: &State) -> Vec<(String, serde_json::Value)> {
+    use serde_json::json;
+    let entries = [
+        ("merged", json!(state.merged)),
+        ("hotkeys", json!(state.show_hotkeys)),
+        ("git_footer", json!(state.show_git_footer)),
+        ("confirm_delete", json!(state.confirm_delete)),
+        ("icons", json!(state.icons.map(|theme| theme.state_name()))),
+        ("colors", json!(state.color_theme.label())),
+        ("auto_open", json!(state.auto_open)),
+        ("strict_toggle", json!(state.strict_toggle)),
+        ("focus_on_open", json!(state.focus_on_open)),
+        ("follow_cwd", json!(state.follow_cwd)),
+        ("git_deco", json!(state.git_deco)),
+        ("dock_right", json!(state.dock_right)),
+        (
+            "sidebar_width",
+            json!(clamp_sidebar_width(state.sidebar_width)),
+        ),
+        (
+            "terminal_height",
+            json!(state.terminal_height.map(clamp_terminal_height)),
+        ),
+        (
+            "agent_width",
+            json!(state.agent_width.map(clamp_agent_width)),
+        ),
+        ("preview_placement", json!(state.preview_placement.label())),
+        (
+            "custom_editor_on_click",
+            json!(state.custom_editor_on_click),
+        ),
+        ("custom_editor_inline", json!(state.custom_editor_inline)),
+        ("scm_tree_view", json!(state.scm_tree_view)),
+        ("show_hidden", json!(state.show_hidden)),
+    ];
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
+
+/// The text of a settings or state file: two-space indent, one key per line,
+/// the order given, and a trailing newline.
+pub(crate) fn pretty_object(entries: &[(String, serde_json::Value)]) -> String {
+    let mut out = String::from("{\n");
+    let last = entries.len().saturating_sub(1);
+    for (index, (key, value)) in entries.iter().enumerate() {
+        let value = serde_json::to_string_pretty(value)
+            .unwrap_or_else(|_| "null".into())
+            .replace('\n', "\n  ");
+        let key = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into());
+        out.push_str("  ");
+        out.push_str(&key);
+        out.push_str(": ");
+        out.push_str(&value);
+        if index < last {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// Replace `path` with `text` through a sibling temp file, so a reader (or a
+/// crash) never sees half a file. Returns false when the write failed.
+pub(crate) fn write_atomic(path: &Path, text: &str) -> bool {
+    // A per-process temp name: two sidebars must never rename each other's half-written file.
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, text)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .is_ok()
+}
+
+/// One-time (per install) move of user settings out of state.json. Runs at
+/// sidebar startup: when settings.json is missing, or state.json still carries
+/// user keys from before the split, both files are written through
+/// [`update_state`]. A no-op otherwise.
+pub fn migrate_settings() {
+    let Some(settings) = settings_path() else {
+        return;
+    };
+    let legacy_keys = state_path()
+        .and_then(|path| read_object(&path))
+        .is_some_and(|map| USER_KEYS.iter().any(|key| map.contains_key(*key)));
+    if !settings.exists() || legacy_keys {
+        update_state(|_| {});
+    }
+}
+
+pub(crate) struct StateWriteLock {
     _file: File,
 }
 
 impl StateWriteLock {
-    fn acquire(state_path: &Path) -> Option<Self> {
+    pub(crate) fn acquire(state_path: &Path) -> Option<Self> {
         let path = state_path.with_extension("lock");
         let file = File::options()
             .read(true)
@@ -1010,10 +1210,15 @@ pub fn save_root(key: &str, root: &Path) {
 /// Forgiving parse: any missing/garbled field falls back to the default, so a
 /// hand-edited or truncated file can never wedge the panels.
 pub fn parse_state(json: &str) -> State {
-    let value: serde_json::Value = match serde_json::from_str(json.trim_start_matches('\u{feff}')) {
-        Ok(v) => v,
-        Err(_) => return State::default(),
-    };
+    match serde_json::from_str::<serde_json::Value>(json.trim_start_matches('\u{feff}')) {
+        Ok(value) => state_from_value(&value),
+        Err(_) => State::default(),
+    }
+}
+
+/// Forgiving decode of one settings object (state.json or settings.json),
+/// used for both files' user keys and for the merged view.
+fn state_from_value(value: &serde_json::Value) -> State {
     let default = State::default();
     State {
         merged: value

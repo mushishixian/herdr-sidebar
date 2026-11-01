@@ -429,11 +429,14 @@ new_editor_pane() { # term root ratio
 #   1. sizes.json's remembered "editor" ratio for this project (the user's own
 #      drag ALWAYS wins),
 #   2. the herdr-sidebar plugin's `terminal_height` setting (rows) — the ONE-WAY
-#      dependency: this layer only READS the sidebar's state file,
+#      dependency: this layer only READS the sidebar's settings file,
 #   3. the historical 0.7.
 # The sidebar's "Terminal height" row also applies itself to the tab it runs in;
 # these helpers only matter when a layout is (re)built.
 SIDEBAR_STATE_FILE=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr-sidebar/state.json
+# The sidebar's user settings. Read FIRST; state.json is only a fallback for a
+# key this file does not have (a sidebar build older than settings.json).
+SIDEBAR_SETTINGS_FILE=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr-sidebar/settings.json
 # The sidebar stamps the moment it starts (re)docking into a tab, in its own
 # runtime dir. A re-dock reaches a full-height column by moving panes through a
 # temporary tab, and herdr re-creates every split that touches at a DEFAULT
@@ -448,18 +451,26 @@ DEFAULT_EDITOR_RATIO=0.7
 # Historical Agent-column split ratio; also the fallback in agent_split_ratio.
 DEFAULT_AGENT_RATIO=0.6
 
-# One numeric field of the sidebar's state file, or nothing when the file is
-# missing, unreadable, or the key is absent/null. Never fails.
+# One numeric setting of the sidebar, or nothing when it is "auto" (null), unset,
+# or unreadable. Reads settings.json first; state.json answers only for a key
+# settings.json does not have at all. A key present with null IS an answer
+# ("auto"), so a null never falls through to a stale state.json value. Never
+# fails.
 sidebar_state_number() { # key
-  local value
-  [ -r "$SIDEBAR_STATE_FILE" ] || return 0
-  # Numbers only: the sidebar writes a number or null, and a hand-edited
-  # `"10"` must read as unset exactly like the Rust parser (`as_u64`).
-  value=$(jq -r --arg k "$1" '.[$k] | numbers' "$SIDEBAR_STATE_FILE" 2>/dev/null) || value=''
-  case $value in
-    '' | *[!0-9]*) return 0 ;;
-  esac
-  printf '%s\n' "$value"
+  local file found value
+  for file in "$SIDEBAR_SETTINGS_FILE" "$SIDEBAR_STATE_FILE"; do
+    [ -r "$file" ] || continue
+    found=$(jq -r --arg k "$1" 'if type == "object" and has($k) then "yes" else "no" end' "$file" 2>/dev/null) || found=no
+    [ "$found" = yes ] || continue
+    # Numbers only: the sidebar writes a number or null, and a hand-edited
+    # `"10"` must read as unset exactly like the Rust parser (`as_u64`).
+    value=$(jq -r --arg k "$1" '.[$k] | numbers' "$file" 2>/dev/null) || value=''
+    case $value in
+      '' | *[!0-9]*) return 0 ;;
+    esac
+    printf '%s\n' "$value"
+    return 0
+  done
 }
 
 # The sidebar's Terminal height setting in ROWS, or nothing when unset ("auto")

@@ -96,8 +96,8 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   API URL (a base like `https://api.deepseek.com/v1`, or the full `…/chat/completions`; empty =
   OpenAI — `AiConfig::endpoint`), API key, Model, and a Test connection row (worker thread,
   `ai_client::test_connection`). They live in `<state dir>/ai.json` (`src/ai_config.rs`), written
-  atomically and 0600, NEVER in `state.json` (which every sidebar re-reads and the shoot docs
-  tell agents to edit). Not configured → "AI commit is not set up" toast, changes stay staged.
+  atomically and 0600, NEVER in `state.json` or `settings.json` (both re-read by every sidebar,
+  and the shoot docs tell agents to edit them). Not configured → "AI commit is not set up" toast, changes stay staged.
   Transport is a `curl` subprocess (`src/ai_client.rs`, same no-HTTP-crate choice as the update
   check) whose WHOLE config — `Authorization` header, JSON body, URL — goes on stdin via `-K -`, so
   the key never appears in argv/`ps`. Values are double-quoted curl-config strings (`\\` and `\"`
@@ -725,7 +725,7 @@ Terminal fonts for icon glyphs (Windows, verified live):
   need a VS Code window reload to be seen.
 - **A TUI cannot detect whether the terminal font renders a glyph** — missing glyphs
   (tofu) still occupy their cells, so cursor-position probing sees nothing. The icon
-  theme therefore resolves env → persisted `icons` in state.json → a "Nerd Font
+  theme therefore resolves env → persisted `icons` in settings.json → a "Nerd Font
   installed?" probe (Windows font registries via `reg query`; macOS's standard
   font directories; Linux `fc-list`),
   and any manual toggle persists (`set_theme`) so a wrong guess is corrected exactly
@@ -748,7 +748,7 @@ Terminal fonts for icon glyphs (Windows, verified live):
   install stops waiting WITHOUT persisting a theme, so the next start re-probes.
   Test hooks: `HERDR_SIDEBAR_FONT_INSTALL=fail|ok` simulates the installer outcome
   (~2s delay, no real install), and pointing `HERDR_PLUGIN_STATE_DIR` at a scratch
-  dir keeps the GLOBAL state.json out of live tests. The prompt also stamps the
+  dir keeps the GLOBAL state files (`state.json`, `settings.json`) out of live tests. The prompt also stamps the
   pane's identity heartbeat itself (`ipc::report_identity`, shared with both apps'
   PaneCtl): it runs BEFORE the app loop's first stamp, and a token-less "Sidebar"
   pane older than the launcher's ~6s wait gets REPLACE-killed by the corpse rule
@@ -828,7 +828,7 @@ HACKING.md — budget time for that before promising a patched build.
   `cd` or an agent project switch. Following therefore requires `foreground_cwd` and
   deliberately has NO fallback to `cwd`: an absent live value is safer than silently
   re-rooting to a stale directory.
-- "Follow pane folder" is persisted as `follow_cwd` in `state.json` and defaults on,
+- "Follow pane folder" is persisted as `follow_cwd` in `settings.json` and defaults on,
   including for state files written before the field existed. Both views sample on the
   existing ~5s heartbeat and share one process-local `CwdFollower`, so precedence survives
   an app rebuild and unified-view switch.
@@ -964,8 +964,9 @@ HACKING.md — budget time for that before promising a patched build.
   (`s` key or the gear button) — never "merge"/"detach" in UI text, and the toggle is
   silent (the layout change is the feedback). Off spawns a second pane of the same binary
   pinned with `--view`, and each pane pins to its own view.
-- The sticky setting lives in `HERDR_PLUGIN_STATE_DIR/state.json` (resolves to
-  `%LOCALAPPDATA%\herdr\plugins\herdr-sidebar\` here) per the herdr plugin docs; herdr
+- The sticky settings live in `HERDR_PLUGIN_STATE_DIR/settings.json` (user settings) and
+  `state.json` (internal state only; see *settings.json* below). Both resolve to
+  `%LOCALAPPDATA%\herdr\plugins\herdr-sidebar\` here, per the herdr plugin docs; herdr
   injects that env for hooks/actions but NOT panes, so every `pane.split` we issue
   forwards it via the `env` param (`state::spawn_env`). Legacy
   `%APPDATA%\herdr\aa-sidebar.json` is migrated on first load. A fresh sidebar opens on
@@ -988,8 +989,8 @@ HACKING.md — budget time for that before promising a patched build.
   column is, so only height is configurable. `←`/`→` step it and apply it to the sidebar's
   OWN tab immediately; `⏎` clears it back to auto WITHOUT touching the current layout.
   - The row is a DEFAULT, not an override: `dotfiles/herdr-plugins/ide/bin/lib.sh`
-    `editor_split_ratio` reads `<state dir>/herdr-sidebar/state.json`
-    (`jq -r '.terminal_height // empty'`) at BUILD time and the project's remembered ratio in
+    `editor_split_ratio` reads `<state dir>/herdr-sidebar/settings.json`, then `state.json` for a
+    key it lacks (`jq -r '.terminal_height // empty'`) at BUILD time and the project's remembered ratio in
     `dotfiles-ide`'s `sizes.json` still wins, so a user's own drag is never undone. That is
     the one-way cross-layer contract: the shell layer reads the sidebar's state file, the
     sidebar never reads `sizes.json` or anything under the `dotfiles-ide` plugin.
@@ -1016,8 +1017,8 @@ HACKING.md — budget time for that before promising a patched build.
   width is configurable. `←`/`→` step it and apply it to the sidebar's OWN tab immediately;
   `⏎` clears it back to auto WITHOUT touching the current layout.
   - Same one-way contract as Terminal height: `dotfiles/herdr-plugins/ide/bin/lib.sh`'s
-    `agent_split_ratio` reads `agent_width` out of `<state dir>/herdr-sidebar/state.json` at
-    BUILD time, and the project's remembered `agent` ratio in `dotfiles-ide`'s `sizes.json`
+    `agent_split_ratio` reads `agent_width` out of `<state dir>/herdr-sidebar/settings.json` (then
+    `state.json`) at BUILD time, and the project's remembered `agent` ratio in `dotfiles-ide`'s `sizes.json`
     still wins, so a user's own drag is never undone. Order: remembered ratio → this setting →
     the historical 0.6.
   - Mechanism: `launch::foreign_right_split(layout_json, pane_id)` returns `(path, ratio,
@@ -1034,10 +1035,147 @@ HACKING.md — budget time for that before promising a patched build.
     stored value is kept, because it still applies to tabs built later. The first `←`/`→` on
     "auto" is seeded from the live column (`PaneCtl::agent_cols_now`), or
     `state::SEED_AGENT_WIDTH` when there is nothing to measure.
+- **`settings.json` is the one user-settings file** (split from `state.json`, 2026-11). Its path
+  is `<state dir>/settings.json`, pretty-printed (two-space indent, one key per line, the canonical
+  order `state::USER_KEYS`), and it is the file a person edits. `state.json` keeps only INTERNAL
+  state: `active`, `search_active`, `font_prompt`. `ai.json` and `editor-command.txt` are unchanged.
+  - **Resolution** (`state::load_state`): defaults ← state.json (legacy files still carry user keys)
+    ← every user key of a VALID settings.json. A settings key wins, a missing key falls back to
+    state.json, then to the default. `settings_file::settings_snapshot` caches the parse keyed by
+    (path, mtime, len), so the hot `load_state` calls cost one `metadata()`; a deleted file forgets
+    its last good parse, and an invalid file never replaces it.
+  - **Migration**: `state::migrate_settings()` runs once per sidebar start (`main`, before the first
+    view) and in the settings popup. It calls `update_state(|_| {})` when settings.json is missing or
+    state.json still holds a user key, so the first start after upgrading writes settings.json with
+    the merged values and strips them from state.json. A fresh install gets every key with its default.
+  - **Writes** (`state::update_state`, or `update_state_reporting` for the flag): the state lock and
+    the settings lock are taken in that order, the state is reloaded, the closure runs, then both
+    files are written atomically (temp file + rename). Unknown keys already in settings.json are kept
+    after ours, unchanged. serde's `Map` is not order-preserving, so they come out alphabetical, not in
+    the file's original order.
+  - **An invalid settings.json is never overwritten.** The save writes state.json with the internal
+    keys PLUS the user keys that file already holds (so the effective values survive), leaves
+    settings.json alone, and sets `state::settings_write_blocked()`. That flag is thread-local, the
+    result of the last update on the TUI thread. The ⚙ page then shows `settings.json has errors:
+    fix it first; change not saved`. The change stays on screen until the next re-read reverts it to
+    the file's value.
+  - **`settings.last-good.json`** (same dir) is a copy of the last VALID settings.json, written by
+    every valid parse and every save (canonical text). It exists because a sidebar that starts while
+    settings.json is broken has no in-process parse to fall back on, and state.json no longer holds
+    the user keys after migration: without it, a redeploy with a half-edited file reset every sidebar
+    to DEFAULTS (width, unified mode). `load_state` reads it ONLY while settings.json is invalid,
+    cached by (mtime, len); a missing settings.json still means no settings layer.
+  - **Validation** (`settings_file::validate_settings`, the one rule set): syntax errors name the line
+    and column; a known key of the wrong type, an unknown enum name or an out-of-range number is an
+    error that names the key and the accepted values; an unknown key is a warning (`unknown setting`)
+    that does not block. A leading BOM is accepted. Only a file that validates is applied.
+  - **Telling the user** (`settings_file::poll_settings_file`, both sidebar loops, every turn): one
+    `metadata()` call, and validation only when (mtime, len) changed. An invalid file toasts
+    `settings.json not applied` with the error; a file that became valid again toasts `settings.json
+    applied` with its warnings. Only the session reporter toasts (`session_reporter`), so one edit is
+    one toast. A process's own writes never toast (`note_own_write`), and the first poll only records
+    the baseline unless the file is already invalid. The ⚙ page shows the error in red above its rows
+    (in the in-pane box and in the popup), and its `Edit settings.json…` row (ok/error) opens the file
+    through `file_popup::open_file_in_workspace`, closing the page.
+  - **IDE-layer contract**: `dotfiles/herdr-plugins/ide/bin/lib.sh` reads `terminal_height` and
+    `agent_width` from settings.json first and from state.json only for a key settings.json lacks; a
+    `null` in settings.json is "auto" and does not fall through. `dotfiles/install.sh` seeds settings.json
+    from `dotfiles/herdr-sidebar/settings.json` with the same rule (existing values win), leaves an
+    invalid file alone with a warning, and carries a legacy state.json's user keys over on a fresh
+    machine. Keep `USER_KEYS`, the seed file, `lib.sh` and `verify.sh` in step.
+- **`keymap.json` is the one key-binding file** (`src/keymap.rs`, 2026-11). Its path is
+  `<state dir>/keymap.json`, a JSON array of `{ "key", "command", "global"? }` objects (an empty
+  file or `[]` means no bindings; a UTF-8 BOM is accepted; unknown fields are warnings). Created as
+  `[]` on the first sidebar start (`keymap::ensure_files`, next to `migrate_settings`), and
+  `keymap.defaults.json` beside it is ALWAYS rewritten when its content would change: a read-only
+  reference of every sidebar command id, its default keys, its views (`explorer`, `source-control`,
+  `both`) and a one-line description. The registry is `keymap::COMMANDS`; each default was read
+  from the real dispatch in `explorer_app::on_key` / `scm_app::on_key`.
+  - **Key syntax** (`keymap::parse_chord`, shared): `[mod+]*key`, lowercase `ctrl`/`alt`/`shift`.
+    A single character is itself (`s`, `S`, `.`, `1`; an uppercase letter means that capital, and
+    `shift` on a letter is the same chord), or a name (`enter esc tab space backspace delete up
+    down left right home end pageup pagedown f1`…`f12`). Chars drop the shift bit, so the file's `S`
+    matches the `S` a terminal sends. A global key is NOT parsed: herdr gets it verbatim (`prefix+x`
+    works) after a check that it is non-empty and has no whitespace, quotes or backslashes.
+  - **Sidebar entries** (`global` absent or false). `"command": "<id>"` binds a key to a command of
+    the registry; `"command": "-<id>"` removes that command's DEFAULT key (a `-` on a key that is
+    not a default is a warning, not an error). Errors name the entry: `keymap.json[2]: …`.
+  - **Translation** (`keymap::translate(view, key, in_text)`, ONE call at the top of each app's
+    `on_key`, after the Press check). A pressed key that matches a user binding for a command in this
+    view becomes that command's FIRST default key, once (a synthesized key is never translated again),
+    and the rest of `on_key` runs unchanged. A pressed key that is a default removed by `-cmd` is
+    swallowed. Defaults stay active unless removed. `in_text` = an overlay is open, or the SCM commit
+    box has focus. While `in_text` only Ctrl-without-Alt and F-keys are translated (or removed), so
+    typing is never hijacked; a binding whose target is a plain key is also left alone there, because
+    the synthesized key would type into the field. Scope: `Scope::Both` commands work in both views
+    (`explorer.quickOpen` and `explorer.toggleIcons` are Both because `scm_app` handles those keys
+    too). The hotkey hints (`hints()`) still show the DEFAULT keys: a remapped key is not reflected
+    there yet.
+  - **Global entries** (`"global": true`, `command` must look like `<plugin-id>.<action-id>`, a `-`
+    is an error: "global bindings can only be added; remove a herdr chord in config.toml"). They are
+    rendered into ONE generated block at the END of herdr's config.toml, delimited by exactly
+    `# >>> herdr-sidebar keymap.json (generated; edit keymap.json, not this block) >>>` and
+    `# <<< herdr-sidebar keymap.json <<<`, each as `[[keys.command]]` with `key`, `type =
+    "plugin_action"`, `command` and `description = "keymap.json"` (TOML strings escaped). No global
+    entries removes the block; with no block and no entries the file is never touched.
+    `keymap::apply_block` replaces/removes the span and refuses a block with only one marker.
+  - **Symlink-safe, herdr-checked apply** (`keymap::apply_to`, `Herdr` trait; `Cli` = `HERDR_BIN_PATH`
+    or `herdr`). The target is the RESOLVED link (`~/.config/herdr/config.toml` →
+    `dotfiles/config/herdr/config.toml`, so the generated block lands in that repo file and is
+    versioned there). The candidate is written to a temp file beside the target, `herdr config check`
+    runs on it with `HERDR_CONFIG_PATH=<temp>`, and so does the same check on the current file. Only
+    diagnostic lines the candidate ADDS count (`new_diagnostics`); a `keys.command[N]` that points into
+    the block is rewritten to `keymap.json[i]` (`map_diagnostic`). Any problem → nothing written,
+    `ApplyError::Rejected` with the lines. Clean → rename the temp over the target, then
+    `herdr server reload-config`. Every herdr call has a 5 s timeout (kill on expiry) and runs on a
+    WORKER thread (`spawn_apply`; at most one in flight; its result is collected by a later
+    `poll_keymap_file`). Only the ELECTED session reporter applies (`is_session_reporter`, re-checked
+    at most every 2 s while a change is pending), on a valid file change and on the first poll of
+    each start, so a drifted block is repaired without any change. A missing file applies an empty
+    keymap (its block is removed).
+  - **Validation and feedback** mirror settings.json (`keymap::check_keymap`, `keymap::validate`).
+    An invalid save keeps the last applied keymap in this process, and a fresh process reads
+    `keymap.last-good.json` (written with every valid parse, canonical text), exactly like
+    `settings.last-good.json`. `poll_keymap_file` (both loops, after `poll_settings_file`) toasts
+    `keymap.json not applied` + the error, `keymap.json applied` on recovery (elected only), and
+    `keymap.json: herdr rejected it` / `keymap.json: could not update herdr` on a herdr failure. The
+    Settings page shows the error as a red line and the `Edit keymap.json…` row (`Setting::KeymapJson`)
+    opens the file like the settings.json row. `keymap::COMMANDS`, the file and the block are the
+    only places the sidebar writes keymap state; the apps never hold a second key table.
+  - **Keyboard shortcuts page** (`src/shortcuts_page.rs`, a Settings sub-page opened by the
+    `Keyboard shortcuts…` row right above `Edit keymap.json…`; value `N changed` or `defaults`).
+    It lists each sidebar command with its EFFECTIVE keys (`keymap::effective_keys`: defaults minus
+    `-id` removals, plus its bindings), `•` marks a command that differs from its defaults, and a
+    dim view suffix shows when it is not `Both`. Enter or a double click records the next key and
+    REPLACES the command's keys: `keymap::Edit::Replace` writes the binding plus a `-id` removal for
+    each default it still had. `a` ADDs a key without removals. Backspace/Delete RESETS (drops every
+    `id` and `-id` entry; globals and unknown fields are kept). A key another command answers to in an
+    overlapping view (`keymap::conflicts`; `Both` overlaps everything) waits for Enter to take it over:
+    that command loses its user binding, or gets a `-other` removal when the key was its default. A key
+    herdr also binds globally (`[[keys.command]]` in config.toml) waits for Enter to keep it anyway.
+    In the recorder Enter, Up, Down and Ctrl+C are reserved and Esc cancels. Edits go through
+    `keymap::apply_edit`: under the file's `StateWriteLock` the current text must still validate, or the
+    edit is refused with `keymap.json has errors: fix it first` and the file is not touched. The
+    array is rewritten pretty-printed and atomically, and this process's cache reloads at once (other
+    sidebars see it through the mtime poll). While the Settings page is open both apps SKIP
+    `keymap::translate`, because the page must see the key as pressed. While a key is being recorded
+    the app hands it to the page before its global handlers, since Ctrl+Q / Ctrl+P / Ctrl+1-3 / F9-F12
+    would otherwise close the pane or open Quick Open. herdr takes its own chords before any pane sees
+    them, so the recorder only ever receives keys herdr lets through. The herdr section is read-only
+    (entries inside the generated block are marked `keymap.json`). The rewritten file writes each
+    entry as `key`, `command`, `global` (when present), then its other fields in their file order
+    (`keymap::RawEntry`; serde_json's map is sorted, so entries are not kept as `Value`s). Gap: the
+    footer hotkey hints still show the default keys. The wide layout gives every row one key column
+    (the widest effective key, capped at 16 cells, longer ones elided) so the command id starts at
+    the same x on every row.
+  - **Tests** run with `state::TEST_STATE_DIR` and a fake `Herdr`, never the real binary. The real
+    herdr check ran once against a COPY of the repo config (`e2e_check_copy`, ignored: `HS_KEYMAP_E2E_CONFIG`
+    and `HS_KEYMAP_E2E_JSON`, with a no-op reload): a clean `ctrl+alt+o` entry was written as the block,
+    and `ctrl+q` was rejected as `keymap.json[0]` with the copy unchanged.
 - **⚙ Settings is ONE page, `src/settings_page.rs`, shown as a herdr popup** (user-requested
   2026-10-31; it used to be a ~32-column box drawn inside the sidebar pane, implemented twice, once
-  per view). `SettingsPage` owns the rows, keys, mouse handling and drawing, and writes `state.json`
-  itself. It talks to whoever hosts it only through the `SettingsHost` trait (unified toggle, change
+  per view). `SettingsPage` owns the rows, keys, mouse handling and drawing, and writes the user
+  settings through `state::update_state` (settings.json). It talks to whoever hosts it only through the `SettingsHost` trait (unified toggle, change
   folder, icon theme, `state_changed` side effects, notices, hotkey chips). There are three hosts:
   Explorer, Source Control (both keep it in their overlay slot as `Overlay::Settings(SettingsPage)`)
   and the `--settings-popup` process (`src/settings_popup.rs`, `[[panes]] id = "settings"`,
@@ -1057,7 +1195,7 @@ HACKING.md — budget time for that before promising a patched build.
     `poll_settings_request` runs on EVERY event-loop turn in `main.rs`, not in `tick`: the sidebar
     that opened the popup is unfocused, and SCM's tick work is focus-gated. A request that cannot be
     written keeps the popup open with the error in its footer.
-  - Everything else is plain `state.json`. Running sidebars ADOPT every setting the page can write on
+  - Everything else is plain settings.json (see above). Running sidebars ADOPT every setting the page can write on
     their periodic re-read (Explorer `sync_shared_settings`, SCM `tick`): icons (without writing
     state back), hotkeys, follow cwd (resets the follower), confirm delete, preview placement, auto
     open, terminal height, agent width, hidden files, view mode, plus the older fields. They never
@@ -2080,13 +2218,13 @@ end-to-end twice:
 - **Separated view (`SC | Explorer | diff`): give the Source Control pane MORE width (~44 cols)**
   than the others so the commit message box's right border stays aligned (user-reported). Build
   it by toggling unified off (`s` then Enter on the first Settings row → spawns Explorer+SC),
-  `pane swap` SC into the left slot, set `preview_placement:"pane"` in state.json so `o` opens
+  `pane swap` SC into the left slot, set `preview_placement:"pane"` in settings.json so `o` opens
   the diff INLINE in the same tab (avoids the cross-tab pane-move dance), then `pane swap` so the
   order reads SC | Explorer | diff and set the two splits' ratios.
 - **`frame_all.py` writes straight into `docs/media`, which fails with OSError 22 if a PNG is
   locked** (File Explorer / an open viewer). Frame into a temp dir then `cp -f` over the media
   files (the lock only blocks the open/truncate, not the overwrite of a closed handle).
-- **Global `state.json` is SHARED with the user's real session.** The shoot mutates
+- **Global `settings.json` / `state.json` are SHARED with the user's real session.** The shoot mutates
   `sidebar_width`, `active`, `merged`, `preview_placement`, `search_active` — ALWAYS restore them
   after (`merged=true`, `preview_placement="tab"`, `sidebar_width=48`, `active="explorer"`,
   `search_active=false`) or the user's live sidebar changes under them.
@@ -2178,7 +2316,7 @@ Hard-won capture gotchas:
   release-promo box that otherwise pushes the welcome banner out of short panes.
 - Claude re-renders its banner on RESIZE: a narrow-launch trick does not survive a
   later widen — the email comes back. The pane width at capture time is what counts.
-- The sidebar's `state.json` is **GLOBAL** (%LOCALAPPDATA%\herdr\plugins\herdr-sidebar
+- The sidebar's `settings.json` / `state.json` are **GLOBAL** (%LOCALAPPDATA%\herdr\plugins\herdr-sidebar
   — shared with the user's real session!). The separated shot toggles unified off and
   needs the diff BESIDE the sidebar rather than in its own tab — with preview tabs
   (the trial branch) the diff lives in a separate tab, so compose that shot by
@@ -2289,7 +2427,7 @@ First clean install of both plugins on a Mac (driven over SSH), findings:
   results from an older generation are dropped in `tick`. An old worker keeps running to completion
   (the engine has no cancel flag), so the cost of a superseded query is bounded by one scan.
 - Hidden files: the popup always searches with hidden files shown. The Explorer's `.` toggle is
-  now persisted as `show_hidden` in `state.json` (default true), but the popup does not follow it yet.
+  now persisted as `show_hidden` in `settings.json` (default true), but the popup does not follow it yet.
   `.git` and `.gitignore`d paths are always skipped by the engine.
 - Preview: reads at most 1 MiB (`PREVIEW_MAX_BYTES`); a binary or invalid-UTF-8 file shows a message
   instead. The highlighted window is hit ±300 lines (`preview_window`), highlighted through

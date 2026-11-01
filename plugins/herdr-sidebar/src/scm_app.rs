@@ -2623,6 +2623,24 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return None;
         }
+        // The Settings page's shortcut recorder gets the raw key, ahead of the
+        // global handlers below (Ctrl+Q, Ctrl+P, Ctrl+1/2/3, F9-F12 …).
+        if matches!(&self.overlay, Some(Overlay::Settings(page)) if page.captures_keys()) {
+            self.settings_key(key);
+            return None;
+        }
+        // keymap.json: a remapped key becomes the command's default key, once. Skipped
+        // while the Settings page is open, so its keys (and the recorder) see what was pressed.
+        let in_text = self.overlay.is_some() || matches!(self.focus, Focus::Message);
+        let key = if matches!(self.overlay, Some(Overlay::Settings(_))) {
+            key
+        } else {
+            match herdr_sidebar::keymap::translate(View::SourceControl, key, in_text) {
+                herdr_sidebar::keymap::Translated::Key(key) => key,
+                herdr_sidebar::keymap::Translated::Swallow => return None,
+                herdr_sidebar::keymap::Translated::Unchanged => key,
+            }
+        };
         if key.code == KeyCode::Char('q')
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)

@@ -375,23 +375,44 @@ else
   fi
 fi
 
+# Seed the sidebar's settings.json from the repo defaults (VS Code colours,
+# git footer, click opens in Fresh). The seed is the LEFT operand of the merge,
+# so choices already made in its Settings win. A settings.json that is not a
+# JSON object is the user's half-edited file: it is left alone, and the sidebar
+# reports its error itself.
+seed_sidebar_settings() { # seed live legacy-state
+  local seed=$1 live=$2 legacy=$3
+  if [ -f "$live" ]; then
+    if ! jq -e 'type == "object"' "$live" >/dev/null 2>&1; then
+      info "WARNING: $live is not a JSON object; left untouched (fix it, then rerun install.sh)"
+      return 0
+    fi
+    jq -s '.[0] + .[1]' "$seed" "$live" > "$live.tmp" && mv "$live.tmp" "$live"
+  elif [ -f "$legacy" ] && jq -e 'type == "object"' "$legacy" >/dev/null 2>&1; then
+    # Upgrading from state.json: the user's choices there win over the seed.
+    # The sidebar moves them into settings.json on its next start (its internal
+    # keys stay in state.json).
+    jq -s '.[0] + (.[1] | with_entries(select(.key as $k | ["active", "search_active", "font_prompt"] | contains([$k]) | not)))' \
+      "$seed" "$legacy" > "$live.tmp" && mv "$live.tmp" "$live"
+  else
+    cp "$seed" "$live"
+  fi
+}
+
 # herdr-sidebar defaults: VS Code colours, and a click hands the file to the
 # Fresh pane in the same tab (fresh-open, run inline: no herdr tab opens).
 # Choices already made in its Settings win.
 state_dir="$HOME/.local/state/herdr/plugins/herdr-sidebar"
-state="$state_dir/state.json"
-plan STATE "$state"
+settings="$state_dir/settings.json"
+legacy_state="$state_dir/state.json"
+plan SETTINGS "$settings"
 plan EDITOR-COMMAND "$BIN/fresh-open {file}"
 if dry; then
-  would "seed $state (VS Code colours, git footer, click opens in Fresh)"
+  would "seed $settings (VS Code colours, git footer, click opens in Fresh)"
   would "write $state_dir/editor-command.txt"
 else
   mkdir -p "$state_dir"
-  if [ -f "$state" ]; then
-    jq -s '.[0] + .[1]' "$DOTFILES/herdr-sidebar/state.json" "$state" > "$state.tmp" && mv "$state.tmp" "$state"
-  else
-    cp "$DOTFILES/herdr-sidebar/state.json" "$state"
-  fi
+  seed_sidebar_settings "$DOTFILES/herdr-sidebar/settings.json" "$settings" "$legacy_state"
   printf '%s {file}' "$BIN/fresh-open" > "$state_dir/editor-command.txt"
   info "herdr-sidebar: click opens in Fresh ($(cat "$state_dir/editor-command.txt"))"
 fi

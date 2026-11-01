@@ -114,15 +114,18 @@ while IFS=$'\t' read -r _ kind dest src; do
     GENERATED)
       if [ -s "$dest" ]; then pass "$dest"; else bad "$dest missing or empty (rerun install.sh)"; fi
       ;;
-    STATE)
+    SETTINGS)
+      seed="$DOTFILES/herdr-sidebar/settings.json"
       if [ ! -s "$dest" ]; then
         bad "$dest missing (rerun install.sh)"
+      elif ! jq -e 'type == "object"' "$dest" >/dev/null 2>&1; then
+        bad "$dest is not a JSON object (the sidebar reports it; fix it by hand, install.sh leaves it alone)"
       elif jq -e -s '.[0] as $live | .[1] as $seed | ($seed | keys) - ($live | keys) | length == 0' \
-        "$dest" "$DOTFILES/herdr-sidebar/state.json" >/dev/null 2>&1; then
+        "$dest" "$seed" >/dev/null 2>&1; then
         pass "$dest (every seeded key present)"
       else
         missing=$(jq -r -s '.[0] as $live | .[1] as $seed | ($seed | keys) - ($live | keys) | join(", ")' \
-          "$dest" "$DOTFILES/herdr-sidebar/state.json" 2>/dev/null || true)
+          "$dest" "$seed" 2>/dev/null || true)
         bad "$dest is missing seeded settings: ${missing:-?} (rerun install.sh)"
       fi
       ;;

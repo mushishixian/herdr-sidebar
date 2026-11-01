@@ -3,7 +3,7 @@
 //! The sidebar opens this popup from `⚙` / `s` on Linux and macOS, instead of
 //! drawing the page inside its own narrow pane. The popup is a separate
 //! process, so it cannot reach the sidebar's state. Settings that persist are
-//! written to `state.json` by the page itself, and every running sidebar
+//! written to `settings.json` by the page itself, and every running sidebar
 //! re-reads them. The two actions that act on the sidebar's own process or tab
 //! (unified mode and the change-folder dialog) travel as a request file keyed
 //! by the caller pane; the sidebar claims it on its next loop turn.
@@ -36,7 +36,7 @@ pub const ENTRYPOINT: &str = "settings";
 pub const ENV_UNIFIED_OK: &str = "HERDR_SIDEBAR_SETTINGS_UNIFIED_OK";
 /// The folder name the sidebar is rooted at.
 pub const ENV_ROOT: &str = "HERDR_SIDEBAR_SETTINGS_ROOT";
-/// `"emoji"` or `"material"`: the sidebar's icon theme when state.json has none.
+/// `"emoji"` or `"material"`: the sidebar's icon theme when settings.json has none.
 pub const ENV_ICONS: &str = "HERDR_SIDEBAR_SETTINGS_ICONS";
 /// JSON array of `[key, label]` pairs: the hotkey chips the sidebar shows.
 pub const ENV_HINTS: &str = "HERDR_SIDEBAR_SETTINGS_HINTS";
@@ -268,7 +268,7 @@ impl SettingsHost for PopupHost {
     }
 
     fn state_changed(&mut self, _setting: Setting, _state: &State) {
-        // state.json is already written. Running sidebars re-read it.
+        // settings.json is already written. Running sidebars re-read it.
     }
 
     fn pane_id(&self) -> Option<String> {
@@ -315,6 +315,8 @@ fn draw(frame: &mut Frame, page: &mut SettingsPage, host: &PopupHost) {
 /// The `--settings-popup` process: the Settings page alone, full size, until
 /// the page closes or Ctrl+C.
 pub fn run() -> io::Result<()> {
+    state::migrate_settings();
+    crate::keymap::ensure_files();
     ui::set_color_theme(state::load_state().color_theme);
     let mut host = PopupHost::from_env();
     let mut page = SettingsPage::open();

@@ -4,9 +4,10 @@
 //! host app — the layout, the icon theme, the folder, the unified mode — goes
 //! through [`SettingsHost`], so the page depends on no sidebar app.
 //!
-//! Settings that persist are written to `state.json` here (see
+//! Settings that persist are written to `settings.json` here (see
 //! [`crate::state::update_state`]); the host then gets [`SettingsHost::state_changed`]
-//! with the fresh value and runs whatever side effect that setting needs.
+//! with the fresh value and runs whatever side effect that setting needs. When
+//! settings.json holds errors the write is refused and the page says so.
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
@@ -17,12 +18,15 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::ai_settings::{self, AiPageAction, AiSettingsPage};
 use crate::icons::IconTheme;
+use crate::keymap;
+use crate::settings_file;
+use crate::shortcuts_page::{self, ShortcutsAction, ShortcutsPage};
 use crate::state::{self, State};
 use crate::ui::{
     SelectAll, TextKey, draw_input_dialog, hits, keep_visible_scroll, selection_style,
     set_color_theme, text_input_key, truncate_to, wrap_hints,
 };
-use crate::{actions, pane_layout, updates};
+use crate::{actions, file_popup, pane_layout, updates};
 
 /// One row of the Settings modal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +59,12 @@ pub enum Setting {
     ScmViewMode,
     /// Ask before deleting a file or folder from the Explorer.
     ConfirmDelete,
+    /// Opens settings.json in the editor or preview; the value is "ok" or "error".
+    SettingsJson,
+    /// Opens the Keyboard shortcuts page; the value is the changed-command count.
+    KeyboardShortcuts,
+    /// Opens keymap.json the same way; the value is "ok" or "error".
+    KeymapJson,
     /// Opens the AI commit page; the value is the configured model.
     AiCommit,
     Folder,
@@ -79,7 +89,7 @@ pub trait SettingsHost {
     fn icon_theme(&self) -> IconTheme;
     /// Switch icon themes and remember the choice.
     fn set_icon_theme(&mut self, theme: IconTheme);
-    /// `state.json` was just written for `setting`; `state` is the value
+    /// The user settings were just written for `setting`; `state` is the value
     /// `update_state` returned. The host adopts it and runs the side effect
     /// that setting has in that view.
     fn state_changed(&mut self, setting: Setting, state: &State);
@@ -112,6 +122,8 @@ enum Sub {
         input: String,
         select_all: SelectAll,
     },
+    /// The keyboard shortcuts page, opened from its row.
+    Shortcuts(ShortcutsPage),
 }
 
 /// The ⚙ Settings modal. The host keeps it in its overlay slot and passes
@@ -121,6 +133,8 @@ pub struct SettingsPage {
     scroll: usize,
     /// Outer box from the last draw, for mouse hit-testing.
     rect: Rect,
+    /// Lines above the first row (the settings.json error), from the last draw.
+    lead: usize,
     sub: Sub,
 }
 
@@ -137,6 +151,7 @@ impl SettingsPage {
             selected: 0,
             scroll: 0,
             rect: Rect::default(),
+            lead: 0,
             sub: Sub::Rows,
         }
     }
@@ -302,6 +317,34 @@ impl SettingsPage {
                 true,
             ),
             (
+                Setting::SettingsJson,
+                "Edit settings.json…",
+                if settings_file::settings_error().is_some() {
+                    "error"
+                } else {
+                    "ok"
+                }
+                .to_string(),
+                true,
+            ),
+            (
+                Setting::KeyboardShortcuts,
+                "Keyboard shortcuts…",
+                shortcuts_page::value(),
+                true,
+            ),
+            (
+                Setting::KeymapJson,
+                "Edit keymap.json…",
+                if keymap::keymap_error().is_some() {
+                    "error"
+                } else {
+                    "ok"
+                }
+                .to_string(),
+                true,
+            ),
+            (
                 Setting::AiCommit,
                 "AI commit…",
                 ai_settings::model_value(),
@@ -318,6 +361,10 @@ impl SettingsPage {
             Sub::Ai(page) => {
                 let action = page.key(key);
                 return self.ai_done(action, host);
+            }
+            Sub::Shortcuts(page) => {
+                let action = page.key(key);
+                return self.shortcuts_done(action, host);
             }
             Sub::Editor { .. } => return self.editor_key(key, host),
             Sub::Rows => {}
@@ -348,6 +395,10 @@ impl SettingsPage {
                 let action = page.mouse(mouse);
                 return self.ai_done(action, host);
             }
+            Sub::Shortcuts(page) => {
+                let action = page.mouse(mouse);
+                return self.shortcuts_done(action, host);
+            }
             // The editor dialog is keyboard-driven; clicks do nothing.
             Sub::Editor { .. } => return Outcome::Stay,
             Sub::Rows => {}
@@ -355,10 +406,12 @@ impl SettingsPage {
         let row_count = self.rows(host).len();
         let rect = self.rect;
         let scroll = self.scroll;
+        let lead = self.lead;
         // Rows start just inside the top border (the title renders ON the
-        // border, not on its own line).
+        // border, not on its own line), after the error lines when there are any.
         let row_at = |row: u16, col: u16| -> Option<usize> {
-            let index = usize::from(row.saturating_sub(rect.y + 1)) + scroll;
+            let line = usize::from(row.saturating_sub(rect.y + 1)) + scroll;
+            let index = line.checked_sub(lead)?;
             (col > rect.x
                 && col < rect.x + rect.width.saturating_sub(1)
                 && row > rect.y
@@ -392,6 +445,10 @@ impl SettingsPage {
             page.draw(frame);
             return;
         }
+        if let Sub::Shortcuts(page) = &mut self.sub {
+            page.draw(frame, area);
+            return;
+        }
         let rows = self.rows(host);
         let desired_width = rows
             .iter()
@@ -406,10 +463,30 @@ impl SettingsPage {
         };
         // The hotkey reference lives here; the footer chips are opt-in.
         let hint_lines = wrap_hints(&host.hints(), width.saturating_sub(2), 0);
+        // A settings.json error is shown in red above the rows, wrapped to the box.
+        let inner_w = usize::from(width.saturating_sub(2)).max(1);
+        // Indented like the rows (a leading and a trailing space).
+        // keymap.json errors already name the file (`keymap.json[2]: …`).
+        let error_messages = [
+            settings_file::settings_error().map(|error| format!("settings.json: {error}")),
+            keymap::keymap_error(),
+        ];
+        let error_lines: Vec<String> = error_messages
+            .into_iter()
+            .flatten()
+            .flat_map(|message| {
+                wrap_chars(&message, inner_w.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|line| format!(" {line} "))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        self.lead = error_lines.len();
         let height = if fill {
             area.height
         } else {
-            (rows.len() as u16 + 5 + hint_lines.len() as u16).min(area.height)
+            (error_lines.len() as u16 + rows.len() as u16 + 5 + hint_lines.len() as u16)
+                .min(area.height)
         };
         let popup = Rect::new(
             area.x + (area.width.saturating_sub(width)) / 2,
@@ -419,11 +496,20 @@ impl SettingsPage {
         );
         self.rect = popup;
         let inner_height = usize::from(height.saturating_sub(2));
-        let content_height = rows.len() + 3 + hint_lines.len();
-        self.scroll = keep_visible_scroll(self.selected, inner_height, content_height);
+        let content_height = error_lines.len() + rows.len() + 3 + hint_lines.len();
+        self.scroll = keep_visible_scroll(
+            self.selected + error_lines.len(),
+            inner_height,
+            content_height,
+        );
 
-        let inner_w = usize::from(width.saturating_sub(2));
         let mut lines: Vec<Line> = Vec::new();
+        for line in error_lines {
+            lines.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(ratatui::style::Color::Red),
+            )));
+        }
         for (i, (_, label, value, enabled)) in rows.iter().enumerate() {
             let pad = inner_w.saturating_sub(label.chars().count() + value.chars().count() + 2);
             let text = format!(" {label}{}{value} ", " ".repeat(pad.max(1)));
@@ -469,6 +555,31 @@ impl SettingsPage {
                     .rows(host)
                     .iter()
                     .position(|row| row.0 == Setting::AiCommit)
+                    .unwrap_or(0);
+                self.scroll = 0;
+                self.sub = Sub::Rows;
+                Outcome::Stay
+            }
+        }
+    }
+
+    /// Whether the keyboard shortcuts page is recording a key. The host then
+    /// hands the next key to the page before its own global handlers run.
+    pub fn captures_keys(&self) -> bool {
+        matches!(&self.sub, Sub::Shortcuts(page) if page.captures_keys())
+    }
+
+    /// The shortcuts page asked for something: Back returns to the rows with
+    /// the Keyboard shortcuts row selected, Close dismisses the whole page.
+    fn shortcuts_done(&mut self, action: ShortcutsAction, host: &dyn SettingsHost) -> Outcome {
+        match action {
+            ShortcutsAction::None => Outcome::Stay,
+            ShortcutsAction::Close => Outcome::Close,
+            ShortcutsAction::Back => {
+                self.selected = self
+                    .rows(host)
+                    .iter()
+                    .position(|row| row.0 == Setting::KeyboardShortcuts)
                     .unwrap_or(0);
                 self.scroll = 0;
                 self.sub = Sub::Rows;
@@ -547,11 +658,15 @@ impl SettingsPage {
                 host.change_folder();
                 return Outcome::Close;
             }
-            Setting::IconTheme => host.set_icon_theme(host.icon_theme().toggled()),
+            Setting::IconTheme => {
+                host.set_icon_theme(host.icon_theme().toggled());
+                warn_if_blocked(host);
+            }
             Setting::ColorTheme => {
                 let state = state::update_state(|s| s.color_theme = s.color_theme.next());
                 set_color_theme(state.color_theme);
                 host.state_changed(setting, &state);
+                warn_if_blocked(host);
             }
             Setting::SidebarWidth => write(host, setting, |s| {
                 s.sidebar_width = state::step_sidebar_width(s.sidebar_width, true);
@@ -562,6 +677,45 @@ impl SettingsPage {
             Setting::PreviewPlacement => write(host, setting, |s| {
                 s.preview_placement = s.preview_placement.other();
             }),
+            Setting::SettingsJson => {
+                let (Some(path), Some(root)) = (state::settings_path(), state::state_dir()) else {
+                    host.notice("settings.json: no state directory".into(), true);
+                    return Outcome::Stay;
+                };
+                // The file is created by the first save or the startup migration;
+                // a user who opens it before either gets the defaults first.
+                if !path.exists() {
+                    state::migrate_settings();
+                }
+                match file_popup::open_file_in_workspace(
+                    host.pane_id().as_deref(),
+                    &root,
+                    &path,
+                    None,
+                ) {
+                    Ok(()) => return Outcome::Close,
+                    Err(error) => host.notice(error, true),
+                }
+            }
+            Setting::KeymapJson => {
+                let (Some(path), Some(root)) = (keymap::keymap_path(), state::state_dir()) else {
+                    host.notice("keymap.json: no state directory".into(), true);
+                    return Outcome::Stay;
+                };
+                // The startup pass creates it; a user who opens it first gets `[]`.
+                if !path.exists() {
+                    keymap::ensure_files();
+                }
+                match file_popup::open_file_in_workspace(
+                    host.pane_id().as_deref(),
+                    &root,
+                    &path,
+                    None,
+                ) {
+                    Ok(()) => return Outcome::Close,
+                    Err(error) => host.notice(error, true),
+                }
+            }
             Setting::CustomEditorCommand => {
                 self.sub = Sub::Editor {
                     input: actions::configured_editor().unwrap_or_default(),
@@ -589,15 +743,37 @@ impl SettingsPage {
                 write(host, setting, |s| s.confirm_delete = !s.confirm_delete)
             }
             Setting::AiCommit => self.sub = Sub::Ai(AiSettingsPage::open()),
+            Setting::KeyboardShortcuts => self.sub = Sub::Shortcuts(ShortcutsPage::open()),
         }
         Outcome::Stay
     }
 }
 
-/// Persist one change to `state.json` and tell the host what it became.
+/// Persist one change to `settings.json` and tell the host what it became.
 fn write(host: &mut dyn SettingsHost, setting: Setting, update: impl FnOnce(&mut State)) {
     let state = state::update_state(update);
     host.state_changed(setting, &state);
+    warn_if_blocked(host);
+}
+
+/// The last save could not reach settings.json because it holds errors. The
+/// change is shown but not kept, so say so.
+fn warn_if_blocked(host: &mut dyn SettingsHost) {
+    if state::settings_write_blocked() {
+        host.notice(
+            "settings.json has errors: fix it first; change not saved".into(),
+            true,
+        );
+    }
+}
+
+/// `text` split into rows of at most `width` characters.
+fn wrap_chars(text: &str, width: usize) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    chars
+        .chunks(width.max(1))
+        .map(|chunk| chunk.iter().collect())
+        .collect()
 }
 
 /// The tab of `pane_id` when the page runs inside that pane (the sidebar
@@ -647,6 +823,7 @@ fn adjust(setting: Setting, wider: bool, host: &mut dyn SettingsHost) {
                     false,
                 );
             }
+            warn_if_blocked(host);
         }
         Setting::AgentWidth => {
             let seed = match state::load_state().agent_width {
@@ -666,6 +843,7 @@ fn adjust(setting: Setting, wider: bool, host: &mut dyn SettingsHost) {
                 // Keep the stored value: it still applies to tabs built later.
                 host.notice("Agent width: this tab has no Agent column".into(), false);
             }
+            warn_if_blocked(host);
         }
         _ => {}
     }
@@ -794,6 +972,9 @@ mod tests {
             Setting::GitFooter,
             Setting::ScmViewMode,
             Setting::ConfirmDelete,
+            Setting::SettingsJson,
+            Setting::KeyboardShortcuts,
+            Setting::KeymapJson,
             Setting::AiCommit,
             Setting::Folder,
         ];
@@ -808,7 +989,7 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(page.key(key(KeyCode::Down), &mut host), Outcome::Stay);
         }
-        assert_eq!(page.selected, 24);
+        assert_eq!(page.selected, page.rows(&host).len() - 1);
         for _ in 0..100 {
             page.key(key(KeyCode::Up), &mut host);
         }
@@ -907,6 +1088,20 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_shortcuts_back_returns_to_its_row() {
+        isolated_state();
+        let mut host = FakeHost::new();
+        let mut page = SettingsPage::new();
+        select(&mut page, &mut host, Setting::KeyboardShortcuts);
+        assert_eq!(page.key(key(KeyCode::Enter), &mut host), Outcome::Stay);
+        assert!(matches!(page.sub, Sub::Shortcuts(_)));
+        assert!(!page.captures_keys());
+        assert_eq!(page.key(key(KeyCode::Esc), &mut host), Outcome::Stay);
+        assert!(matches!(page.sub, Sub::Rows));
+        assert_eq!(page.selected, index_of(&page, &host, Setting::KeyboardShortcuts));
+    }
+
+    #[test]
     fn custom_editor_saves_on_enter_and_returns_to_the_rows() {
         isolated_state();
         let mut host = FakeHost::new();
@@ -945,6 +1140,65 @@ mod tests {
         assert_eq!(page.key(key(KeyCode::Esc), &mut host), Outcome::Stay);
         assert!(matches!(page.sub, Sub::Rows));
         assert_eq!(state::load_editor_command(), None);
+    }
+
+    /// A save while settings.json is broken is refused, and the page says so.
+    #[test]
+    fn a_change_while_settings_json_is_broken_says_it_was_not_saved() {
+        isolated_state();
+        let mut host = FakeHost::new();
+        let mut page = SettingsPage::new();
+        let path = state::settings_path().expect("settings path");
+        std::fs::write(&path, "{ broken").unwrap();
+        select(&mut page, &mut host, Setting::DockRight);
+        page.key(key(KeyCode::Enter), &mut host);
+        assert_eq!(
+            host.notices.last(),
+            Some(&(
+                "settings.json has errors: fix it first; change not saved".to_string(),
+                true
+            ))
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
+    }
+
+    /// The whole rendered screen as one string, row by row.
+    fn screen(page: &mut SettingsPage, host: &FakeHost) -> String {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 30))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                page.draw(frame, area, false, host);
+            })
+            .expect("draw");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    /// A broken settings.json is shown above the rows, and the page's own row
+    /// reads `error`; a valid file shows no error line.
+    #[test]
+    fn a_broken_settings_file_is_shown_above_the_rows() {
+        isolated_state();
+        let host = FakeHost::new();
+        let mut page = SettingsPage::new();
+        let path = state::settings_path().expect("settings path");
+        std::fs::write(&path, "{ \"colors\" \"light\"").unwrap();
+        let text = screen(&mut page, &host);
+        assert!(text.contains("settings.json: line 1"), "{text}");
+        assert!(text.contains("error"), "{text}");
+        assert!(page.lead >= 1, "the error lines push the rows down");
+
+        std::fs::write(&path, "{}").unwrap();
+        let text = screen(&mut page, &host);
+        assert!(!text.contains("settings.json: line"), "{text}");
+        assert_eq!(page.lead, 0);
     }
 
     #[test]

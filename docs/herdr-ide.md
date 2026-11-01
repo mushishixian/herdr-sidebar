@@ -37,7 +37,7 @@ brings it back under Fresh; the layout itself never parks it.
 | herdr config | `dotfiles/config/herdr/config.toml` → `~/.config/herdr/config.toml` | symlink |
 | Fresh config | `dotfiles/config/fresh/config.json` → `~/.config/fresh/config.json` | symlink |
 | Fresh plugins | `dotfiles/config/fresh/plugins/*.ts` → `~/.config/fresh/plugins/` | one symlink per file |
-| Sidebar settings | `~/.local/state/herdr/plugins/herdr-sidebar/state.json` | seeded from `dotfiles/herdr-sidebar/state.json` |
+| Sidebar settings | `~/.local/state/herdr/plugins/herdr-sidebar/settings.json` | seeded from `dotfiles/herdr-sidebar/settings.json` (existing values win; an invalid file is left alone) |
 | AI commit provider | `~/.local/state/herdr/plugins/herdr-sidebar/ai.json` (0600) | set in the sidebar: ⚙ Settings → AI commit… |
 | One-shot installer | `docs/install-herdr-ide.sh` (this folder) | wraps all of the above |
 
@@ -227,6 +227,14 @@ moves the copy aside.
 The prefix-mode extras come from the same `[keys]` table: `ctrl+f12` (session outline /
 goto), `ctrl+alt+t` (next agent), `ctrl+shift+q` / `ctrl+alt+shift+q` (detach),
 `ctrl+alt+shift+d` (close pane — deliberately three modifiers, it kills a running agent).
+
+`keymap.json` (see the root `AGENTS.md`) adds global chords too: its `"global": true` entries are
+generated into ONE block at the END of `config.toml`, between the markers `# >>> herdr-sidebar
+keymap.json (generated; edit keymap.json, not this block) >>>` and `# <<< herdr-sidebar keymap.json
+<<<`. Edit `keymap.json` (`<state dir>/keymap.json`, or ⚙ Settings → Edit keymap.json…), never that
+block: the sidebar rewrites it, and a hand edit is replaced on the next apply. The apply writes the
+symlink TARGET (the repo file, so the block shows in git), runs `herdr config check` on the candidate
+first, and refuses a candidate that adds a diagnostic (the toast names the `keymap.json[i]` entry).
 
 `dotfiles/config/herdr/config.toml` and `dotfiles/config/herdr/scripts/` are both symlinked
 into `~/.config/herdr/` by the installer, so a keymap or script edit belongs in this repo:
@@ -628,8 +636,8 @@ Two things that surprise people:
   the order is: the project's remembered ratio in `sizes.json` (your own drag) wins, then this
   setting, then the historical 70% editor share. `lib.sh`'s `editor_split_ratio` computes it as
   `1 - rows / column height`, clamped to herdr's 0.1..0.9, and reads the setting from
-  `~/.local/state/herdr/plugins/herdr-sidebar/state.json` (`terminal_height`); it never writes
-  there.
+  `~/.local/state/herdr/plugins/herdr-sidebar/settings.json` (`terminal_height`; `state.json` only
+  answers for a key `settings.json` lacks); it never writes there.
 - **Agent width** (the rightmost `Agent` column) has the same kind of default: the ⚙ Settings row
   `Agent width`, one below `Terminal height`. It is measured in COLUMNS (24–320, `←`/`→` in 4-column
   steps; `⏎` resets it to `auto`). Only the width is configurable — the height is whatever the tab
@@ -794,7 +802,7 @@ summarised for the AI").
 While it runs, the ✓ Commit button shows a braille spinner with "AI generating…" (then "Committing…")
 and a sweeping highlight band. Clicking ✓ Commit during that just says "AI commit in progress…".
 
-Sidebar defaults seeded by the installer (`dotfiles/herdr-sidebar/state.json`):
+Sidebar defaults seeded by the installer (`dotfiles/herdr-sidebar/settings.json`):
 VS Code colours, git footer, auto-open, follow the neighbour pane's folder,
 preview in a pane (a git-change diff opens beside the sidebar inside the IDE tab, so the Agent column stays visible; Esc/q closes it), editor on click, editor inline.
 An inline editor launch is fire-and-forget (`fresh-open` runs with null stdio), so the sidebar
@@ -965,7 +973,7 @@ link, tool, plugin, integration or generated file to `install.sh` is what makes 
 verified. It checks, in order: every symlink (a plain copy counts as drift — a `git
 pull` would not reach it), tools on PATH (herdr/fresh/zsh/git/jq are failures, the rest
 warnings), plugin registrations, herdr agent-state integrations, the global gitconfig
-include, the seeded sidebar `state.json` keys, and the keymap itself — binding count,
+include, the seeded sidebar `settings.json` keys, and the keymap itself — binding count,
 `herdr config check`, and that **every script the keymap runs exists in
 `dotfiles/config/herdr/scripts/`**. `docs/install-herdr-ide.sh` ends with this same gate,
 so an install cannot report success on a half-configured machine.

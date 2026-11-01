@@ -252,6 +252,9 @@ fn main() -> std::io::Result<()> {
     } else {
         None
     };
+    // Once per start: move user settings out of state.json into settings.json.
+    state::migrate_settings();
+    herdr_sidebar::keymap::ensure_files();
     let persisted = state::load_state();
     let initial_activity = std::env::var(state::INITIAL_ACTIVITY_ENV)
         .ok()
@@ -628,6 +631,8 @@ fn run_explorer(
         app.flush_pending_width();
         app.poll_picker();
         app.poll_settings_request();
+        herdr_sidebar::settings_file::poll_settings_file();
+        herdr_sidebar::keymap::poll_keymap_file();
         app.tick();
         app.dismiss_popups_if_unfocused();
         roots.record(&app.root_path());
@@ -691,6 +696,8 @@ fn run_scm(
         app.flush_pending_width();
         app.poll_picker();
         app.poll_settings_request();
+        herdr_sidebar::settings_file::poll_settings_file();
+        herdr_sidebar::keymap::poll_keymap_file();
         app.dismiss_popups_if_unfocused();
         app.poll_branch();
         if last_tick.elapsed() >= interval {
