@@ -638,6 +638,13 @@ Agent status & the spaces rail (verified live, herdr 0.9.5):
   state dot (verified live: 9 agent panes → 9 bare `○`). The floor is one row per detected
   agent pane — so give it content (`rows = [["state_icon", "agent"]]`) and reclaim space by
   collapsing the rail (`prefix+b`, `sidebar_collapsed_mode`, `sidebar_start_collapsed`).
+  Re-checked against herdr master on 2026-11-02, when 0.9.5 was still the latest release: there is still
+  no switch. `render_agent_panel` (`src/client/shell/agent_sidebar.rs`) always draws the
+  `─` rule plus ` agents  grouped|priority`, and `AgentsSidebarConfig` has only
+  `rows`/`rows_by_agent`/`row_gap`. The one lever is the spaces/agents DIVIDER, which you drag with the
+  mouse. `sidebar_section_heights` (`src/ui/sidebar.rs`) clamps the ratio to 0.1–0.9 and leaves
+  the agents section at least 3 rows. The client saves a dragged ratio as `sidebar_section_split` in its
+  chrome preferences, so it survives a restart. There is no config.toml key for it.
   Workspace-name styling is the same story: only `[ui.sidebar.spaces] rows` inline styles
   (`{ token = "workspace", bold = true, fg = "#RRGGBB" }`) reach it; a plugin can only report
   TEXT tokens.
