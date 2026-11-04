@@ -115,7 +115,17 @@ executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launch
   plus `reasoning_effort` for a level; any level raises max_tokens to 4000 (reasoning eats the budget).
   Verified live on DeepSeek `deepseek-flash`: default (thinking unset) used 88 reasoning tokens for one
   line; `disabled` used 0 and 12 tokens total. If a strict provider answers HTTP 400/422 naming the
-  fields (`rejects_thinking_fields`), the request is retried ONCE without them.
+   fields (`rejects_thinking_fields`), the request is retried ONCE without them.
+   Command Code's provider endpoint (`api.commandcode.ai/provider/v1`, an OpenAI-compatible
+   gateway some users point the AI commit at) authenticates with the CURRENT key in the user's
+   `~/.commandcode/auth.json` (`apiKey`, `Bearer`); a stale/rotated `user_…` key answers
+   `401 {"error":{"message":"Invalid 'Authorization' header or token."}}` while URL, model and the
+   thinking fields are all accepted — diagnose an AI-commit failure there with a plain curl before
+   touching code. Models served through it can IGNORE `thinking:{"type":"disabled"}` and reason
+   anyway (`deepseek/deepseek-v4-flash`: ~26 reasoning tokens to say OK), which is why the
+   connection test spends `TEST_MAX_TOKENS` (512), not a token or two — a 16-token test read
+   "the model returned no text" with a perfectly good key. The commit budget stays 500: turning
+   Thinking on raises it to 4000 when a model reasons harder.
   Verified headless against a mock server (scratch repo, key containing `"` and `\`, a
   data-wrapped reply with a think block and a fence → `feat(app): add greeting`, HEAD untouched;
   a wrong key → `API key rejected: Invalid API key`) with

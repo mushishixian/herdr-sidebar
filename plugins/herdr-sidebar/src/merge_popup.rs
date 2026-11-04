@@ -935,10 +935,8 @@ impl App {
             (Confirm::Leave(Then::Close), Answer::Yes) if self.ready_to_finish() => {
                 self.complete_file(true);
             }
-            (Confirm::Leave(then), Answer::Yes) => {
-                if self.save() {
-                    self.perform(then);
-                }
+            (Confirm::Leave(then), Answer::Yes) if self.save() => {
+                self.perform(then);
             }
             (Confirm::Leave(then), Answer::No) => self.perform(then),
             (Confirm::Reload, Answer::Yes) => self.reopen(),
@@ -1873,6 +1871,8 @@ mod tests {
                 "user.name=t",
                 "-c",
                 "commit.gpgsign=false",
+                "-c",
+                "core.autocrlf=false",
             ])
             .args(args)
             .output()
@@ -1912,6 +1912,8 @@ mod tests {
             .args([
                 "-c",
                 "merge.conflictStyle=merge",
+                "-c",
+                "core.autocrlf=false",
                 "merge",
                 "-q",
                 "--no-edit",

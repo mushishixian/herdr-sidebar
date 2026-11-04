@@ -30,6 +30,11 @@ const COMMIT_MAX_TOKENS: u32 = 500;
 /// against it, and a tiny budget returns empty content.
 const THINKING_MAX_TOKENS: u32 = 4000;
 
+/// Output budget for the connection test. Reasoning models may ignore
+/// `thinking: disabled` and spend a tiny budget before answering anything,
+/// which reads as an empty reply, so the test allows room for both.
+const TEST_MAX_TOKENS: u32 = 512;
+
 /// How long the connection test may take.
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -49,7 +54,7 @@ pub fn test_connection(config: &AiConfig) -> Result<String, String> {
         config,
         None,
         "Reply with the single word OK.",
-        16,
+        TEST_MAX_TOKENS,
         TEST_TIMEOUT,
     )?;
     if reply.trim().is_empty() {
