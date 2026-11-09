@@ -490,7 +490,10 @@ impl PiState {
         if !crate::session_reporter::is_session_reporter() {
             return;
         }
-        let Ok(json) = crate::ipc::call_text("pane.list", serde_json::json!({})) else {
+        // The elected agent_tokens beat fetched and published the session's
+        // pane.list a moment ago (same heartbeat); reuse it instead of a
+        // second full fetch.
+        let Some(json) = crate::session_reporter::observer_pane_list() else {
             return;
         };
         let panes = pi_panes(&json);

@@ -401,6 +401,15 @@ pub struct App {
     search_scroll: usize,
     search_snap: bool,
     pending_unified_width: Option<(u16, std::time::Instant)>,
+    /// Cached focus state (see `focus_state_now`): probed on the ensure hook's
+    /// focus stamp, the 5 s fallback, or the first call — not every idle tick.
+    focus_seen: u64,
+    focus_probed: Option<std::time::Instant>,
+    focus_cached: bool,
+    /// Snapshot stamp already processed by [`Self::poll_cwd_follow`].
+    cwd_follow_stamp: u64,
+    /// Paces the direct-fetch fallback of [`Self::poll_cwd_follow`].
+    cwd_follow_fallback: Option<std::time::Instant>,
 }
 
 /// How long two clicks on the same row still count as a double click.
@@ -538,6 +547,11 @@ impl App {
             search_scroll: 0,
             search_snap: false,
             pending_unified_width: None,
+            focus_seen: 0,
+            focus_probed: None,
+            focus_cached: true,
+            cwd_follow_stamp: 0,
+            cwd_follow_fallback: None,
         };
         app.apply_identity();
         app.request_decorations(true);
@@ -564,6 +578,7 @@ impl App {
         self.start_content_search_if_due();
         self.collect_fs_watch();
         self.collect_decorations();
+        self.poll_cwd_follow();
         if self.last_deco.elapsed() < DECO_REFRESH {
             return;
         }
@@ -804,7 +819,7 @@ impl App {
             self.deco_backoff_until.clear();
             return;
         }
-        if self.deco_rx.is_some() || (!force && !self.pane_is_focused()) {
+        if self.deco_rx.is_some() || (!force && !self.focus_state_now()) {
             return;
         }
         let ignored_backoffs = self.deco_backoff_until.clone();
@@ -960,6 +975,23 @@ impl App {
         ipc::pane_focused(pane_id).unwrap_or(false)
     }
 
+    /// The pane's focus, cached: a live `pane.get` runs only when the ensure
+    /// hook's focus stamp moved (see [`herdr_sidebar::focus_signal`]), on the
+    /// 5 s fallback, or on the first call — the decoration poll used to ask
+    /// herdr every 2 s in every sidebar of the session.
+    fn focus_state_now(&mut self) -> bool {
+        let stamp = herdr_sidebar::focus_signal::changed_since(self.focus_seen);
+        if herdr_sidebar::focus_signal::probe_due(
+            &mut self.focus_seen,
+            &mut self.focus_probed,
+            stamp,
+            std::time::Instant::now(),
+        ) {
+            self.focus_cached = self.pane_is_focused();
+        }
+        self.focus_cached
+    }
+
     /// Rediscover the repositories under the current root — after a re-root,
     /// or an explicit refresh that may have added or removed one.
     fn rediscover_repos(&mut self) {
@@ -998,7 +1030,6 @@ impl App {
         // pi's hook goes idle while a background subagent still runs: report
         // `working` for it from the persisted transcript.
         self.pi_state.report_if_due();
-        self.follow_sibling_cwd();
     }
 
     fn poll_unified_close(&mut self) -> bool {
@@ -1031,18 +1062,51 @@ impl App {
         false
     }
 
-    fn follow_sibling_cwd(&mut self) {
+    /// Keep the tree on the folder a sibling shell `cd`-ed into.
+    ///
+    /// Sampling is paced by the session's SHARED snapshot (the elected
+    /// reporter's `pane.list` beat): this runs on every loop turn but only
+    /// acts when the snapshot's stamp advances — one small file read per
+    /// turn, no request — so a `cd` lands within one leader beat plus one
+    /// loop turn, the same latency the old per-sidebar fetch had. Without a
+    /// fresh snapshot (no elected leader yet, or it died) a direct fetch
+    /// paced at 5 s keeps following.
+    fn poll_cwd_follow(&mut self) {
         if !self.sidebar_state.follow_cwd || self.overlay.is_some() || self.picking.is_some() {
             return;
         }
         let Some(ctl) = &self.pane_ctl else { return };
-        let Ok(panes) = herdr_sidebar::ipc::call_text("pane.list", serde_json::json!({})) else {
+        let pane_id = ctl.pane_id.clone();
+        let Some(sample) = herdr_sidebar::session_reporter::observer_sample() else {
             return;
         };
-        let target =
-            self.cwd_follower
-                .borrow_mut()
-                .next_cwd(&panes, &ctl.pane_id, &self.tree.root_path());
+        if sample.shared {
+            // Pace by the leader's beat: act once per snapshot advance.
+            if sample.stamp <= self.cwd_follow_stamp {
+                return;
+            }
+            self.cwd_follow_stamp = sample.stamp;
+            self.cwd_follow_fallback = None;
+            self.apply_cwd_target(&sample.body, &pane_id);
+        } else {
+            // No fresh snapshot (no elected leader yet, or it died): fetch
+            // directly, at most every 5 s — the pre-snapshot behavior.
+            if self
+                .cwd_follow_fallback
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5))
+            {
+                return;
+            }
+            self.cwd_follow_fallback = Some(std::time::Instant::now());
+            self.apply_cwd_target(&sample.body, &pane_id);
+        }
+    }
+
+    fn apply_cwd_target(&mut self, panes: &str, pane_id: &str) {
+        let target = self
+            .cwd_follower
+            .borrow_mut()
+            .next_cwd(panes, pane_id, &self.tree.root_path());
         if let Some(target) = target
             && Path::new(&target) != self.tree.root_path()
         {

@@ -248,6 +248,10 @@ impl AgentTokens {
         let Ok(json) = crate::ipc::call_text("pane.list", serde_json::json!({})) else {
             return;
         };
+        // The leader's fetch IS the session's snapshot: the cwd follower, pi
+        // state and tab titles read this reply instead of fetching their own
+        // (see `session_reporter::observer_pane_list`).
+        crate::session_reporter::publish_pane_list(&json);
         let agents = describe_agents(&json);
         let pads = describe_pads(&json);
         for workspace_id in workspace_ids(&json) {

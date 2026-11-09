@@ -846,9 +846,11 @@ HACKING.md — budget time for that before promising a patched build.
   deliberately has NO fallback to `cwd`: an absent live value is safer than silently
   re-rooting to a stale directory.
 - "Follow pane folder" is persisted as `follow_cwd` in `settings.json` and defaults on,
-  including for state files written before the field existed. Both views sample on the
-  existing ~5s heartbeat and share one process-local `CwdFollower`, so precedence survives
-  an app rebuild and unified-view switch.
+  including for state files written before the field existed. Both views sample the
+  session's shared `pane.list` snapshot the moment it advances (`poll_cwd_follow` on the
+  loop tick — one leader beat plus one loop turn; direct-fetch fallback at 5 s when no
+  leader exists, see Idle CPU) and share one process-local `CwdFollower`, so precedence
+  survives an app rebuild and unified-view switch.
 - The follower re-roots ONLY when an already-observed eligible sibling's `foreground_cwd`
   CHANGES. The most recent change wins; among simultaneous changes the focused pane, then the
   previously followed one, then the lexical pane id. Candidate lists are sorted before selection;
@@ -887,6 +889,50 @@ HACKING.md — budget time for that before promising a patched build.
     view switch. A dead leader's lock is freed by the kernel, and the next sidebar's beat
     takes over. `grep ":$(stat -c %i <lock>) " /proc/locks` shows the holder.
   - Result: the sidebars' share of herdr CPU went from ~18 to ~7 ticks per 8 s.
+- **2026-11-09 refresh (16 workspaces, ~55 panes, 18 sidebar panes, herdr 0.9.5)**: the
+  relationship still holds at scale, and an IPC-reduction pass (next bullet) halved the
+  fleet's share. Before: server = 67 ticks/6 s with the sidebars running vs 17 frozen.
+  After: 57 ticks/8 s running vs 22–24 frozen — the fleet-attributable share went from
+  ~67 to ~34 ticks/8 s (server ~11% → ~7% of one core). The residual is the ELECTED
+  reporter's beat (1 `pane.list` + 16 `workspace.report_metadata` + 1 `tab.list` per 5 s,
+  ~20 ms of server time): `workspace.report_metadata` takes ONE workspace id (checked
+  against herdr 0.9.5's `api schema`), and the 20 s TTL requires re-reporting unchanged
+  values, so the beat is the architecture's floor — raising the beat to 8 s would trade
+  `$agents`/agent-toast latency for ~2% and was deliberately not taken. herdr protocol 22
+  exposes `events.subscribe`, the future path if this ever needs to go lower.
+  Measurement gotchas: `pgrep -f 'herdr-sidebar.*target/release'` matches the MEASURING
+  script's own `bash -c` command line and SIGSTOPs it mid-run — select pids by
+  `ps -eo pid,comm`; pair STOP/CONT with a trap; this kernel has NO `/proc/<pid>/io`
+  (reads return nothing — an early "sidebars write 0 bytes" conclusion was an artifact)
+  and `ptrace_scope=1` blocks strace, so request mix is derived from code, not traced.
+  Concurrent agent-pane PTY traffic inflates "running" windows by tens of ticks
+  non-deterministically (one 8 s window read 71, the paired rerun 57) — trust the FROZEN
+  floor as the stable reference and take graduated freezes (0/1/9/18 running) when
+  attributing.
+- **The 2026-11-09 IPC reduction: focus probes are event-driven and `pane.list` is
+  published once per beat.** Two mechanisms, both invisible when they fail:
+  - **Focus stamps (`src/focus_signal.rs`, written by `ensure::run` FIRST — before the
+    auto-open gate and the launcher lock, so even a hook invocation that skips its
+    launcher work still reports).** Every hook event stamps
+    `<rundir dir("focus")>/focus-events-<socket hash>.stamp` (unix ms, tmp+rename). The
+    apps' `focus_state_now()` probes `pane.get` only when that stamp moves past the value
+    they last consumed, on a 5 s fallback, or on the first call — the SCM tick used to
+    ask every 400 ms and the Explorer every 2 s in EVERY sidebar (~27 probes/s fleet-wide,
+    the largest single item). Two focus events coalescing into one stamp are harmless:
+    the probe asks herdr for the LIVE state. `dismiss_popups_if_unfocused` and every
+    launch decision keep direct probes/fetches.
+  - **Shared `pane.list` snapshot (`session_reporter::publish_pane_list` /
+    `observer_sample`)**: the elected reporter publishes its beat's reply to
+    `<reporters>/pane-list-<socket hash>.json` (first line = fetch unix ms, then the
+    reply verbatim; tmp+rename, single writer). `pi_state` and `tab_title::sync_if_due`
+    read it instead of each fetching their own (the leader used to fetch pane.list twice
+    per beat plus once more in tab_title). The cwd follower samples it the moment the
+    stamp ADVANCES (`poll_cwd_follow` on the loop tick, one small file read per turn, no
+    request) — pacing by the follower's own 5 s heartbeat ON TOP of the leader's beat
+    pushed follow latency to ~10 s and was caught live; now it is one leader beat + one
+    loop turn, with a direct-fetch fallback paced at 5 s when no fresh snapshot exists.
+    `ObserverSample.shared` tells the two cases apart. Correctness-critical paths
+    (ensure/launch, takeover, git_action, viewer) never read the snapshot.
 - **Fresh's idle CPU was our own plugin.** `selection_share.ts` ran a 400 ms `setInterval`
   (live-diff request poll), and every plugin action makes Fresh evaluate JS AND re-render,
   focused or not: ~2.5 renders/s and ~4 KB/s of log per editor. The log shows it (`grep -c

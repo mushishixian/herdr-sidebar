@@ -1578,6 +1578,15 @@ pub struct App {
     /// Seen focused on the previous tick: a false -> true transition refreshes
     /// at once.
     was_focused: bool,
+    /// Cached focus state (see `focus_state_now`): probed on the ensure hook's
+    /// focus stamp, the 5 s fallback, or the first tick — not every 400 ms.
+    focus_seen: u64,
+    focus_probed: Option<std::time::Instant>,
+    focus_cached: bool,
+    /// Snapshot stamp already processed by [`Self::poll_cwd_follow`].
+    cwd_follow_stamp: u64,
+    /// Paces the direct-fetch fallback of [`Self::poll_cwd_follow`].
+    cwd_follow_fallback: Option<std::time::Instant>,
     /// OS file-change watcher over the repos' work trees and git dirs
     /// (event-driven refresh, runs regardless of focus). `None` until started.
     fs_watch: Option<FsWatch>,
@@ -1735,6 +1744,11 @@ impl App {
             ),
             last_git_read: None,
             was_focused: false,
+            focus_seen: 0,
+            focus_probed: None,
+            focus_cached: true,
+            cwd_follow_stamp: 0,
+            cwd_follow_fallback: None,
             fs_watch: None,
             fs_watch_set: None,
             fs_watch_failed: false,
@@ -1979,7 +1993,6 @@ impl App {
         // pi's hook goes idle while a background subagent still runs: report
         // `working` for it from the persisted transcript.
         self.pi_state.report_if_due();
-        self.follow_sibling_cwd();
     }
 
     fn poll_unified_close(&mut self) -> bool {
@@ -2019,7 +2032,34 @@ impl App {
         herdr_sidebar::ipc::pane_focused(pane_id).unwrap_or(false)
     }
 
-    fn follow_sibling_cwd(&mut self) {
+    /// The pane's focus, cached: a live `pane.get` runs only when the ensure
+    /// hook's focus stamp moved (see [`herdr_sidebar::focus_signal`]), on the
+    /// 5 s fallback, or on the first call — the tick used to ask herdr every
+    /// 400 ms in every sidebar of the session. The focus→refresh behavior of
+    /// `tick` (`was_focused` / immediate read on gaining focus) is unchanged.
+    fn focus_state_now(&mut self) -> bool {
+        let stamp = herdr_sidebar::focus_signal::changed_since(self.focus_seen);
+        if herdr_sidebar::focus_signal::probe_due(
+            &mut self.focus_seen,
+            &mut self.focus_probed,
+            stamp,
+            std::time::Instant::now(),
+        ) {
+            self.focus_cached = self.pane_is_focused();
+        }
+        self.focus_cached
+    }
+
+    /// Keep the SCM view on the folder a sibling shell `cd`-ed into.
+    ///
+    /// Sampling is paced by the session's SHARED snapshot (the elected
+    /// reporter's `pane.list` beat): this runs on every loop turn but only
+    /// acts when the snapshot's stamp advances — one small file read per
+    /// turn, no request — so a `cd` lands within one leader beat plus one
+    /// loop turn, the same latency the old per-sidebar fetch had. Without a
+    /// fresh snapshot (no elected leader yet, or it died) a direct fetch
+    /// paced at 5 s keeps following.
+    fn poll_cwd_follow(&mut self) {
         if !self.sidebar_state.follow_cwd
             || self.overlay.is_some()
             || self.picking.is_some()
@@ -2031,13 +2071,32 @@ impl App {
             return;
         }
         let Some(ctl) = &self.pane_ctl else { return };
-        let Ok(panes) = herdr_sidebar::ipc::call_text("pane.list", serde_json::json!({})) else {
+        let pane_id = ctl.pane_id.clone();
+        let Some(sample) = herdr_sidebar::session_reporter::observer_sample() else {
             return;
         };
+        if sample.shared {
+            // Pace by the leader's beat: act once per snapshot advance.
+            if sample.stamp <= self.cwd_follow_stamp {
+                return;
+            }
+            self.cwd_follow_stamp = sample.stamp;
+            self.cwd_follow_fallback = None;
+        } else {
+            // No fresh snapshot (no elected leader yet, or it died): fetch
+            // directly, at most every 5 s — the pre-snapshot behavior.
+            if self
+                .cwd_follow_fallback
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5))
+            {
+                return;
+            }
+            self.cwd_follow_fallback = Some(std::time::Instant::now());
+        }
         let target = self
             .cwd_follower
             .borrow_mut()
-            .next_cwd(&panes, &ctl.pane_id, &self.cwd);
+            .next_cwd(&sample.body, &pane_id, &self.cwd);
         let Some(target) = target else { return };
         let target = PathBuf::from(target);
         if target == self.cwd || !target.is_dir() || std::env::set_current_dir(&target).is_err() {
@@ -2054,6 +2113,7 @@ impl App {
         self.collect_editor_failures();
         self.collect_fs_watch();
         self.poll_fetch();
+        self.poll_cwd_follow();
         let shared = sidebar::load_state();
         self.sidebar_state.custom_editor_on_click = shared.custom_editor_on_click;
         self.sidebar_state.custom_editor_inline = shared.custom_editor_inline;
@@ -2164,7 +2224,7 @@ impl App {
         // sidebar per IDE tab, and polling them all multiplied git processes. The
         // collections above still run at the loop cadence (finished AI-commit /
         // sync / suggestion work is never stranded).
-        let focused = self.background_refresh || self.pane_is_focused();
+        let focused = self.background_refresh || self.focus_state_now();
         if !focused {
             self.was_focused = false;
             return;

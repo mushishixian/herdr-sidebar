@@ -62,7 +62,7 @@ fn lock_path() -> Option<PathBuf> {
 /// FNV-1a over the socket path, so the name is stable across processes and
 /// Rust releases (`DefaultHasher` makes no such promise). Without a socket
 /// path every such process shares the one "default" name.
-fn session_hash() -> u64 {
+pub(crate) fn session_hash() -> u64 {
     let key = crate::ipc::socket_path()
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -90,6 +90,108 @@ fn try_acquire(path: &Path) -> std::io::Result<Option<File>> {
         Ok(()) => Ok(Some(file)),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+/// How far past its stamp a snapshot still serves the session's periodic
+/// observers. The leader beats every 5 s and a dead leader is replaced within
+/// one beat, so 10 s bridges a leadership transition; beyond that the callers
+/// are better off with their own fresh fetch.
+const SNAPSHOT_MAX_AGE_MS: u64 = 10_000;
+
+/// `<reporters>/pane-list-<session hash>.json`, the elected reporter's latest
+/// `pane.list` reply, shared with the session's other sidebar processes. The
+/// cwd follower, pi state and tab titles all read the same session-wide list
+/// on the same 5 s beat; before the snapshot each of them fetched its own, so
+/// the fleet cost scaled with the sidebar count instead of the session count.
+fn snapshot_path() -> Option<PathBuf> {
+    let dir = crate::rundir::dir("reporters");
+    Some(dir.join(format!("pane-list-{:016x}.json", session_hash())))
+}
+
+/// Publish a `pane.list` reply as this session's shared snapshot. Called by
+/// the ELECTED reporter right after its beat's fetch — the single writer, so
+/// temp-file + rename needs no locking. Failures are silent: readers fall
+/// back to their own fetch, which is exactly the pre-snapshot behavior.
+pub fn publish_pane_list(json: &str) {
+    let Some(path) = snapshot_path() else {
+        return;
+    };
+    publish_pane_list_at(&path, json, crate::focus_signal::unix_ms());
+}
+
+/// [`publish_pane_list`] against an explicit path, for tests.
+pub fn publish_pane_list_at(path: &Path, json: &str, now_ms: u64) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    if crate::rundir::ensure_private(dir).is_err() {
+        return;
+    }
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    if std::fs::write(&tmp, format!("{now_ms}\n{json}")).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    let _ = std::fs::rename(&tmp, path);
+}
+
+/// The latest snapshot when it is fresh enough, else one direct `pane.list`
+/// fetch. For PERIODIC observers only (cwd follower, pi state, tab titles):
+/// their data was already up to one beat old before the snapshot existed.
+/// Correctness-critical paths (launch decisions) always fetch directly.
+pub fn observer_pane_list() -> Option<String> {
+    observer_sample().map(|sample| sample.body)
+}
+
+/// One observer sample of the session's shared `pane.list`.
+pub struct ObserverSample {
+    /// The fetch's unix-ms stamp. [`ObserverSample::shared`] samples carry the
+    /// elected leader's fetch time, which advances once per beat; a direct
+    /// fetch carries this process's own fetch time.
+    pub stamp: u64,
+    /// The raw `pane.list` reply, verbatim.
+    pub body: String,
+    /// `true` when the body came from the shared snapshot; `false` when this
+    /// process had to fetch directly (no fresh snapshot — no elected leader
+    /// yet, or it just died). Callers pace the two cases differently.
+    pub shared: bool,
+}
+
+pub fn observer_sample() -> Option<ObserverSample> {
+    if let Some(path) = snapshot_path()
+        && let Ok(text) = std::fs::read_to_string(&path)
+        && let Some((stamp, body)) =
+            parse_snapshot(&text, crate::focus_signal::unix_ms(), SNAPSHOT_MAX_AGE_MS)
+    {
+        return Some(ObserverSample {
+            stamp,
+            body,
+            shared: true,
+        });
+    }
+    let body = crate::ipc::call_text("pane.list", serde_json::json!({})).ok()?;
+    Some(ObserverSample {
+        stamp: crate::focus_signal::unix_ms(),
+        body,
+        shared: false,
+    })
+}
+
+/// Pure: the first line is the fetch's unix milliseconds, the rest the raw
+/// reply verbatim. A future stamp (clock moved back), an over-aged one, a
+/// truncated or empty body all read as "no snapshot".
+fn parse_snapshot(text: &str, now_ms: u64, max_age_ms: u64) -> Option<(u64, String)> {
+    let (head, rest) = text.split_once('\n')?;
+    let stamp: u64 = head.trim().parse().ok()?;
+    if stamp > now_ms || now_ms - stamp > max_age_ms {
+        return None;
+    }
+    let rest = rest.trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some((stamp, rest.to_string()))
     }
 }
 
@@ -126,5 +228,38 @@ mod tests {
     #[test]
     fn session_hash_is_stable_for_one_socket_path() {
         assert_eq!(session_hash(), session_hash());
+    }
+
+    #[test]
+    fn snapshot_round_trips_verbatim_while_fresh() {
+        let path = scratch_lock("snapshot").with_file_name("pane-list.json");
+        publish_pane_list_at(&path, r#"{"result":{"panes":[]}}"#, 1_000);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            parse_snapshot(&text, 1_500, SNAPSHOT_MAX_AGE_MS),
+            Some((1_000, r#"{"result":{"panes":[]}}"#.to_string()))
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_over_aged_or_future_snapshot_is_rejected() {
+        let text = "1000\n{\"panes\":[]}\n";
+        // Exactly max_age is still fresh; one millisecond more is not.
+        assert_eq!(
+            parse_snapshot(text, 1_000 + SNAPSHOT_MAX_AGE_MS, SNAPSHOT_MAX_AGE_MS),
+            Some((1_000, "{\"panes\":[]}".to_string()))
+        );
+        assert_eq!(parse_snapshot(text, 1_000 + SNAPSHOT_MAX_AGE_MS + 1, SNAPSHOT_MAX_AGE_MS), None);
+        // A stamp from a clock that moved backwards can never age into range.
+        assert_eq!(parse_snapshot(text, 500, SNAPSHOT_MAX_AGE_MS), None);
+    }
+
+    #[test]
+    fn a_truncated_or_corrupt_snapshot_is_rejected() {
+        assert_eq!(parse_snapshot("", 1_000, SNAPSHOT_MAX_AGE_MS), None);
+        assert_eq!(parse_snapshot("no number\n{}", 1_000, SNAPSHOT_MAX_AGE_MS), None);
+        assert_eq!(parse_snapshot("1000\n", 1_000, SNAPSHOT_MAX_AGE_MS), None);
+        assert_eq!(parse_snapshot("1000\n   \n", 1_000, SNAPSHOT_MAX_AGE_MS), None);
     }
 }

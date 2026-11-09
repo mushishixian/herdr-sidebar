@@ -408,6 +408,12 @@ pub fn run(mode: Mode) -> std::io::Result<()> {
         Mode::Activate(target) => target.pane_view(state.merged),
     };
     let event_json = std::env::var("HERDR_PLUGIN_EVENT_JSON").unwrap_or_default();
+    // Every hook event is a potential focus change: stamp it BEFORE anything
+    // can return early (auto-open gate, launcher lock), so the sidebars probe
+    // their own focus once per burst instead of polling `pane.get` on a fixed
+    // cadence. Even a hook invocation that skips its launcher work below has
+    // reported the change by then. See `focus_signal`.
+    crate::focus_signal::write_stamp(crate::focus_signal::unix_ms());
     let creation_event = !explicit
         && matches!(
             launch::event_kind(&event_json).as_str(),

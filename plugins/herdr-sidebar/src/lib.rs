@@ -19,6 +19,7 @@ pub mod ensure;
 pub mod file_popup;
 pub mod file_search;
 pub mod fontsetup;
+pub mod focus_signal;
 pub mod fswatch;
 pub mod git;
 pub mod git_action;
