@@ -290,7 +290,7 @@ command = ["./target/release/herdr-sidebar", "--git-popup-open", "rename"]
 id = "git-merge-branch"
 platforms = ["linux", "macos"]
 title = "Merge branch into current"
-description = "Popup: pick a branch and merge it into the current branch."
+description = "Popup: pick a branch and merge it into the current branch; Tab merges the current branch into the picked one."
 command = ["./target/release/herdr-sidebar", "--git-popup-open", "merge"]
 
 [[actions]]

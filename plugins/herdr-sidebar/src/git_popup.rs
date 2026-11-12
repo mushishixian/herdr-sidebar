@@ -11,7 +11,9 @@
 //!   A name that matches no local branch can be created on the spot.
 //! - rename: edit the current branch's name.
 //! - merge: pick a branch and confirm; merges it into the current branch and
-//!   shows git's summary, or the conflicted files with an abort option.
+//!   shows git's summary, or the conflicted files with an abort option. Tab
+//!   flips the direction: the current branch is merged into the picked one
+//!   (local branches only), which is checked out first and stays checked out.
 //! - history: `git log -L` for a line range of one file (the Fresh editor
 //!   opens it directly with env vars; there is no action half). See
 //!   `HistoryApp`.
@@ -262,6 +264,9 @@ const MERGE_RESULT_DWELL: Duration = Duration::from_secs(1);
 
 struct App {
     op: Op,
+    /// Merge popup direction: false merges the picked branch into the current
+    /// one; true merges the current branch into the picked (local) one.
+    merge_into_selected: bool,
     git: Option<Git>,
     current: Option<String>,
     branches: Vec<Branch>,
@@ -291,6 +296,7 @@ impl App {
     fn new(op: Op, git: Result<Git, String>) -> App {
         let mut app = App {
             op,
+            merge_into_selected: false,
             git: None,
             current: None,
             branches: Vec::new(),
@@ -384,6 +390,9 @@ impl App {
             self.branches
                 .iter()
                 .filter(|b| !(self.op == Op::Merge && b.current))
+                // Merging current into a branch requires checking that branch
+                // out, so a remote-tracking ref cannot be a target.
+                .filter(|b| !(self.op == Op::Merge && self.merge_into_selected && b.remote))
                 .filter(|b| query.is_empty() || b.name.to_lowercase().contains(&query))
                 .cloned()
                 .map(Row::Branch),
@@ -444,6 +453,7 @@ impl App {
             // Esc first drops an armed Ctrl+A selection, then closes.
             KeyCode::Esc if self.select_all.armed() => self.select_all.disarm(),
             KeyCode::Esc => self.done = true,
+            KeyCode::Tab if self.op == Op::Merge => self.toggle_merge_direction(),
             KeyCode::Enter => self.activate(self.selected),
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => self.selected = (self.selected + 1).min(rows.saturating_sub(1)),
@@ -647,26 +657,40 @@ impl App {
 
     fn merge(&mut self, branch: &Branch) {
         let Some(git) = self.git.clone() else { return };
-        let into = self.current.clone().unwrap_or_else(|| "HEAD".into());
-        match git.merge_branch(&branch.name) {
+        let current = self.current.clone().unwrap_or_else(|| "HEAD".into());
+        if self.merge_into_selected {
+            // The target has to be checked out for git to merge into it (and
+            // for conflicts to be resolvable in this worktree), so the popup
+            // leaves the user on it.
+            let outcome = git.merge_into_branch(&branch.name, &current);
+            self.finish_merge(&current, &branch.name, outcome);
+        } else {
+            let outcome = git.merge_branch(&branch.name);
+            self.finish_merge(&branch.name, &current, outcome);
+        }
+    }
+
+    /// The summary / conflict screen both merge directions share. `from` is the
+    /// branch whose commits go in, `into` the branch that gains them.
+    fn finish_merge(&mut self, from: &str, into: &str, outcome: Result<MergeOutcome, String>) {
+        match outcome {
             Ok(MergeOutcome::Done(summary)) => {
                 let mut lines = vec![Line::from(Span::styled(
-                    format!("✓ Merged {} into {into}", branch.name),
+                    format!("✓ Merged {from} into {into}"),
                     Style::default()
                         .fg(palette().added)
                         .add_modifier(Modifier::BOLD),
                 ))];
                 lines.push(Line::default());
                 lines.extend(summary.lines().map(|line| Line::from(line.to_string())));
-                self.toast = Some(("Merged".into(), format!("{} → {into}", branch.name)));
+                self.toast = Some(("Merged".into(), format!("{from} → {into}")));
                 self.auto_close = Some(Instant::now() + MERGE_RESULT_DWELL);
                 self.message(lines, false);
             }
             Ok(MergeOutcome::Conflicts(files)) => {
                 let mut lines = vec![Line::from(Span::styled(
                     format!(
-                        "Merging {} into {into} stopped with {} conflicted file{}:",
-                        branch.name,
+                        "Merging {from} into {into} stopped with {} conflicted file{}:",
                         files.len(),
                         if files.len() == 1 { "" } else { "s" }
                     ),
@@ -693,6 +717,15 @@ impl App {
                 self.error = Some(error);
             }
         }
+    }
+
+    /// Tab in the merge popup: flip between "picked → current" and
+    /// "current → picked". Remote-tracking refs drop out of the list in the
+    /// reverse direction because they cannot be checked out and merged into.
+    fn toggle_merge_direction(&mut self) {
+        self.merge_into_selected = !self.merge_into_selected;
+        self.error = None;
+        self.selected = self.selected.min(self.rows().len().saturating_sub(1));
     }
 
     fn abort_merge(&mut self) {
@@ -740,6 +773,7 @@ impl App {
             Op::Switch => "Switch branch",
             Op::New => "New branch",
             Op::Rename => "Rename branch",
+            Op::Merge if self.merge_into_selected => "Merge current into selected branch",
             Op::Merge => "Merge into current branch",
             Op::History => "Line history",
         };
@@ -827,7 +861,7 @@ impl App {
 
         let hint = match self.op {
             Op::Switch => " ↑↓ select · ⏎ switch · esc cancel",
-            Op::Merge => " ↑↓ select · ⏎ merge · esc cancel",
+            Op::Merge => " ↑↓ select · ⏎ merge · tab direction · esc cancel",
             Op::Rename => " ⏎ rename · ctrl+a select · ctrl+c copy · esc cancel",
             Op::New => " ⏎ create and switch · ctrl+c copy · esc cancel",
             Op::History => "",
@@ -1619,6 +1653,60 @@ mod tests {
             1,
             "filter is case-insensitive, never creates"
         );
+    }
+
+    #[test]
+    fn tab_flips_merge_direction_and_remote_targets_cannot_be_picked() {
+        let mut merge = app(Op::Merge);
+        assert!(!merge.merge_into_selected);
+        merge.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(merge.merge_into_selected, "Tab flips the direction");
+        let names: Vec<String> = merge
+            .rows()
+            .into_iter()
+            .map(|row| match row {
+                Row::Branch(b) => b.name,
+                Row::Create(name) => format!("create {name}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["feature/login"],
+            "only local branches can be checked out and merged into"
+        );
+        merge.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(!merge.merge_into_selected, "Tab flips back");
+        assert_eq!(merge.rows().len(), 3);
+    }
+
+    #[test]
+    fn merge_title_and_hint_name_the_direction() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let screen = |merge: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            terminal.draw(|frame| merge.draw(frame)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        let mut merge = app(Op::Merge);
+        let text = screen(&mut merge);
+        assert!(text.contains("Merge into current branch"), "{text}");
+        assert!(text.contains("tab direction"), "{text}");
+
+        merge.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let text = screen(&mut merge);
+        assert!(
+            text.contains("Merge current into selected branch"),
+            "{text}"
+        );
+        assert!(text.contains("tab direction"), "{text}");
     }
 
     #[test]

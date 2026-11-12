@@ -1140,6 +1140,15 @@ impl Git {
             .map(|_| MergeOutcome::Done(String::new()))
     }
 
+    /// Check `target` out and merge `source` into it. The checkout stays on
+    /// `target`: that is where a conflict must be resolved or aborted, and
+    /// where the merge's result is meant to be pushed from.
+    pub fn merge_into_branch(&self, target: &str, source: &str) -> Result<MergeOutcome, String> {
+        run_in(&self.root, &["checkout", "--end-of-options", target])?;
+        self.merge_branch(source)
+            .map_err(|error| format!("{error} (now on {target})"))
+    }
+
     pub fn merge_in_progress(&self) -> bool {
         run_in(&self.root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
     }
@@ -3189,6 +3198,32 @@ mod tests {
         git.merge_abort().unwrap();
         assert!(!git.merge_in_progress());
         assert!(git.merge_branch("no-such-branch").is_err());
+        let _ = std::fs::remove_dir_all(&git.root);
+    }
+
+    /// The reverse direction: check the target out, merge the branch we came
+    /// from into it, and stay there — HEAD, worktree and ref all follow.
+    #[test]
+    fn merge_into_branch_checks_out_the_target_and_keeps_it() {
+        let git = repo_with_head("merge-into");
+        let main = git.current_branch().unwrap();
+        commit_file(&git, "base.txt", "base\n", "base");
+        run_in(&git.root, &["switch", "-q", "-c", "topic"]).unwrap();
+        commit_file(&git, "topic.txt", "topic\n", "topic");
+
+        assert!(matches!(
+            git.merge_into_branch(&main, "topic"),
+            Ok(MergeOutcome::Done(_))
+        ));
+        assert_eq!(git.current_branch().as_deref(), Some(main.as_str()));
+        assert!(
+            git.root.join("topic.txt").exists(),
+            "the target worktree carries the merge"
+        );
+        assert!(
+            run_in(&git.root, &["merge-base", "--is-ancestor", "topic", &main]).is_ok(),
+            "the target branch gained the source commit"
+        );
         let _ = std::fs::remove_dir_all(&git.root);
     }
 

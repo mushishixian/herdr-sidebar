@@ -160,6 +160,7 @@ height = "90%"
 # ---- 分支操作：一个操作一个键、一个专用小弹窗（顶上就是过滤框）----
 # 键位对着原 Zed：ctrl-alt-c = git::Branch（切分支）、ctrl-alt-x = task "Git: Merge Branch"。
 # 都走插件弹窗：切换时可以输入新名字直接建；合并选中分支按一次 ⏎ 就合并，
+# 合并弹窗里按 Tab 反向（把当前分支合并到选中分支，会先切到选中分支并留在那里），
 # 冲突时结果屏里按 a 可以 merge --abort。（scripts/ 里 branch-switch.sh、
 # branch-merge.sh、rename-branch.sh 是同功能的 fzf 老版本，想用就重绑。）
 [[keys.command]]
@@ -172,7 +173,7 @@ description = "切换分支 · 模糊搜索弹窗，也可输入新名字"
 key = "ctrl+alt+x"
 type = "plugin_action"
 command = "herdr-sidebar.git-merge-branch"
-description = "合并分支到当前 · 插件弹窗（一次 ⏎ 直接合并）"
+description = "合并分支 · 插件弹窗（⏎ 合并到当前，Tab 反向合并）"
 
 # ---- 原 Zed: ctrl-alt-r → git::RenameBranch ----
 [[keys.command]]

@@ -1874,6 +1874,10 @@ message says so.
   conflict message screen stays, and conflicts still offer `a` for `merge --abort`. A clean
   merge's summary is only a confirmation, so it closes itself after `MERGE_RESULT_DWELL`
   (1 s, capped into the event poll); the conflict screen has no deadline and waits for a key.
+  **Tab in the merge popup flips the direction** (user-requested): the current branch goes into
+  the picked one. That needs a checkout first, so remote-tracking refs are filtered out and
+  `Git::merge_into_branch` checks the target out and leaves the user ON it (conflicts are
+  resolved/aborted there); the popup title and footer name the active direction.
 - **A moved branch is detected by reading the git dir, never by polling git.** The branch
   popups are separate processes, so they cannot tell the sidebar; `Git::head_signature` is a
   string the views compare, built from three small file reads (and it resolves a worktree's
